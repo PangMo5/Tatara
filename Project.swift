@@ -1,0 +1,55 @@
+// SPDX-FileCopyrightText: 2026 PangMo5 and contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+
+import ProjectDescription
+
+let appVersion = "0.1.0"
+let platforms: DeploymentTargets = .macOS("15.0")
+
+func library(_ name: String, dependencies: [TargetDependency] = []) -> Target {
+  .target(
+    name: name, destinations: .macOS, product: .staticFramework,
+    bundleId: "dev.PangMo5.\(name)", deploymentTargets: platforms,
+    sources: ["\(name)/Sources/**"], dependencies: dependencies,
+  )
+}
+
+let project = Project(
+  name: "Tatara", organizationName: "PangMo5",
+  options: .options(
+    defaultKnownRegions: ["en", "ko", "ja", "zh-Hans", "zh-Hant"], developmentRegion: "en",
+  ),
+  settings: .settings(base: [
+    "SWIFT_VERSION": "6.0", "SWIFT_STRICT_CONCURRENCY": "complete",
+    "SWIFT_DEFAULT_ACTOR_ISOLATION": "nonisolated",
+    "SWIFT_EMIT_LOC_STRINGS": "YES", "CODE_SIGN_IDENTITY": "-",
+    "DEAD_CODE_STRIPPING": "YES",
+  ]),
+  targets: [
+    library("TataraCore"),
+    library("TataraKit", dependencies: [.target(name: "TataraCore"), .external(name: "ComposableArchitecture")]),
+    library("TataraSystem", dependencies: [.target(name: "TataraKit"), .external(name: "Subprocess"), .external(name: "TOML")]),
+    library("TataraGitHub", dependencies: [.target(name: "TataraSystem")]),
+    .target(
+      name: "Tatara", destinations: .macOS, product: .commandLineTool,
+      bundleId: "dev.PangMo5.tatara", deploymentTargets: platforms,
+      sources: ["TataraTUI/Sources/**"],
+      scripts: [.pre(
+        script: "python3 \"$SRCROOT/Scripts/generate-localizations.py\" --check",
+        name: "Validate String Catalog",
+        basedOnDependencyAnalysis: false,
+      )],
+      dependencies: [.target(name: "TataraGitHub"), .external(name: "SwiftTUI")],
+      settings: .settings(base: [
+        "PRODUCT_NAME": "tatara", "GENERATE_INFOPLIST_FILE": "YES",
+        "CREATE_INFOPLIST_SECTION_IN_BINARY": "YES", "MARKETING_VERSION": .string(appVersion),
+      ]),
+    ),
+    .target(
+      name: "TataraTests", destinations: .macOS, product: .unitTests,
+      bundleId: "dev.PangMo5.Tatara.Tests", deploymentTargets: platforms,
+      sources: ["TataraTests/Sources/**"],
+      dependencies: [.target(name: "TataraGitHub"), .external(name: "ComposableArchitecture")],
+    ),
+  ],
+)

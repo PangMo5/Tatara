@@ -1,0 +1,15 @@
+.DS_Store
+.build/
+Derived/
+DerivedData/
+*.xcodeproj/
+*.xcworkspace/
+Tuist/.build/
+.mise.local.toml
+dist/
+.artifacts/
+*.xcresult/
+test.log
+downloaded/
+
+__pycache__/

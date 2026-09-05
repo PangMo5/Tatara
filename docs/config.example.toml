@@ -1,0 +1,7 @@
+theme = "mocha" # latte, frappe, macchiato, mocha
+language = "en" # en, ko, ja, zh-Hans, zh-Hant
+
+# Each override replaces that action's bindings. Duplicates are an error.
+# Single characters are case-sensitive. gg is the supported two-key motion.
+[keys]
+quit = ["Q"]

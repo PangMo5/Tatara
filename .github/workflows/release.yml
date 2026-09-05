@@ -1,0 +1,142 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+  build:
+    needs: verify
+    runs-on: macos-26
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, x86_64]
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: jdx/mise-action@v4
+      - name: Validate tag and source
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          test "$RELEASE_TAG" = "v$(python3 Scripts/version.py)"
+          git merge-base --is-ancestor HEAD origin/main
+          python3 Scripts/release-notes.py > release-notes.md
+      - name: Import signing certificate
+        env:
+          CERT_P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$CERT_P12_BASE64"
+          keychain="$RUNNER_TEMP/tatara.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          printf '%s' "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$keychain"
+          security list-keychains -d user -s "$keychain"
+      - name: Build executable
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          tuist install
+          tuist generate --no-open
+          xcodebuild build -workspace Tatara.xcworkspace -scheme Tatara \
+            -configuration Release -destination 'generic/platform=macOS' \
+            -derivedDataPath DerivedData ARCHS="$ARCH" ONLY_ACTIVE_ARCH=NO CODE_SIGNING_ALLOWED=NO
+          codesign --force --sign 'Developer ID Application' --options runtime --timestamp \
+            DerivedData/Build/Products/Release/tatara
+          codesign --verify --strict --verbose=2 DerivedData/Build/Products/Release/tatara
+      - name: Notarize
+        env:
+          AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
+          AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+          AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$AC_API_KEY_P8" > "$RUNNER_TEMP/notary.p8"
+          ditto -c -k DerivedData/Build/Products/Release/tatara "$RUNNER_TEMP/tatara.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/tatara.zip" --key "$RUNNER_TEMP/notary.p8" \
+            --key-id "$AC_API_KEY_ID" --issuer "$AC_API_ISSUER_ID" --wait --output-format json > notarization.json
+          python3 -c 'import json; assert json.load(open("notarization.json"))["status"] == "Accepted"'
+      - name: Package
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: bash Scripts/package-release.sh DerivedData/Build/Products/Release "$ARCH" dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.arch }}
+          path: dist/*.tar.gz
+      - name: Remove temporary signing material
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/notary.p8"
+          if [ -f "$RUNNER_TEMP/tatara.keychain-db" ]; then security delete-keychain "$RUNNER_TEMP/tatara.keychain-db"; fi
+  publish:
+    needs: build
+    runs-on: macos-26
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: Assemble source, checksums and formula
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version=$(python3 Scripts/version.py)
+          git archive --format=tar.gz --prefix="Tatara-$version/" HEAD > "dist/Tatara-$version-source.tar.gz"
+          python3 Scripts/generate-formula.py dist dist/tatara.rb
+          python3 Scripts/release-notes.py > dist/release-notes.md
+          cd dist
+          shasum -a 256 ./*.tar.gz > SHA256SUMS
+      - name: Publish immutable release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" dist/*.tar.gz dist/SHA256SUMS dist/tatara.rb \
+            --verify-tag --title "$RELEASE_TAG" --notes-file dist/release-notes.md
+      - name: Verify public checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release download "$RELEASE_TAG" --pattern '*.tar.gz' --pattern SHA256SUMS --dir downloaded
+          cd downloaded
+          shasum -a 256 -c SHA256SUMS
+      - name: Update Homebrew formula
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          test -n "$GH_TOKEN"
+          gh auth setup-git
+          git clone https://github.com/PangMo5/homebrew-tap.git "$RUNNER_TEMP/tap"
+          mkdir -p "$RUNNER_TEMP/tap/Formula"
+          cp dist/tatara.rb "$RUNNER_TEMP/tap/Formula/tatara.rb"
+          cd "$RUNNER_TEMP/tap"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Formula/tatara.rb
+          git commit -m "Update Tatara formula"
+          git push

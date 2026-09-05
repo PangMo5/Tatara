@@ -1,0 +1,20 @@
+name: Bug report
+description: Report unexpected behavior in Tatara
+body:
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Tatara, macOS, terminal, gh and difft versions. Redact private data.

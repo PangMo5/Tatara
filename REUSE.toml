@@ -1,0 +1,13 @@
+version = 1
+
+[[annotations]]
+path = ["**", ".*"]
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 PangMo5 and contributors"
+SPDX-License-Identifier = "AGPL-3.0-only"
+
+[[annotations]]
+path = "Tuist/Package.resolved"
+precedence = "override"
+SPDX-FileCopyrightText = "NONE"
+SPDX-License-Identifier = "CC0-1.0"

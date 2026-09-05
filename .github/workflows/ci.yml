@@ -1,0 +1,54 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v6
+      - uses: jdx/mise-action@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Toolchain
+        run: swift --version
+      - name: Resolve and generate
+        run: |
+          tuist install
+          git diff --exit-code -- Tuist/Package.resolved
+          tuist generate --no-open
+      - name: Formatting, localization and notices
+        run: |
+          swiftformat TataraCore TataraKit TataraSystem TataraGitHub TataraTUI TataraTests Project.swift Tuist/Package.swift --lint
+          python3 Scripts/generate-localizations.py --check
+          python3 Scripts/generate-notices.py --check
+          uvx --from 'reuse[charset-normalizer]' reuse lint
+      - name: Test
+        run: |
+          set -o pipefail
+          xcodebuild test -workspace Tatara.xcworkspace -scheme Tatara \
+            -destination 'platform=macOS' -derivedDataPath DerivedData \
+            -resultBundlePath TestResults.xcresult | tee test.log
+          python3 Scripts/check-tests.py test.log
+      - name: PTY runtime
+        run: uv run --with pyte python Scripts/test-pty.py DerivedData/Build/Products/Debug/tatara
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: validation
+          path: |
+            TestResults.xcresult
+            .artifacts/pty/
+            test.log
