@@ -30,16 +30,17 @@ let project = Project(
     library("TataraKit", dependencies: [.target(name: "TataraCore"), .external(name: "ComposableArchitecture")]),
     library("TataraSystem", dependencies: [.target(name: "TataraKit"), .external(name: "Subprocess"), .external(name: "TOML")]),
     library("TataraGitHub", dependencies: [.target(name: "TataraSystem")]),
+    library("TataraPersistence", dependencies: [.target(name: "TataraKit"), .external(name: "SQLiteData")]),
     .target(
       name: "Tatara", destinations: .macOS, product: .commandLineTool,
       bundleId: "dev.PangMo5.tatara", deploymentTargets: platforms,
       sources: ["TataraTUI/Sources/**"],
       scripts: [.pre(
-        script: "python3 \"$SRCROOT/Scripts/generate-localizations.py\" --check",
+        script: "swift \"$SRCROOT/Scripts/Tatara.swift\" localizations --check",
         name: "Validate String Catalog",
         basedOnDependencyAnalysis: false,
       )],
-      dependencies: [.target(name: "TataraGitHub"), .external(name: "SwiftTUI")],
+      dependencies: [.target(name: "TataraGitHub"), .target(name: "TataraPersistence"), .external(name: "SwiftTUI")],
       settings: .settings(base: [
         "PRODUCT_NAME": "tatara", "GENERATE_INFOPLIST_FILE": "YES",
         "CREATE_INFOPLIST_SECTION_IN_BINARY": "YES", "MARKETING_VERSION": .string(appVersion),
@@ -48,8 +49,14 @@ let project = Project(
     .target(
       name: "TataraTests", destinations: .macOS, product: .unitTests,
       bundleId: "dev.PangMo5.Tatara.Tests", deploymentTargets: platforms,
-      sources: ["TataraTests/Sources/**"],
-      dependencies: [.target(name: "TataraGitHub"), .external(name: "ComposableArchitecture")],
+      // Exercise the stateless renderer without linking the executable entry point.
+      sources: ["TataraTests/Sources/**", "TataraTUI/Sources/DocumentRenderer.swift"],
+      dependencies: [
+        .target(name: "TataraGitHub"),
+        .target(name: "TataraPersistence"),
+        .external(name: "ComposableArchitecture"),
+        .external(name: "SwiftTUI"),
+      ],
     ),
   ],
 )

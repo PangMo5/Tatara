@@ -5,16 +5,19 @@ swiftformat = "0.62.1"
 "aqua:Wilfred/difftastic" = "0.69.0"
 
 [tasks.generate]
-run = "tuist install && tuist generate --no-open"
+run = "swift Scripts/Tatara.swift generate"
 
 [tasks.build]
-run = "xcodebuild build -workspace Tatara.xcworkspace -scheme Tatara -configuration Debug -destination 'platform=macOS' -derivedDataPath DerivedData"
+run = "swift Scripts/Tatara.swift build"
 
 [tasks.test]
-run = "xcodebuild test -workspace Tatara.xcworkspace -scheme Tatara -destination 'platform=macOS' -derivedDataPath DerivedData"
+run = "swift Scripts/Tatara.swift test"
 
 [tasks.run]
 run = "DerivedData/Build/Products/Debug/tatara"
 
 [tasks.format]
-run = "swiftformat TataraCore TataraKit TataraGitHub TataraSystem TataraTUI TataraTests Project.swift Tuist/Package.swift"
+run = "swift Scripts/Tatara.swift format"
+
+[tasks.smoke]
+run = "swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara --workspace"

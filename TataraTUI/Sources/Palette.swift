@@ -108,10 +108,27 @@ struct Palette {
   }
 
   @MainActor
-  func styled(_ spans: [DiffSpan]) -> Text {
-    var content = Text.StringInterpolation(literalCapacity: 0, interpolationCount: spans.count)
-    for span in spans {
-      content.appendInterpolation(Text(span.text).foregroundStyle(ansi(span.color)).bold(span.bold))
+  func viewport(
+    _ lines: [[DiffSpan]],
+    offset: Int,
+    count: Int,
+    matches: Set<Int>,
+    selectedRows: Set<Int> = [],
+    selectedSide: InlineComment.Side = .right,
+  ) -> Text {
+    var content = Text.StringInterpolation(literalCapacity: 0, interpolationCount: count)
+    for (row, spans) in lines.dropFirst(offset).prefix(count).enumerated() {
+      if row > 0 {
+        content.appendLiteral("\n")
+      }
+      let highlighted = matches.contains(offset + row)
+      for span in spans {
+        var fragment = Text(span.text).foregroundStyle(ansi(span.color)).bold(span.bold || highlighted).underline(highlighted)
+        if selectedRows.contains(row), span.side == selectedSide {
+          fragment = fragment.cellBackground(surface)
+        }
+        content.appendInterpolation(fragment)
+      }
     }
     return Text(Text.RichContent(stringInterpolation: content))
   }

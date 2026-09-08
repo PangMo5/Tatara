@@ -8,8 +8,10 @@ import TataraSystem
 
 public struct GitHubAdapter: Sendable {
   public let runner: CommandRunner
-  public init(runner: CommandRunner = .live) {
+  public let cache: CacheClient
+  public init(runner: CommandRunner = .live, cache: CacheClient = .disabled) {
     self.runner = runner
+    self.cache = cache
   }
 
   public var capabilities: ForgeCapabilities {
@@ -17,7 +19,28 @@ public struct GitHubAdapter: Sendable {
   }
 
   public var client: ForgeClient {
-    ForgeClient(list: list, detail: detail, content: content, submit: submit)
+    ForgeClient(
+      invalidate: { try await cache.invalidate(Self.metadataNamespace($0)) },
+      list: list,
+      search: search,
+      detail: detail,
+      content: content,
+      submit: submit,
+    )
+  }
+
+  public func accountIdentifier(host: String) async throws -> String {
+    let value = try await runner.checked("gh", ["api", "--hostname", host, "user", "--jq", ".id"]).text
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !value.isEmpty, value.allSatisfy(\.isNumber) else { throw TataraError(
+      .invalidResponse,
+      detail: "Missing GitHub account identity.",
+    ) }
+    return value
+  }
+
+  private static func metadataNamespace(_ repository: RepositoryID) -> String {
+    "metadata-v1:\(repository)"
   }
 
   public func detectRepository(host: String? = nil) async throws -> RepositoryID {
@@ -32,23 +55,79 @@ public struct GitHubAdapter: Sendable {
     return try RepositoryID(value.nameWithOwner, host: resolvedHost)
   }
 
+  @concurrent
   public func list(_ repository: RepositoryID, _ kind: ItemKind, _ page: Int) async throws -> ItemPage {
+    let key = "list:\(kind):\(page)"
+    if let data = try await cache.read(Self.metadataNamespace(repository), key, 30) {
+      return try JSONDecoder().decode(
+        ItemPage.self,
+        from: data,
+      )
+    }
     let collection = kind == .pullRequest ? "pulls" : "issues"
     let values: [ItemDTO] = try await get(
       repository,
       "\(collection)?state=open&sort=updated&direction=desc&per_page=100&page=\(page)",
     )
     let items = values.filter { kind != .issue || $0.pullRequest == nil }.map { $0.model(repository, kind) }
-    return ItemPage(items: items, nextPage: values.count == 100 ? page + 1 : nil)
+    let result = ItemPage(items: items, nextPage: values.count == 100 ? page + 1 : nil)
+    try await cache.write(Self.metadataNamespace(repository), key, JSONEncoder().encode(result))
+    return result
   }
 
+  @concurrent
+  public func search(_ repository: RepositoryID, _ kind: ItemKind, _ query: String, _ page: Int) async throws -> ItemPage {
+    struct Results: Decodable {
+      let total_count: Int
+      let incomplete_results: Bool
+      let items: [ItemDTO]
+    }
+    let key = "search:\(kind):\(query):\(page)"
+    if let data = try await cache.read(Self.metadataNamespace(repository), key, 30) {
+      return try JSONDecoder().decode(ItemPage.self, from: data)
+    }
+    let q = "repo:\(repository.slug) is:\(kind == .pullRequest ? "pr" : "issue") \(query)"
+    let output = try await runner.checked("gh", ["api", "--hostname", repository.host, "--method", "GET", "search/issues",
+                                                 "-f", "q=\(q)", "-f", "sort=updated", "-f", "order=desc",
+                                                 "-f", "per_page=100", "-f", "page=\(page)"])
+    let result = try JSONDecoder().decode(Results.self, from: output.output)
+    guard !result.incomplete_results, result.total_count <= 1000 else {
+      throw TataraError(.incompleteResponse, detail: "Refine the search to at most 1,000 complete results.")
+    }
+    for item in result.items {
+      let path = item.htmlURL.path.split(separator: "/")
+      guard item.htmlURL.host?.lowercased() == repository.host.lowercased(), path.count >= 4,
+            "\(path[0])/\(path[1])".lowercased() == repository.slug.lowercased(),
+            path[2] == (kind == .pullRequest ? "pull" : "issues"), Int(path[3]) == item.number
+      else {
+        throw TataraError(.invalidResponse, detail: "The search escaped the selected repository or item kind.")
+      }
+    }
+    let value = ItemPage(
+      items: result.items.map { $0.model(repository, kind) },
+      nextPage: page * 100 < result.total_count ? page + 1 : nil,
+    )
+    try await cache.write(Self.metadataNamespace(repository), key, JSONEncoder().encode(value))
+    return value
+  }
+
+  @concurrent
   public func detail(_ item: ForgeItem) async throws -> ItemDetail {
     let repository = item.id.repository
     let number = item.id.number
+    let key = "detail:\(number)"
+    if let data = try await cache.read(Self.metadataNamespace(repository), key, 30) {
+      let result = try JSONDecoder().decode(ItemDetail.self, from: data)
+      if result.item.title == item.title, result.item.body == item.body, result.item.isDraft == item.isDraft {
+        return result
+      }
+    }
     async let comments: [CommentDTO] = pages(repository, "issues/\(number)/comments")
     if item.kind == .issue {
       let value: ItemDTO = try await get(repository, "issues/\(number)")
-      return try await ItemDetail(item: value.model(repository, .issue), comments: comments.map(\.model))
+      let result = try await ItemDetail(item: value.model(repository, .issue), comments: comments.map(\.model))
+      try await cache.write(Self.metadataNamespace(repository), key, JSONEncoder().encode(result))
+      return result
     }
     let value: PullRequestDTO = try await get(repository, "pulls/\(number)")
     async let files: [FileDTO] = pages(repository, "pulls/\(number)/files")
@@ -76,25 +155,33 @@ public struct GitHubAdapter: Sendable {
         + commitStatus.statuses.map { "\($0.context): \($0.state)" },
       reviews: reviewed.map { "@\($0.user?.login ?? "ghost"): \($0.state)" },
     )
-    return ItemDetail(
+    let result = ItemDetail(
       item: value.model(repository),
       revision: .init(mergeBase: compared.mergeBaseCommit.sha, head: value.head.sha),
       files: changed.map(\.model),
       comments: (conversation + discussions).map(\.model),
       metadata: .github(metadata),
     )
+    try await cache.write(Self.metadataNamespace(repository), key, JSONEncoder().encode(result))
+    return result
   }
 
   public func content(_ repository: RepositoryID, _ revision: String, _ path: String) async throws -> Data {
     guard revision.range(of: "^[a-fA-F0-9]{40,64}$", options: .regularExpression) != nil else {
       throw TataraError(.invalidResponse, detail: "Invalid Git object ID.")
     }
+    let namespace = "snapshot-v1:\(repository):\(revision)"
+    if let data = try await cache.read(namespace, path, nil) {
+      return data
+    }
     let escaped = path.split(separator: "/", omittingEmptySubsequences: false)
       .map { String($0).addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "" }.joined(separator: "/")
-    return try await runner.checked("gh", [
+    let result = try await runner.checked("gh", [
       "api", "--hostname", repository.host, "--method", "GET", "-H", "Accept: application/vnd.github.raw+json",
       "repos/\(repository.slug)/contents/\(escaped)?ref=\(revision)",
     ]).output
+    try await cache.write(namespace, path, result)
+    return result
   }
 
   public func submit(_ submission: ReviewSubmission) async throws {
@@ -110,6 +197,10 @@ public struct GitHubAdapter: Sendable {
     if submission.item.kind == .pullRequest {
       let current: PullRequestDTO = try await get(repository, "pulls/\(number)")
       guard current.head.sha == submission.expectedHead else { throw TataraError(.revisionChanged) }
+      if let expectedBase = submission.expectedMergeBase {
+        let comparison: CompareDTO = try await get(repository, "compare/\(current.base.sha)...\(current.head.sha)")
+        guard comparison.mergeBaseCommit.sha == expectedBase else { throw TataraError(.revisionChanged) }
+      }
       guard current.state == "open", !current.draft else { throw TataraError(
         .unavailable,
         detail: "The pull request is closed or a draft.",
@@ -129,6 +220,7 @@ public struct GitHubAdapter: Sendable {
       endpoint = "issues/\(number)/comments"
       payload = try JSONEncoder().encode(CommentPayload(body: submission.body))
     }
+    try await cache.invalidate(Self.metadataNamespace(repository))
     // The reviewed commit is part of the write itself. Never retry writes automatically.
     _ = try await runner.checked(
       "gh",
@@ -177,7 +269,11 @@ public struct GitHubAdapter: Sendable {
 private struct UserDTO: Decodable { var login: String }
 private struct LabelDTO: Decodable { var name: String }
 private struct ItemDTO: Decodable {
-  struct PullMarker: Decodable {}
+  struct PullMarker: Decodable {
+    var mergedAt: String?
+    enum CodingKeys: String, CodingKey { case mergedAt = "merged_at" }
+  }
+
   var number: Int
   var title: String
   var user: UserDTO?
@@ -199,7 +295,7 @@ private struct ItemDTO: Decodable {
       author: user?.login ?? "ghost",
       body: body ?? "",
       url: htmlURL,
-      state: state == "open" ? .open : .closed,
+      state: pullRequest?.mergedAt != nil ? .merged : state == "open" ? .open : .closed,
       labels: labels.map(\.name),
       isDraft: draft ?? false,
     )

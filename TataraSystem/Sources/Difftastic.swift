@@ -8,24 +8,61 @@ import TataraKit
 public actor Difftastic {
   private let forge: ForgeClient
   private let runner: CommandRunner
+  private let cache: CacheClient
+  private var engineVersion: String?
   private var snapshots: [String: Data] = [:]
   private var snapshotBytes = 0
-  private var renders: [String: String] = [:]
+  private struct RenderEntry {
+    let document: ReviewDiff
+    let bytes: Int
+    var access: Int
+  }
 
-  public init(forge: ForgeClient, runner: CommandRunner = .live) {
+  private var renders: [String: RenderEntry] = [:]
+  private var renderBytes = 0
+  private var access = 0
+  private let settle: @Sendable () async throws -> Void
+
+  public init(
+    forge: ForgeClient,
+    runner: CommandRunner = .live,
+    cache: CacheClient = .disabled,
+    settle: @escaping @Sendable () async throws -> Void = { try await Task.sleep(for: .milliseconds(80)) },
+  ) {
     self.forge = forge
     self.runner = runner
+    self.cache = cache
+    self.settle = settle
   }
 
   public nonisolated var client: DiffClient {
     DiffClient(render: { try await self.render($0) })
   }
 
-  public func render(_ request: DiffRequest) async throws -> String {
-    let key = "\(request.repository)|\(request.revision.mergeBase)|\(request.revision.head)|\(request.file.path)|\(request.width)|\(request.theme)"
-    if let cached = renders[key] {
-      return cached
+  public func render(_ request: DiffRequest) async throws -> ReviewDiff {
+    try Task.checkCancellation()
+    if engineVersion == nil {
+      engineVersion = try await runner.checked("difft", ["--version"]).text
     }
+    let key = try String(decoding: JSONEncoder().encode([
+      request.repository.description, request.revision.mergeBase, request.revision.head,
+      request.file.path, request.file.previousPath ?? "", request.file.status,
+      "json:context-3:strip-cr-off", engineVersion ?? "",
+    ]), as: UTF8.self)
+    if var cached = renders[key] {
+      access += 1
+      cached.access = access
+      renders[key] = cached
+      return cached.document
+    }
+    if let data = try await cache.read("diff-v3", key, nil) {
+      let document = try JSONDecoder().decode(ReviewDiff.self, from: data)
+      retain(document, for: key, bytes: data.count)
+      return document
+    }
+    // Only uncached work waits for a selection to settle. Cached previews return immediately.
+    try await settle()
+    try Task.checkCancellation()
     let file = request.file
     async let old = file.status == "added" ? Data() : content(
       request.repository,
@@ -35,6 +72,16 @@ public actor Difftastic {
     async let new = file.status == "removed" ? Data() : content(request.repository, request.revision.head, file.path)
     let (before, after) = try await (old, new)
     try Task.checkCancellation()
+    guard let beforeText = String(data: before, encoding: .utf8), let afterText = String(data: after, encoding: .utf8) else {
+      return .init(
+        path: request.file.path,
+        language: "Binary",
+        status: "binary",
+        rows: [],
+        revision: request.revision,
+        previousPath: request.file.previousPath,
+      )
+    }
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("tatara-\(UUID().uuidString)")
     try FileManager.default.createDirectory(
       at: directory,
@@ -50,20 +97,39 @@ public actor Difftastic {
     try before.write(to: oldURL)
     try after.write(to: newURL)
     let output = try await runner.checked("difft", [
-      "--color", "always", "--background", request.theme.isLight ? "light" : "dark",
-      "--display", request.width < 100 ? "inline" : "side-by-side-show-both",
-      "--width", String(max(20, request.width)), "--context", "3", "--syntax-highlight", "on",
+      "--display", "json", "--strip-cr", "off", "--context", "3",
       "--", oldURL.path, newURL.path,
     ])
-    // Retain difftastic's structure and syntax colors. Replace temporary names with source provenance.
-    let text = output.text.replacingOccurrences(of: oldURL.path, with: file.previousPath ?? file.path)
-      .replacingOccurrences(of: newURL.path, with: file.path)
+    let parsed = try ReviewDiff.decode(output.output, before: beforeText, after: afterText, path: file.path)
+    let document = ReviewDiff(
+      path: file.path,
+      language: parsed.language,
+      status: parsed.status,
+      rows: parsed.rows,
+      revision: request.revision,
+      previousPath: file.previousPath,
+      cacheIdentity: key,
+    )
+    let data = try JSONEncoder().encode(document)
     try Task.checkCancellation()
-    if renders.count >= 24 {
-      renders.removeAll(keepingCapacity: true)
+    retain(document, for: key, bytes: data.count)
+    try await cache.write("diff-v3", key, data)
+    return document
+  }
+
+  private func retain(_ document: ReviewDiff, for key: String, bytes: Int) {
+    guard bytes <= 32 * 1024 * 1024 else { return }
+    if let old = renders.removeValue(forKey: key) {
+      renderBytes -= old.bytes
     }
-    renders[key] = text
-    return text
+    while renders.count >= 24 || renderBytes + bytes > 32 * 1024 * 1024 {
+      guard let oldest = renders.min(by: { $0.value.access < $1.value.access })?.key,
+            let removed = renders.removeValue(forKey: oldest) else { break }
+      renderBytes -= removed.bytes
+    }
+    access += 1
+    renders[key] = .init(document: document, bytes: bytes, access: access)
+    renderBytes += bytes
   }
 
   private func content(_ repository: RepositoryID, _ revision: String, _ path: String) async throws -> Data {

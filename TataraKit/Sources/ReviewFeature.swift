@@ -11,6 +11,12 @@ public struct ReviewFeature {
     public var item: ForgeItem
     public var expectedHead: String?
     public var latestHead: String?
+    public var expectedMergeBase: String?
+    public var latestMergeBase: String?
+    public var revisionChanged: Bool {
+      expectedHead != latestHead || expectedMergeBase != latestMergeBase
+    }
+
     public var body = ""
     public var event = ReviewEvent.comment
     public var isConfirming = false
@@ -20,12 +26,31 @@ public struct ReviewFeature {
     public var comments: [InlineComment] = []
     public var isEditingInline = false
     public var inlineLine = ""
+    public var inlineStartLine = ""
+    public var inlineAnchorLocked = false
+    public var inlineDrafts: [String: String] = [:]
     public var inlineSide = InlineComment.Side.right
     public var inlineBody = ""
-    public init(item: ForgeItem, expectedHead: String?) {
+    private var inlineKey: String {
+      "\(selectedFile?.path ?? "")|\(inlineSide)|\(inlineStartLine)|\(inlineLine)"
+    }
+
+    public mutating func stashInlineDraft() {
+      if !inlineBody.isEmpty {
+        inlineDrafts[inlineKey] = inlineBody
+      }
+    }
+
+    public mutating func restoreInlineDraft() {
+      inlineBody = inlineDrafts[inlineKey] ?? ""
+    }
+
+    public init(item: ForgeItem, expectedHead: String?, expectedMergeBase: String? = nil) {
       self.item = item
       self.expectedHead = expectedHead
       latestHead = expectedHead
+      self.expectedMergeBase = expectedMergeBase
+      latestMergeBase = expectedMergeBase
     }
   }
 
@@ -36,6 +61,7 @@ public struct ReviewFeature {
     case editButtonPressed
     case submitButtonPressed
     case inlineLineChanged(String)
+    case inlineStartLineChanged(String)
     case inlineSideSelected(InlineComment.Side)
     case inlineBodyChanged(String)
     case addInlineButtonPressed
@@ -54,11 +80,14 @@ public struct ReviewFeature {
     Reduce { state, action in
       switch action {
       case .reviewLatestRevisionButtonPressed:
-        guard !state.isSubmitting, state.latestHead != state.expectedHead else { return .none }
+        guard !state.isSubmitting, state.revisionChanged else { return .none }
         state.expectedHead = state.latestHead
+        state.expectedMergeBase = state.latestMergeBase
         state.comments = []
         state.inlineBody = ""
         state.inlineLine = ""
+        state.inlineStartLine = ""
+        state.inlineDrafts = [:]
         state.isEditingInline = false
         state.isConfirming = false
         state.error = nil
@@ -66,6 +95,9 @@ public struct ReviewFeature {
       case .cancelButtonPressed:
         return state.isSubmitting ? .none : .send(.delegate(.dismissed))
       case let .inlineLineChanged(line): state.inlineLine = line
+        state.error = nil
+        return .none
+      case let .inlineStartLineChanged(line): state.inlineStartLine = line
         state.error = nil
         return .none
       case let .inlineSideSelected(side): state.inlineSide = side
@@ -76,7 +108,8 @@ public struct ReviewFeature {
         return .none
       case .addInlineButtonPressed:
         guard let file = state.selectedFile, let line = Int(state.inlineLine),
-              ReviewAnchor.contains(line: line, side: state.inlineSide, patch: file.patch)
+              let start = state.inlineStartLine.isEmpty ? line : Int(state.inlineStartLine), start > 0, start <= line,
+              ReviewAnchor.contains(range: start ... line, side: state.inlineSide, patch: file.patch)
         else { state.error = .init(.invalidLine)
           return .none
         }
@@ -84,10 +117,18 @@ public struct ReviewFeature {
           state.error = .init(.emptyReview)
           return .none
         }
-        state.comments.append(.init(path: file.path, line: line, side: state.inlineSide, body: state.inlineBody))
+        state.comments.append(.init(
+          path: file.path,
+          line: line,
+          side: state.inlineSide,
+          body: state.inlineBody,
+          startLine: start == line ? nil : start,
+        ))
+        state.inlineDrafts["\(file.path)|\(state.inlineSide)|\(state.inlineStartLine)|\(state.inlineLine)"] = nil
         state.isEditingInline = false
         state.inlineBody = ""
         state.inlineLine = ""
+        state.inlineStartLine = ""
         state.isConfirming = false
         state.error = nil
         return .none
@@ -133,6 +174,7 @@ public struct ReviewFeature {
           event: state.event,
           body: state.body,
           comments: state.comments,
+          expectedMergeBase: state.expectedMergeBase,
         )
         return .run { [forge] send in
           do { try await forge.submit(submission)

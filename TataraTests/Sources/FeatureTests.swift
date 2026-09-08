@@ -13,10 +13,10 @@ struct FeatureTests {
     var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
     state.showsHelp = true
     let store = TestStore(initialState: state) { WorkspaceFeature() }
-    await store.send(.commandPressed(.down)) { $0.scroll = 1 }
+    await store.send(.commandPressed(.down)) { $0.helpScroll = 1 }
     await store.send(.commandPressed(.refresh))
     await store.send(.commandPressed(.back)) { $0.showsHelp = false
-      $0.scroll = 0
+      $0.helpScroll = 0
     }
   }
 
@@ -45,11 +45,11 @@ struct FeatureTests {
 
   @Test func `stale diff cannot replace new viewport`() async throws {
     var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
-    state.diffGeneration = 5
-    state.diff = "current"
+    state.contentGeneration = 5
+    state.document = .init(lines: [[.init(text: "current")]])
     let store = TestStore(initialState: state) { WorkspaceFeature() }
-    await store.send(.diffResponse(generation: 4, .success("obsolete")))
-    #expect(store.state.diff == "current")
+    await store.send(.contentResponse(generation: 4, .success(.init(lines: [[.init(text: "obsolete")]]))))
+    #expect(store.state.document.lines == [[.init(text: "current")]])
   }
 
   @Test func `submitting requires preview and keeps draft on failure`() async throws {
@@ -87,11 +87,11 @@ struct FeatureTests {
 
   @Test func `search consumes quit key as text`() async throws {
     var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
-    state.isSearching = true
+    state.searches[.items] = .init()
+    state.searches[.items]?.isEditing = true
     let store = TestStore(initialState: state) { WorkspaceFeature() }
-    await store.send(.keyPressed("q")) { $0.search = "q" }
-    await store.send(.keyPressed("esc")) { $0.search = ""
-      $0.isSearching = false
+    await store.send(.keyPressed("q")) { $0.searches[.items]?.query = "q" }
+    await store.send(.keyPressed("esc")) { $0.searches[.items] = .init()
     }
   }
 

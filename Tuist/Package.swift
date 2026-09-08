@@ -14,5 +14,6 @@ let package = Package(
     .package(url: "https://github.com/SwiftTUI/swift-tui", .upToNextMinor(from: "0.10.1")),
     .package(url: "https://github.com/swiftlang/swift-subprocess", from: "1.0.0"),
     .package(url: "https://github.com/mattt/swift-toml", from: "2.0.0"),
+    .package(url: "https://github.com/pointfreeco/sqlite-data", from: "1.0.0"),
   ],
 )

@@ -20,16 +20,21 @@ struct ReviewView: View {
       }
       if store.isSubmitting {
         Text(l10n("Loading…"))
-      } else if store.latestHead != store.expectedHead {
+      } else if store.revisionChanged {
         Text(l10n("Keep the summary and remove old inline comments to review the latest revision."))
         ScrollView {
           VStack(alignment: .leading, spacing: 1) {
             Text(TerminalText.sanitize(store.body))
             ForEach(Array(store.comments.enumerated()), id: \.offset) { _, comment in
-              Text("\(TerminalText.sanitize(comment.path)):\(comment.line) · \(comment.side.rawValue)")
+              Text(
+                "\(TerminalText.sanitize(comment.path)):\(comment.startLine.map { String($0) + "–" } ?? "")\(comment.line) · \(comment.side.rawValue)",
+              )
               Text(TerminalText.sanitize(comment.body))
             }
           }
+        }
+        .onKeyPress(.escape) { _ in store.send(.cancelButtonPressed)
+          return .handled
         }
         Button(l10n("Review latest revision")) { store.send(.reviewLatestRevisionButtonPressed) }
           .buttonStyle(.bordered).onKeyPress(.escape) { _ in store.send(.cancelButtonPressed)
@@ -37,18 +42,35 @@ struct ReviewView: View {
           }
       } else if store.isEditingInline {
         Text(TerminalText.sanitize(store.selectedFile?.path ?? "")).foregroundStyle(palette.blue)
-        Text(l10n("Choose a source line included in this file's patch.")).foregroundStyle(palette.muted)
-        HStack(spacing: 2) {
-          ForEach(InlineComment.Side.allCases, id: \.rawValue) { side in
-            Button("\(store.inlineSide == side ? "● " : "○ ")\(side.rawValue)") { store.send(.inlineSideSelected(side)) }
-              .buttonStyle(.bordered).onKeyPress(.escape) { _ in store.send(.cancelButtonPressed)
-                return .handled
-              }
-          }
-          TextField(l10n("Line"), text: SwiftTUI.Binding(get: { store.inlineLine }, set: { store.send(.inlineLineChanged($0)) }))
+        if store.inlineAnchorLocked {
+          Text(
+            "\(store.inlineSide.rawValue) · \(store.inlineStartLine.isEmpty ? store.inlineLine : store.inlineStartLine + "–" + store.inlineLine)",
+          )
+          .foregroundStyle(palette.accent)
+        } else {
+          Text(l10n("Choose a source line included in this file's patch.")).foregroundStyle(palette.muted)
+          HStack(spacing: 2) {
+            ForEach(InlineComment.Side.allCases, id: \.rawValue) { side in
+              Button("\(store.inlineSide == side ? "● " : "○ ")\(side.rawValue)") { store.send(.inlineSideSelected(side)) }
+                .buttonStyle(.bordered).onKeyPress(.escape) { _ in store.send(.cancelButtonPressed)
+                  return .handled
+                }
+            }
+            TextField(
+              l10n("Line"),
+              text: SwiftTUI.Binding(get: { store.inlineLine }, set: { store.send(.inlineLineChanged($0)) }),
+            )
             .onKeyPress(.escape) { _ in store.send(.cancelButtonPressed)
               return .handled
             }
+            TextField(
+              l10n("Start line"),
+              text: SwiftTUI.Binding(get: { store.inlineStartLine }, set: { store.send(.inlineStartLineChanged($0)) }),
+            )
+            .onKeyPress(.escape) { _ in store.send(.cancelButtonPressed)
+              return .handled
+            }
+          }
         }
         TextEditor(text: SwiftTUI.Binding(get: { store.inlineBody }, set: { store.send(.inlineBodyChanged($0)) }))
           .frame(maxWidth: .infinity, maxHeight: .infinity).border(palette.surface)
@@ -72,11 +94,16 @@ struct ReviewView: View {
           VStack(alignment: .leading, spacing: 1) {
             Text(TerminalText.sanitize(store.body)).frame(maxWidth: .infinity, alignment: .leading)
             ForEach(Array(store.comments.enumerated()), id: \.offset) { _, comment in
-              Text("\(TerminalText.sanitize(comment.path)):\(comment.line) · \(comment.side.rawValue)")
-                .foregroundStyle(palette.blue)
+              Text(
+                "\(TerminalText.sanitize(comment.path)):\(comment.startLine.map { String($0) + "–" } ?? "")\(comment.line) · \(comment.side.rawValue)",
+              )
+              .foregroundStyle(palette.blue)
               Text(TerminalText.sanitize(comment.body))
             }
           }
+        }
+        .onKeyPress(.escape) { _ in store.send(.cancelButtonPressed)
+          return .handled
         }
         HStack(spacing: 2) {
           Button(l10n(store.item.kind == .pullRequest ? "Submit review" : "Submit comment")) { store.send(.submitButtonPressed) }
@@ -106,8 +133,14 @@ struct ReviewView: View {
           }
         ForEach(Array(store.comments.enumerated()), id: \.offset) { index, comment in
           HStack(spacing: 2) {
-            Text("\(TerminalText.sanitize(comment.path)):\(comment.line) · \(comment.side.rawValue)").lineLimit(1)
+            Text(
+              "\(TerminalText.sanitize(comment.path)):\(comment.startLine.map { String($0) + "–" } ?? "")\(comment.line) · \(comment.side.rawValue)",
+            )
+            .lineLimit(1)
             Button(l10n("Remove")) { store.send(.removeInlineButtonPressed(index)) }
+              .onKeyPress(.escape) { _ in store.send(.cancelButtonPressed)
+                return .handled
+              }
           }
         }
         Button(l10n("Preview")) { store.send(.previewButtonPressed) }.buttonStyle(.bordered)

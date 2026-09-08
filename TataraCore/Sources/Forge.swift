@@ -45,7 +45,7 @@ public struct ItemID: Hashable, Codable, Sendable {
   }
 }
 
-public struct ForgeItem: Identifiable, Equatable, Sendable {
+public struct ForgeItem: Identifiable, Equatable, Codable, Sendable {
   public var id: ItemID
   public var kind: ItemKind
   public var title: String
@@ -79,7 +79,7 @@ public struct ForgeItem: Identifiable, Equatable, Sendable {
   }
 }
 
-public struct ItemPage: Equatable, Sendable {
+public struct ItemPage: Equatable, Codable, Sendable {
   public var items: [ForgeItem]
   public var nextPage: Int?
   public init(items: [ForgeItem], nextPage: Int? = nil) {
@@ -99,7 +99,7 @@ public struct ForgeCapabilities: Equatable, Sendable {
   }
 }
 
-public struct DiscussionComment: Identifiable, Equatable, Sendable {
+public struct DiscussionComment: Identifiable, Equatable, Codable, Sendable {
   public var id: Int
   public var author: String
   public var body: String
@@ -113,11 +113,11 @@ public struct DiscussionComment: Identifiable, Equatable, Sendable {
 }
 
 /// GitHub semantics remain typed; a future GitLab adapter adds its own case.
-public enum ForgeMetadata: Equatable, Sendable {
+public enum ForgeMetadata: Equatable, Codable, Sendable {
   case github(GitHubMetadata)
 }
 
-public struct GitHubMetadata: Equatable, Sendable {
+public struct GitHubMetadata: Equatable, Codable, Sendable {
   public var baseBranch: String
   public var headBranch: String
   public var mergeableState: String
@@ -138,10 +138,11 @@ public struct GitHubMetadata: Equatable, Sendable {
   }
 }
 
-public struct ItemDetail: Equatable, Sendable {
+public struct ItemDetail: Equatable, Codable, Sendable {
   public var item: ForgeItem
   public var revision: PullRequestRevision?
-  public var files: [ChangedFile]
+  public let files: [ChangedFile]
+  public let fileTree: FileTree
   public var comments: [DiscussionComment]
   public var metadata: ForgeMetadata?
   public init(
@@ -154,12 +155,25 @@ public struct ItemDetail: Equatable, Sendable {
     self.item = item
     self.revision = revision
     self.files = files
+    fileTree = FileTree(paths: files.map(\.path))
     self.comments = comments
     self.metadata = metadata
   }
+
+  private enum CodingKeys: String, CodingKey { case item, revision, files, comments, metadata }
+  public init(from decoder: any Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    try self.init(
+      item: values.decode(ForgeItem.self, forKey: .item),
+      revision: values.decodeIfPresent(PullRequestRevision.self, forKey: .revision),
+      files: values.decode([ChangedFile].self, forKey: .files),
+      comments: values.decode([DiscussionComment].self, forKey: .comments),
+      metadata: values.decodeIfPresent(ForgeMetadata.self, forKey: .metadata),
+    )
+  }
 }
 
-public struct PullRequestRevision: Hashable, Sendable {
+public struct PullRequestRevision: Hashable, Codable, Sendable {
   public var mergeBase: String
   public var head: String
   public init(mergeBase: String, head: String) {
@@ -168,7 +182,7 @@ public struct PullRequestRevision: Hashable, Sendable {
   }
 }
 
-public struct ChangedFile: Identifiable, Equatable, Sendable {
+public struct ChangedFile: Identifiable, Equatable, Codable, Sendable {
   public var path: String
   public var previousPath: String?
   public var status: String
@@ -206,12 +220,21 @@ public struct ReviewSubmission: Equatable, Sendable {
   public var event: ReviewEvent
   public var body: String
   public var comments: [InlineComment]
-  public init(item: ForgeItem, expectedHead: String?, event: ReviewEvent, body: String, comments: [InlineComment] = []) {
+  public var expectedMergeBase: String?
+  public init(
+    item: ForgeItem,
+    expectedHead: String?,
+    event: ReviewEvent,
+    body: String,
+    comments: [InlineComment] = [],
+    expectedMergeBase: String? = nil,
+  ) {
     self.item = item
     self.expectedHead = expectedHead
     self.event = event
     self.body = body
     self.comments = comments
+    self.expectedMergeBase = expectedMergeBase
   }
 }
 

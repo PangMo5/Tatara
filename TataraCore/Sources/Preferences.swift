@@ -40,9 +40,13 @@ public enum KeyCommand: String, Codable, CaseIterable, Sendable {
   case down, up, left, right, nextPane, previousPane, first, last, halfPageDown, halfPageUp
   case open, back, refresh, search, nextMatch, previousMatch, toggleKind, loadMore, review, comment, theme, help, quit
   case previousTab, nextTab, markReviewed, openBrowser, itemsPane, filesPane, contentPane
+  case contentHalfPageDown, contentHalfPageUp
+  case selectLines, filters
 
   public var defaultKeys: [String] {
     switch self {
+    case .selectLines: ["V"]
+    case .filters: ["f"]
     case .down: ["j", "down"]
     case .up: ["k", "up"]
     case .left: ["h", "left"]
@@ -53,6 +57,8 @@ public enum KeyCommand: String, Codable, CaseIterable, Sendable {
     case .last: ["G", "end"]
     case .halfPageDown: ["ctrl-d", "page-down"]
     case .halfPageUp: ["ctrl-u", "page-up"]
+    case .contentHalfPageDown: ["ctrl-f"]
+    case .contentHalfPageUp: ["ctrl-b"]
     case .open: ["enter"]
     case .back: ["esc"]
     case .refresh: ["r"]
@@ -126,7 +132,48 @@ public struct Keymap: Equatable, Sendable {
       "page-down",
       "ctrl-d",
       "ctrl-u",
+      "ctrl-f",
+      "ctrl-b",
     ].contains(key)
+  }
+}
+
+public extension KeyCommand {
+  var titleKey: String {
+    switch self {
+    case .selectLines: "Select lines"
+    case .filters: "Filters and presets"
+    case .down: "Move down"
+    case .up: "Move up"
+    case .left, .previousPane: "Previous pane"
+    case .right, .nextPane: "Next pane"
+    case .itemsPane: "Pull requests"
+    case .filesPane: "Files"
+    case .contentPane: "Content"
+    case .first: "First"
+    case .last: "Last"
+    case .halfPageDown: "Half page down"
+    case .halfPageUp: "Half page up"
+    case .contentHalfPageDown: "Scroll main pane down"
+    case .contentHalfPageUp: "Scroll main pane up"
+    case .open: "Open"
+    case .back: "Back"
+    case .refresh: "Refresh"
+    case .search: "Search"
+    case .nextMatch: "Next match"
+    case .previousMatch: "Previous match"
+    case .toggleKind: "Switch PRs / issues"
+    case .loadMore: "Load more"
+    case .review: "Write your review"
+    case .comment: "Comment"
+    case .theme: "Theme"
+    case .help: "Help"
+    case .quit: "Quit"
+    case .nextTab: "Next tab"
+    case .previousTab: "Previous tab"
+    case .markReviewed: "Mark reviewed"
+    case .openBrowser: "Open in browser"
+    }
   }
 }
 
@@ -134,10 +181,12 @@ public struct Preferences: Equatable, Sendable {
   public var theme: Theme
   public var language: Language
   public var keymap: Keymap
-  public init(theme: Theme = .mocha, language: Language = .english, keymap: Keymap = .standard) {
+  public var filesView: FilesView
+  public init(theme: Theme = .mocha, language: Language = .english, keymap: Keymap = .standard, filesView: FilesView = .tree) {
     self.theme = theme
     self.language = language
     self.keymap = keymap
+    self.filesView = filesView
   }
 }
 

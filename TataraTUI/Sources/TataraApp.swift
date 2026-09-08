@@ -7,6 +7,7 @@ import SwiftTUI
 import TataraCore
 import TataraGitHub
 import TataraKit
+import TataraPersistence
 import TataraSystem
 
 @main
@@ -17,6 +18,7 @@ struct TataraApp: App {
   @Option(help: "Catppuccin flavor: latte, frappe, macchiato, mocha.") var theme: String?
   @Option(help: "Language: en, ko, ja, zh-Hans, zh-Hant.") var language: String?
   @Option(help: "Path to config.toml.") var config: String?
+  @Option(help: "Files pane layout: tree or list.") var filesView: String?
   @Flag(help: "Explore synthetic review data without a GitHub account.") var demo = false
 
   nonisolated static var configuration: CommandConfiguration {
@@ -29,7 +31,7 @@ struct TataraApp: App {
 
   var body: some Scene {
     WindowGroup("Tatara") {
-      BootstrapView(repo: repo, host: host, theme: theme, language: language, config: config, demo: demo)
+      BootstrapView(repo: repo, host: host, theme: theme, language: language, config: config, filesView: filesView, demo: demo)
     }
   }
 }
@@ -40,6 +42,7 @@ struct BootstrapView: View {
   let theme: String?
   let language: String?
   let config: String?
+  let filesView: String?
   let demo: Bool
   @SwiftTUI.State private var store: StoreOf<WorkspaceFeature>?
   @SwiftTUI.State private var localization: Localization?
@@ -65,7 +68,15 @@ struct BootstrapView: View {
     .task {
       guard store == nil, failure == nil else { return }
       do {
+        try await NavigationTrace.shared.start()
         var preferences = try Configuration.load(path: config)
+        if let filesView {
+          guard let view = TataraCore.FilesView(rawValue: filesView) else { throw TataraError(
+            .configuration,
+            detail: "Unknown files view: \(filesView)",
+          ) }
+          preferences.filesView = view
+        }
         if let theme {
           guard let value = TataraCore.Theme(rawValue: theme) else { throw TataraError(
             .configuration,
@@ -89,13 +100,28 @@ struct BootstrapView: View {
         } else {
           try await adapter.detectRepository(host: host)
         }
-        let forge = demo ? DemoData.client(repository) : adapter.client
-        let diff = Difftastic(forge: forge).client
-        store = Store(initialState: WorkspaceFeature.State(repository: repository, preferences: preferences)) {
+        let cache: CacheClient
+        if demo {
+          cache = .disabled
+        } else {
+          let account = try await adapter.accountIdentifier(host: repository.host)
+          let storage = try await PersistentCache.bootstrapDatabase()
+          cache = storage.client.scoped(to: "\(repository.forge.rawValue):\(repository.host):\(account)")
+        }
+        let forge = demo ? DemoData.client(repository) : GitHubAdapter(cache: cache).client
+        let diff = Difftastic(forge: forge, cache: cache).client
+        let presets = try await FilterPresetStore.open()
+        store = Store(initialState: WorkspaceFeature.State(
+          repository: repository,
+          preferences: preferences,
+          strings: LocalizedStrings.values[preferences.language.rawValue] ?? [:],
+        )) {
           WorkspaceFeature()
         } withDependencies: {
           $0[ForgeClient.self] = forge
           $0[DiffClient.self] = diff
+          $0[DocumentClient.self] = DocumentRenderer.client
+          $0[FilterPresetClient.self] = presets.client
         }
       } catch { failure = localization?.error(.wrapping(error)) ?? String(describing: error) }
     }
@@ -124,6 +150,7 @@ enum DemoData {
     }
     """
     return ForgeClient(
+      invalidate: { _ in },
       list: { _, kind, _ in
         let titles = kind == .pullRequest ? [
           "Keep review navigation within bounds",
@@ -141,6 +168,14 @@ enum DemoData {
             labels: ["enhancement"],
           )
         })
+      },
+      search: { repository, kind, query, page in
+        if query.contains("is:closed") || query.contains("is:merged") || query
+          .contains("draft:true")
+        {
+          return ItemPage(items: [])
+        }
+        return try await client(repository).list(repository, kind, page)
       },
       detail: { item in
         ItemDetail(

@@ -12,9 +12,9 @@ struct CoreTests {
     #expect(try RepositoryID("PangMo5/Tatara").slug == "PangMo5/Tatara")
   }
 
-  @Test func `ansi never executes terminal controls`() {
-    let lines = StyledDiff.lines("\u{1B}[31mremoved\u{1B}[0m\n\u{1B}]52;c;secret\u{7}safe\u{1B}[2J")
-    #expect(lines == [[.init(text: "removed", color: 1)], [.init(text: "safe")]])
+  @Test func `source text never executes terminal controls`() {
+    let safe = TerminalText.sanitize("\u{1B}]52;c;secret\u{7}safe\u{1B}[2J")
+    #expect(!safe.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) })
   }
 
   @Test func `keymap rejects conflicts`() {

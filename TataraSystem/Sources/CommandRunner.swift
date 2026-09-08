@@ -31,12 +31,14 @@ public struct CommandRunner: Sendable {
       group.addTask {
         var options = PlatformOptions()
         options.createSession = true
+        options.qualityOfService = .utility
         options.teardownSequence = [.gracefulShutDown(toProcessGroup: true, allowedDurationToNextStep: .milliseconds(250))]
         let result = try await Subprocess.run(
           .name(executable), arguments: Arguments(arguments),
           environment: .inherit.updating([
             "GH_PROMPT_DISABLED": "1", "GH_PAGER": "cat", "PAGER": "cat",
             "DFT_EXIT_CODE": "false", "DFT_IGNORE_COMMENTS": "false", "DFT_SKIP_UNCHANGED": "false",
+            "DFT_UNSTABLE": "yes",
           ]),
           platformOptions: options, input: .string(input ?? ""),
           output: .bytes(limit: 16 * 1024 * 1024), error: .string(limit: 65536),
