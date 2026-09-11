@@ -3,22 +3,39 @@
 
 import CryptoKit
 import Foundation
-import SwiftTUI
 import TataraCore
 import TataraKit
+import TermLoom
 
 enum DocumentRenderer {
-  static let client = DocumentClient(prepare: prepare, search: search, prepareDiff: prepareDiff)
+  static let client = DocumentClient(
+    prepare: prepare,
+    prepareComment: CommentRenderer.prepare,
+    search: search,
+    revealMatch: revealMatch,
+    prepareDiff: prepareDiff,
+  )
   private static let cache = PreparedDocumentCache()
 
   @concurrent
   static func prepareDiff(_ diff: ReviewDiff, _ width: Int, _ side: InlineComment.Side) async throws -> ReviewDocument {
+    try await prepareDiff(diff, width, side, offset: 0)
+  }
+
+  @concurrent
+  private static func prepareDiff(
+    _ diff: ReviewDiff,
+    _ width: Int,
+    _ side: InlineComment.Side,
+    offset: Int,
+  ) async throws -> ReviewDocument {
     try Task.checkCancellation()
-    let key = diff.cacheIdentity.map { "structured:\(width):\(side):" + $0 }
+    let both = width >= 100
+    let key = diff.cacheIdentity.map { "structured:\(width):\(offset):\(both ? "both" : side.rawValue):" + $0 }
     if let key, let cached = await cache.value(for: key) {
+      try Task.checkCancellation()
       return cached
     }
-    let both = width >= 100
     let sideWidth = both ? max(1, (width - 3) / 2) : width
     let largest = diff.rows.reduce(1) { max($0, $1.left?.number ?? 0, $1.right?.number ?? 0) }
     let gutter = max(3, String(largest).count)
@@ -26,13 +43,13 @@ enum DocumentRenderer {
     var glyphWidths: [Character: Int] = [:]
     func project(_ line: ReviewDiffLine?, side: InlineComment.Side) -> [DiffSpan] {
       guard let line else { return [.init(text: String(repeating: " ", count: sideWidth), side: side)] }
-      let projection = clipped(line.spans, width: bodyWidth, widths: &glyphWidths)
+      let projection = clipped(line.spans, width: bodyWidth, offset: offset, widths: &glyphWidths)
       var spans = projection.spans
       let cells = projection.columns
-      spans = spans.map { .init(text: $0.text, color: $0.color, bold: $0.bold, side: side) }
+      spans = spans.map { .init(text: $0.text, color: $0.color, bold: $0.bold, side: side, role: $0.role) }
       let number = String(line.number)
       let prefix = " " + String(repeating: " ", count: gutter - number.count) + number + " "
-      var result: [DiffSpan] = [.init(text: prefix, color: 8, side: side)]
+      var result: [DiffSpan] = [.init(text: prefix, side: side, role: .metadata)]
       result.append(contentsOf: spans)
       result.append(.init(text: String(repeating: " ", count: max(0, bodyWidth - cells)), side: side))
       return result
@@ -45,14 +62,19 @@ enum DocumentRenderer {
         await Task.yield()
       }
       if row.left == nil, row.right == nil {
-        lines.append([.init(text: "…")])
-        displayed.append([.init(text: "…", color: 8)])
+        let annotation = row.annotation ?? [.init(text: "…", role: .hunkHeader)]
+        lines.append(annotation)
+        displayed.append(clipped(annotation, width: width, widths: &glyphWidths).spans)
+        estimatedCost += annotation.reduce(192) { $0 + $1.text.utf8.count * 2 }
         continue
       }
       let source = (row.left?.spans ?? []) + [.init(text: "  ")] + (row.right?.spans ?? [])
       estimatedCost += 256 + width * 2 + source.reduce(0) { $0 + $1.text.utf8.count * 2 + 48 }
       lines.append(source)
-      displayed.append(both ? project(row.left, side: .left) + [.init(text: " │ ", color: 8)] + project(row.right, side: .right)
+      displayed.append(both ? project(row.left, side: .left) + [.init(text: " │ ", role: .metadata)] + project(
+        row.right,
+        side: .right,
+      )
         : project(row.line(on: side), side: side))
     }
     if lines.isEmpty {
@@ -66,6 +88,8 @@ enum DocumentRenderer {
       diff: diff,
       diffSideWidth: sideWidth,
       diffNumberWidth: gutter,
+      visibleDiffSide: both ? nil : side,
+      horizontalOffset: offset,
       checkingCancellation: Task.checkCancellation,
     )
     if let key {
@@ -127,13 +151,14 @@ enum DocumentRenderer {
     return try ReviewDocument(lines: wrapper.lines, checkingCancellation: Task.checkCancellation)
   }
 
-  /// Clip presentation before SwiftTUI measures Text. Source and search rows remain complete.
+  /// Clip presentation to terminal columns. Source and search rows remain complete.
   private static func clipped(
     _ spans: [DiffSpan],
     width: Int,
+    offset: Int = 0,
     widths: inout [Character: Int],
   ) -> (spans: [DiffSpan], columns: Int) {
-    var result: [DiffSpan] = [], columns = 0
+    var result: [DiffSpan] = [], columns = 0, sourceColumns = 0
     for span in spans {
       var prefix = ""
       for character in span.text {
@@ -156,15 +181,20 @@ enum DocumentRenderer {
           } else if let cached = widths[glyph] {
             cells = cached
           } else {
-            cells = layoutText(for: String(glyph), width: nil).lines.flatMap(\.clusters).reduce(0) { $0 + $1.cellWidth }
+            cells = TerminalWidth.of(glyph)
             if widths.count >= 256 {
               widths.removeAll(keepingCapacity: true)
             }
             widths[glyph] = cells
           }
+          if sourceColumns < offset {
+            sourceColumns += cells
+            continue
+          }
+          sourceColumns += cells
           if columns + cells > width {
             if !prefix.isEmpty {
-              result.append(.init(text: prefix, color: span.color, bold: span.bold))
+              result.append(.init(text: prefix, color: span.color, bold: span.bold, role: span.role))
             }
             return (result, columns)
           }
@@ -173,27 +203,120 @@ enum DocumentRenderer {
         }
       }
       if !prefix.isEmpty {
-        result.append(.init(text: prefix, color: span.color, bold: span.bold))
+        result.append(.init(text: prefix, color: span.color, bold: span.bold, role: span.role))
       }
     }
     return (result, columns)
   }
 
   @concurrent
-  static func search(_ document: ReviewDocument, _ query: String) async throws -> [Int] {
+  static func search(_ document: ReviewDocument, _ query: String) async throws -> SearchMatches {
     guard !query.isEmpty else { return [] }
-    let needle = ReviewDocument.fold(query)
-    var matches: [Int] = []
+    let pattern = try SearchPattern(query)
+    var matches: [Int] = [], sides: [InlineComment.Side?] = [], ranges: [Range<Int>?] = [], sourceRanges: [Range<Int>?] = []
+    var highlights: [Int: [Range<Int>]] = [:]
     for (index, line) in document.searchableLines.enumerated() {
-      if index % 256 == 0 {
+      if index % 128 == 0 {
         try Task.checkCancellation()
         await Task.yield()
       }
-      if line.contains(needle) {
+      func append(_ range: Range<Int>?, side: InlineComment.Side?, source: Range<Int>? = nil) throws {
+        guard matches.count < 100_000 else { throw TataraError(
+          .invalidResponse,
+          detail: "Search exceeds 100,000 matches; narrow the expression.",
+        ) }
         matches.append(index)
+        sides.append(side)
+        ranges.append(range)
+        sourceRanges.append(source)
+        if let range {
+          highlights[index, default: []].append(range)
+        }
+      }
+      if let diff = document.diff, diff.rows.indices.contains(index),
+         diff.rows[index].left != nil || diff.rows[index].right != nil
+      {
+        for side in InlineComment.Side.allCases where document.visibleDiffSide == nil || document.visibleDiffSide == side {
+          guard let source = diff.rows[index].line(on: side) else { continue }
+          let text = source.spans.map(\.text).joined()
+          let found = try pattern.ranges(in: text)
+          var start = 0
+          for span in document.displayLines[index] {
+            if span.side == side {
+              break
+            }
+            start += span.text.utf16.count
+          }
+          start += document.diffNumberWidth + 2
+          let columns = max(1, document.diffSideWidth - document.diffNumberWidth - 2)
+          for range in found {
+            try append(
+              projectMatch(range, source: text, start: start, columns: columns, offset: document.horizontalOffset),
+              side: side,
+              source: range,
+            )
+          }
+        }
+      } else {
+        for range in try pattern.ranges(in: line) {
+          try append(range, side: nil)
+        }
       }
     }
-    return matches
+    let result = SearchMatches(lines: matches, highlights: highlights, sides: sides, ranges: ranges, sourceRanges: sourceRanges)
+    try Task.checkCancellation()
+    return result
+  }
+
+  @concurrent
+  static func revealMatch(
+    _ document: ReviewDocument,
+    _ matches: SearchMatches,
+    _ index: Int,
+    _ width: Int,
+  ) async throws -> ReviewDocument {
+    guard let diff = document.diff, matches.lines.indices.contains(index), matches.sides.indices.contains(index),
+          let side = matches.sides[index], matches.sourceRanges.indices.contains(index), let range = matches.sourceRanges[index],
+          diff.rows.indices.contains(matches.lines[index]),
+          let source = diff.rows[matches.lines[index]].line(on: side) else { return document }
+    let text = source.spans.map(\.text).joined()
+    let prefix = String(decoding: text.utf16.prefix(range.lowerBound), as: UTF16.self)
+    let column = TerminalWidth.of(TerminalText.sanitize(prefix).replacingOccurrences(of: "\t", with: "    "))
+    try Task.checkCancellation()
+    let bodyWidth = max(1, document.diffSideWidth - document.diffNumberWidth - 2)
+    return try await prepareDiff(diff, width, side, offset: max(0, column - bodyWidth / 3))
+  }
+
+  /// Translate source offsets through control sanitization and tab expansion without searching gutters.
+  private static func projectMatch(_ range: Range<Int>, source: String, start: Int, columns: Int, offset: Int) -> Range<Int>? {
+    var sourceOffset = 0, displayOffset = start, column = 0, sourceColumn = 0
+    var lower: Int?, upper: Int?
+    for character in source {
+      let length = character.utf16.count
+      let clean = character == "\t" ? "    " : TerminalText.sanitize(String(character))
+      let intersects = range.isEmpty ? range.lowerBound == sourceOffset : range.overlaps(sourceOffset ..< sourceOffset + length)
+      for glyph in clean {
+        let width = TerminalWidth.of(glyph)
+        defer { sourceColumn += width }
+        if sourceColumn < offset {
+          continue
+        }
+        if column + width > columns {
+          return lower.flatMap { lower in upper.map { lower ..< $0 } }
+        }
+        if intersects {
+          lower = lower ?? displayOffset
+          upper = displayOffset + glyph.utf16.count
+        }
+        column += width
+        displayOffset += glyph.utf16.count
+      }
+      sourceOffset += length
+    }
+    if range.isEmpty, range.lowerBound == sourceOffset, column < columns {
+      return displayOffset ..< displayOffset + 1
+    }
+    return lower.flatMap { lower in upper.map { lower ..< $0 } }
   }
 }
 
@@ -242,8 +365,7 @@ actor PreparedDocumentCache {
 }
 
 /// Word-aware streaming wrapping with literal hard breaks for oversized tokens.
-/// Only bounded runs enter SwiftTUI's shared glyph-width cache; no full document
-/// competes with interactive view layout or acquires a document-sized cache lock.
+/// Bounded worker-local glyph runs avoid sharing document-sized cache locks with input.
 private struct WordWrapper {
   let width: Int
   var lines: [[DiffSpan]] = []
@@ -255,9 +377,9 @@ private struct WordWrapper {
   private var continuation = false
   private var atParagraphStart = true
   private var paragraphHasRows = false
-  private var separators: [[TextCluster]] = []
+  private var separators: [[DisplayCluster]] = []
   private var separatorColumns = 0
-  private var widths: [String: [TextCluster]] = [:]
+  private var widths: [String: [DisplayCluster]] = [:]
 
   init(width: Int) {
     self.width = width
@@ -294,11 +416,11 @@ private struct WordWrapper {
 
   private mutating func finishRun() {
     guard !run.isEmpty else { return }
-    let cells: [TextCluster]
+    let cells: [DisplayCluster]
     if let cached = widths[run] {
       cells = cached
     } else {
-      cells = layoutText(for: run, width: nil).lines.flatMap(\.clusters)
+      cells = run.map { DisplayCluster(character: $0, cellWidth: TerminalWidth.of($0)) }
       if runBytes <= 256 {
         if widths.count >= 128 {
           widths.removeAll(keepingCapacity: true)
@@ -333,7 +455,7 @@ private struct WordWrapper {
     runBytes = 0
   }
 
-  private mutating func appendCells(_ cells: [TextCluster]) {
+  private mutating func appendCells(_ cells: [DisplayCluster]) {
     for cell in cells {
       if columns + cell.cellWidth > width, !row.isEmpty {
         flush()
@@ -349,4 +471,9 @@ private struct WordWrapper {
     columns = 0
     paragraphHasRows = true
   }
+}
+
+private struct DisplayCluster {
+  let character: Character
+  let cellWidth: Int
 }

@@ -16,9 +16,9 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10
       - name: Toolchain
         run: swift --version
       - name: Resolve and generate
@@ -33,11 +33,15 @@ jobs:
         run: swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara
       - name: Search, scrollbar and loading responsiveness
         run: swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara --workspace
+      - name: Wheel axes and sidebar scroll margins
+        run: swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara --wheel
       - name: Tree, visual comments and saved filters
         run: swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara --features
+      - name: Multiline editor and complete review preview
+        run: swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara --editors
       - name: Large input and in-flight focus changes
         run: swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara --stress
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: validation

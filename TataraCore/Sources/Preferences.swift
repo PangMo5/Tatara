@@ -39,14 +39,24 @@ public enum Language: String, CaseIterable, Codable, Sendable {
 public enum KeyCommand: String, Codable, CaseIterable, Sendable {
   case down, up, left, right, nextPane, previousPane, first, last, halfPageDown, halfPageUp
   case open, back, refresh, search, nextMatch, previousMatch, toggleKind, loadMore, review, comment, theme, help, quit
-  case previousTab, nextTab, markReviewed, openBrowser, itemsPane, filesPane, contentPane
+  case previousTab, nextTab, markReviewed, openBrowser
   case contentHalfPageDown, contentHalfPageUp
   case selectLines, filters
+  case searchWordForward, searchWordBackward, searchPartialWordForward, searchPartialWordBackward
+  case cursorToTop, cursorToCenter, cursorToBottom, toggleDetails
 
   public var defaultKeys: [String] {
     switch self {
+    case .toggleDetails: ["i"]
     case .selectLines: ["V"]
     case .filters: ["f"]
+    case .searchWordForward: ["*"]
+    case .searchWordBackward: ["#"]
+    case .searchPartialWordForward: ["g*"]
+    case .searchPartialWordBackward: ["g#"]
+    case .cursorToTop: ["zt"]
+    case .cursorToCenter: ["zz"]
+    case .cursorToBottom: ["zb"]
     case .down: ["j", "down"]
     case .up: ["k", "up"]
     case .left: ["h", "left"]
@@ -73,9 +83,6 @@ public enum KeyCommand: String, Codable, CaseIterable, Sendable {
     case .nextTab: ["]"]
     case .markReviewed: ["space"]
     case .openBrowser: ["o"]
-    case .itemsPane: ["1"]
-    case .filesPane: ["2"]
-    case .contentPane: ["3"]
     case .theme: ["T"]
     case .help: ["?"]
     case .quit: ["q"]
@@ -113,10 +120,11 @@ public struct Keymap: Equatable, Sendable {
 
   private static func isValid(_ key: String) -> Bool {
     if key.count == 1 {
-      return key != "g" && key.unicodeScalars.allSatisfy { !CharacterSet.controlCharacters.contains($0) }
+      return key != "g" && key != "z" && key.unicodeScalars.allSatisfy { !CharacterSet.controlCharacters.contains($0) }
     }
     return [
       "gg",
+      "g*", "g#", "zt", "zz", "zb",
       "space",
       "up",
       "down",
@@ -141,15 +149,22 @@ public struct Keymap: Equatable, Sendable {
 public extension KeyCommand {
   var titleKey: String {
     switch self {
+    case .toggleDetails: "Toggle compact / rich details"
     case .selectLines: "Select lines"
     case .filters: "Filters and presets"
+    case .searchWordForward: "Search word forward"
+    case .searchWordBackward: "Search word backward"
+    case .searchPartialWordForward: "Search partial word forward"
+    case .searchPartialWordBackward: "Search partial word backward"
+    case .cursorToTop: "Current line to top"
+    case .cursorToCenter: "Current line to center"
+    case .cursorToBottom: "Current line to bottom"
     case .down: "Move down"
     case .up: "Move up"
-    case .left, .previousPane: "Previous pane"
-    case .right, .nextPane: "Next pane"
-    case .itemsPane: "Pull requests"
-    case .filesPane: "Files"
-    case .contentPane: "Content"
+    case .left: "Collapse folder"
+    case .previousPane: "Previous pane"
+    case .right: "Expand folder"
+    case .nextPane: "Next pane"
     case .first: "First"
     case .last: "Last"
     case .halfPageDown: "Half page down"
@@ -177,16 +192,30 @@ public extension KeyCommand {
   }
 }
 
+public enum DetailLevel: String, Codable, CaseIterable, Sendable { case compact, rich }
+
 public struct Preferences: Equatable, Sendable {
+  public static let defaultSidebarWidth = 52
   public var theme: Theme
   public var language: Language
   public var keymap: Keymap
   public var filesView: FilesView
-  public init(theme: Theme = .mocha, language: Language = .english, keymap: Keymap = .standard, filesView: FilesView = .tree) {
+  public var detailLevel: DetailLevel
+  public var sidebarWidth: Int
+  public init(
+    theme: Theme = .mocha,
+    language: Language = .english,
+    keymap: Keymap = .standard,
+    filesView: FilesView = .tree,
+    sidebarWidth: Int = Self.defaultSidebarWidth,
+    detailLevel: DetailLevel = .compact,
+  ) {
     self.theme = theme
     self.language = language
     self.keymap = keymap
     self.filesView = filesView
+    self.sidebarWidth = sidebarWidth
+    self.detailLevel = detailLevel
   }
 }
 
@@ -194,7 +223,7 @@ public struct Preferences: Equatable, Sendable {
 public enum TerminalText {
   public static func sanitize(_ value: String) -> String {
     String(String.UnicodeScalarView(value.unicodeScalars.filter {
-      $0 == "\n" || $0 == "\t" || (!CharacterSet.controlCharacters.contains($0) && $0.value != 0x7F)
+      $0 == "\n" || $0 == "\t" || ($0.value >= 0x20 && !(0x7F ... 0x9F).contains($0.value))
     }))
   }
 }

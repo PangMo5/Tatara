@@ -1,8 +1,8 @@
 [tools]
-"aqua:tuist/tuist" = "4.206.0"
-swiftformat = "0.62.1"
-"aqua:cli/cli" = "2.88.0"
-"aqua:Wilfred/difftastic" = "0.69.0"
+"aqua:tuist/tuist" = "4.207.0"
+swiftformat = "0.63.0"
+"aqua:cli/cli" = "2.100.0"
+"aqua:Wilfred/difftastic" = "0.70.0"
 
 [tasks.generate]
 run = "swift Scripts/Tatara.swift generate"

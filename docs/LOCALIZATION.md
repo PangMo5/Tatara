@@ -4,7 +4,7 @@ English is the source language. Tatara supports English, Korean, Japanese,
 Simplified Chinese and Traditional Chinese (Taiwan), matching the locale set of
 Tatami and Itsuka.
 
-`SharedResources/Localizable.xcstrings` owns all application copy. SwiftTUI `Text`
+`SharedResources/Localizable.xcstrings` owns all application copy. TermLoom `Text`
 displays a literal string, so Tatara resolves translations explicitly. The catalog
 is compiled into a Swift table instead of a Foundation resource bundle: a command
 line executable must continue to work after mise shims or Homebrew symlinks move

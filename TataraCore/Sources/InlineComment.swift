@@ -33,54 +33,96 @@ public enum ReviewAnchor {
   }
 
   public static func contains(range: ClosedRange<Int>, side: InlineComment.Side, patch: String?) -> Bool {
-    guard range.lowerBound > 0, let patch else { return false }
+    ReviewAnchorIndex(patch: patch).contains(range: range, side: side)
+  }
+}
+
+/// Build once with a changed-file snapshot; querying a review range is logarithmic.
+public struct ReviewAnchorIndex: Equatable, Sendable {
+  private let left: [ClosedRange<Int>]
+  private let right: [ClosedRange<Int>]
+
+  public init(patch: String?) {
     var old = 0, new = 0
     var active = false
-    var lower: Int?, upper: Int?
-    func matches() -> Bool {
-      guard let lower, let upper else { return false }
-      return range.lowerBound >= lower && range.upperBound <= upper
+    var oldLower: Int?, oldUpper: Int?, newLower: Int?, newUpper: Int?
+    var left: [ClosedRange<Int>] = [], right: [ClosedRange<Int>] = []
+    func finish() {
+      if let oldLower, let oldUpper {
+        left.append(oldLower ... oldUpper)
+      }
+      if let newLower, let newUpper {
+        right.append(newLower ... newUpper)
+      }
     }
-    for row in patch.components(separatedBy: "\n") {
+    for row in (patch ?? "").split(separator: "\n", omittingEmptySubsequences: false) {
       if row.hasPrefix("@@ ") {
-        if matches() {
-          return true
-        }
-        lower = nil
-        upper = nil
+        finish()
+        oldLower = nil
+        oldUpper = nil
+        newLower = nil
+        newUpper = nil
         active = false
         let parts = row.split(separator: " ")
-        guard parts.count >= 4,
-              parts[1].hasPrefix("-"), parts[2].hasPrefix("+"),
+        guard parts.count >= 4, parts[1].hasPrefix("-"), parts[2].hasPrefix("+"),
               let beforeToken = parts[1].dropFirst().split(separator: ",").first,
               let afterToken = parts[2].dropFirst().split(separator: ",").first,
-              let before = Int(beforeToken), let after = Int(afterToken) else { continue }
+              let before = Int(beforeToken), let after = Int(afterToken),
+              before >= 0, after >= 0 else { continue }
         old = before
         new = after
         active = true
         continue
       }
       guard active else { continue }
-      var number: Int?
-      switch row.first {
-      case " ": number = side == .left ? old : new
-        old += 1
-        new += 1
-      case "-": if side == .left {
-          number = old
+      if row.first == " " || row.first == "-" {
+        if old > 0 {
+          oldLower = oldLower ?? old
+          oldUpper = old
         }
-        old += 1
-      case "+": if side == .right {
-          number = new
+        if old < Int.max {
+          old += 1
+        } else {
+          active = false
         }
-        new += 1
-      default: break
       }
-      if let number, number > 0 {
-        lower = lower ?? number
-        upper = number
+      if row.first == " " || row.first == "+" {
+        if new > 0 {
+          newLower = newLower ?? new
+          newUpper = new
+        }
+        if new < Int.max {
+          new += 1
+        } else {
+          active = false
+        }
       }
     }
-    return matches()
+    finish()
+    /// Prefix maxima preserve containment even for overlapping or unordered hunks.
+    func indexed(_ ranges: [ClosedRange<Int>]) -> [ClosedRange<Int>] {
+      var maximum = 0
+      return ranges.sorted { $0.lowerBound < $1.lowerBound }.map {
+        maximum = max(maximum, $0.upperBound)
+        return $0.lowerBound ... maximum
+      }
+    }
+    self.left = indexed(left)
+    self.right = indexed(right)
+  }
+
+  public func contains(range: ClosedRange<Int>, side: InlineComment.Side) -> Bool {
+    guard range.lowerBound > 0 else { return false }
+    let hunks = side == .left ? left : right
+    var lower = 0, upper = hunks.count
+    while lower < upper {
+      let middle = lower + (upper - lower) / 2
+      if hunks[middle].lowerBound <= range.lowerBound {
+        lower = middle + 1
+      } else {
+        upper = middle
+      }
+    }
+    return lower > 0 && hunks[lower - 1].upperBound >= range.upperBound
   }
 }

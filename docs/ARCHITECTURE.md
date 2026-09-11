@@ -4,7 +4,7 @@ Tatara separates review state from forge APIs and terminal rendering:
 
 ```text
 TataraTUI ──▶ TataraGitHub ──▶ TataraSystem ──▶ TataraKit ──▶ TataraCore
-SwiftTUI         gh          Subprocess          TCA        Swift values
+TermLoom         gh          Subprocess          TCA        Swift values
                              difftastic
     └────▶ TataraPersistence ───────────────────▶ TataraKit
                SQLiteData
@@ -37,8 +37,8 @@ the term “merge request.” Unsupported operations must remain explicit.
    caches. Remote filenames never become local filesystem paths.
 
 The PR list already contains the overview body, so it appears before the detail
-requests complete. Repeated selection keys coalesce for 120 ms before starting
-network work. Detail responses are reused within the current list refresh;
+requests complete. Selection starts cancellable reads immediately, with no settling
+timer. Detail responses use a count/byte-bounded LRU within the current list refresh;
 explicit refresh and successful review submission invalidate the relevant cache.
 
 `TataraPersistence` implements the injected `CacheClient` using SQLiteData and
@@ -52,10 +52,12 @@ writes. No tokens or review drafts enter this cache.
 
 The terminal viewport has explicit cell bounds. Plain text wrapping and structured
 diff projection run off the main actor through `DocumentClient`. Prepared documents retain
-wrapped lines and a normalized search index; scrolling renders only the visible
+wrapped lines, original searchable text, and per-side cursor indices; scrolling renders only the visible
 window. No document-size measurement is fed back into the root layout. Search
 state belongs to each pane and the help popup, with generation checks for async
-content-search results. Overview and discussion text concatenation also runs
+content-search results. Regular-expression matches retain source and display ranges;
+the worker reveals horizontally clipped matches without changing source coordinates.
+Overview and discussion text concatenation also runs
 off the main actor, using an immutable snapshot captured during selection.
 
 Diff documents retain complete source and search rows, with a separate
@@ -71,27 +73,41 @@ identifies the displayed PR, section, revision and file while the next preview
 is being prepared. The document and its scroll position change together when
 the matching generation completes. This avoids rendering an empty full pane
 between two documents. Review entry is blocked while the selected preview is
-pending, and stale completions cannot replace the identified preview.
+pending or has failed. A presentation generation keeps old content visibly marked
+as a preview even after dismissing its error; it cannot supply new review anchors
+or content-search results. Stale completions cannot replace it.
 
-Wrapping streams bounded word runs instead of giving a whole PR body to the
-shared glyph-width cache. Projection and search-index construction check
+Wrapping streams bounded word runs and uses TermLoom terminal-cell widths. Projection and search-index construction check
 cancellation during processing. Read effects and subprocesses use utility
 priority; sidebar view inputs contain small presentation rows instead of full
 PR bodies or file patches. Scrollbars share clamped viewport geometry with the
 keyboard scroll actions.
 
-Focus changes highlight pane borders. Each pane and the status bar observe their
-own state, so a response does not rebuild the entire workspace. `DocumentViewport`
-is an Equatable value view containing only visible lines and highlights. Projection
-reuses measured widths instead of repeatedly entering the shared text-layout cache.
-Wheel events route to the hovered pane
-without changing keyboard focus, and the reducer blocks underlying panes while
-help or a review editor is presented.
+Focus changes highlight pane borders. TermLoom's native `TerminalApplication`
+tracks the observable application and TCA state, routes input through its control
+interaction map, and redraws on changes. `TerminalScreen` is a viewport-sized
+snapshot of native text, borders, buttons, text fields and multiline editors.
+The terminal diffs completed cell buffers before emitting output. Wheel events
+route to the hovered pane without changing keyboard focus; modals receive input
+before the workspace. Tatara opts into bounded scroll presentation batches: consecutive
+wheel events at the same pointer position preserve ordered state changes and clamping,
+while intermediate frames are omitted. Keyboard, click, resize, pointer-position and
+modifier changes end the batch. Nonblocking lookahead preserves fragmented Escape
+sequences. The native runtime owns raw mode and terminal restoration.
+
+Review drafts retain native editor state for cursor movement, selection and undo.
+Opening a saved draft resets confirmation state, so editing never resumes on a
+submit button. Confirmation text is wrapped on a worker and published only while
+the item, body, inline comments, viewport generation and task still match. Submit
+controls appear after the complete preview is ready. The review reducer still
+validates a fresh remote head immediately before a write.
 
 Read effects are cancellable. Replacements cancel the previous subscription
 synchronously before scheduling new work, so a late-starting older task cannot
-cancel a newer generation. Selection delays re-enter the reducer before starting
-network work, and generation checks reject late responses.
+cancel a newer generation, and generation checks reject late responses. Identical
+active diff reads share a producer; cancelling one consumer preserves the others,
+while cancelling the final consumer tears down that producer. Parsing and disk
+restoration run outside the cache actor, so they cannot monopolize cache access.
 `swift-subprocess` owns process teardown, byte collection and
 cancellation; a structured timeout bounds command lifetime. Missing `gh`, missing
 `difft`, authentication failure, incomplete data and command errors remain visible.
@@ -106,7 +122,7 @@ Writes do not automatically retry because a lost response may follow a successfu
 remote write. Check GitHub before retrying an uncertain submission.
 
 Inline comments use file/LEFT-or-RIGHT/source-line anchors from the structured
-alignment, validated against the GitHub patch. Shift-V ranges must stay within
+alignment, validated against hunk indices built with each immutable GitHub patch. Shift-V ranges must stay within
 one reviewable hunk. Preview includes `start_line`/`start_side` through the end
 line and side. Submission rechecks both the head and merge base when available.
 Missing or truncated patches do not produce invented line mappings.
@@ -116,14 +132,31 @@ Missing or truncated patches do not produce invented line mappings.
 File trees are built from metadata before presentation, with distinct directory
 and file identities (including file-to-directory transitions). Collapse state is
 per workspace; search exposes matching files with their ancestors. The cursor can
-select a directory without starting a diff request. `files_view` selects tree or
-flat presentation.
+select a directory to prepare a combined diff for its changed descendants. Each
+source row retains its file path, side, and source line; annotations have no review
+anchor. Current remote comments follow their source row, while outdated or
+unrepresented comments remain identified under the file header. Draft insertion
+preserves the cursor and viewport by source identity. The review editor expands
+beneath its source row and keeps the workspace visible. `files_view` selects tree or
+flat presentation. Sidebar projections are rebuilt only when their source, filter,
+collapse state, or layout changes; navigation and view evaluation reuse them.
 
-`f` opens a TCA filter feature. Remote queries use GitHub's issue/PR search API
+`/` in the item pane submits a remote query on Enter. `f` opens a TCA filter
+feature with repository labels and saved presets. Remote queries use GitHub's issue/PR search API
 through `gh`; responses must still match the configured forge, repository and
 kind. Saved presets live in a separate SQLiteData database under XDG data storage,
 so cache eviction cannot remove them. Preset loading is owned by the parent
-state transition, not a transient popup lifecycle hook.
+state transition, not a transient popup lifecycle hook. Request generations prevent
+an older read from clearing an in-flight save or replacing its result.
+
+Files search reads immutable changed-file contents through the forge client:
+head content for present files and merge-base content for deleted files. Four
+bounded worker tasks evaluate ICU regular expressions, rejecting files over
+32 MiB with a visible error and skipping binary or non-UTF-8 contents. Search
+generations prevent obsolete results from changing the tree. Diff search uses
+the same pattern syntax and limits results to 100,000 occurrences with a visible
+error. This is content search with explicit limits, not complete ripgrep syntax
+or Vim pattern compatibility.
 
 ## Deliberate initial boundaries
 
@@ -132,7 +165,12 @@ state transition, not a transient popup lifecycle hook.
 - Drafts and viewed marks live for this process. Draft persistence, resumable sessions,
   review-thread resolution and multi-repository inboxes remain future work.
 - Cursor motion and visual selection are line-based. Characterwise editing,
-  hunk-level review marks and continuous multi-file diffs remain future work.
+  and hunk-level review marks remain future work.
 - GitHub caps its changed-file endpoint at 3,000 files. Tatara checks the reported
   count and reports incompleteness instead of showing a falsely complete review.
-- SwiftTUI is pinned within one pre-1.0 minor series and the lockfile is committed.
+- TermLoom is pinned to an immutable upstream revision in the committed lockfile.
+  Its native application runtime owns input, focus routing, observation-driven
+  redraw and terminal restoration. The TextArea module is built from that same
+  pinned checkout through the Tuist manifest. `Scripts/Tatara.swift` applies and validates
+  source-hash-guarded wheel-axis and scroll-presentation patches during generation.
+  Upgrades must reevaluate both patches; a source mismatch is a visible failure.

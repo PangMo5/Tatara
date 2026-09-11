@@ -24,7 +24,53 @@ struct Smoke {
         guard let i = args.firstIndex(of: flag), args.indices.contains(i + 1) else { return fallback }
         return Int(args[i + 1]) ?? fallback
       }
-      if args.contains("--features") {
+      if let index = args.firstIndex(of: "--metadata-live"), args.indices.contains(index + 1) {
+        let t = try PTY(
+          binary: binary,
+          arguments: ["--repo", args[index + 1], "--language", "en", "--detail-level", "rich"],
+          columns: 176,
+          rows: 48,
+          artifacts: artifacts.appendingPathComponent("metadata-live"),
+        )
+        defer { t.close() }
+        try t.wait("Updated", timeout: 60)
+        try t.waitUntil("finished live detail", timeout: 60) {
+          let status = t.line(-2)
+          return !status.contains("Loading") && !status.contains("Preparing") && !status.contains("Error") && t.line(2)
+            .contains("#")
+        }
+        try expect(!t.text.contains("Could not load"), "Live metadata failed.")
+        try t.screenshot("overview")
+        t.key("q")
+        try t.finish()
+        print("Swift PTY: live GitHub list and rich detail metadata passed; no forge writes.")
+      } else if args.contains("--presentation") {
+        try presentation(binary, artifacts: artifacts.appendingPathComponent("presentation"))
+      } else if let index = args.firstIndex(of: "--wheel-boundary"), args.indices.contains(index + 1) {
+        try workspace(
+          binary,
+          stress: true,
+          artifacts: artifacts.appendingPathComponent("wheel-boundary-" + args[index + 1]),
+          columns: size("--columns", 320),
+          rows: size("--rows", 64),
+        )
+      } else if let index = args.firstIndex(of: "--wheel-reversal"), args.indices.contains(index + 1) {
+        try workspace(
+          binary,
+          stress: true,
+          artifacts: artifacts.appendingPathComponent("wheel-reversal-" + args[index + 1]),
+          columns: size("--columns", 320),
+          rows: size("--rows", 64),
+        )
+      } else if args.contains("--wheel") {
+        try workspace(binary, stress: true, artifacts: artifacts.appendingPathComponent("wheel"))
+      } else if args.contains("--vim") {
+        try vim(binary, artifacts: artifacts.appendingPathComponent("vim"))
+      } else if args.contains("--search-review") {
+        try searchReview(binary, artifacts: artifacts.appendingPathComponent("search-review"))
+      } else if args.contains("--editors") {
+        try editors(binary, artifacts: artifacts.appendingPathComponent("editors"))
+      } else if args.contains("--features") {
         try features(binary, artifacts: artifacts.appendingPathComponent("features"))
       } else if let index = args.firstIndex(of: "--live-navigation"), args.indices.contains(index + 1) {
         let label = args.firstIndex(of: "--label").flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil } ?? "current"
@@ -34,18 +80,17 @@ struct Smoke {
           arguments: ["--language", "en", "--theme", "mocha"],
           columns: size("--columns", 320),
           rows: size("--rows", 64),
-          environment: ["SWIFTTUI_DIAGNOSTICS": output.appendingPathComponent("diagnostics.tsv").path,
-                        "TATARA_INPUT_TRACE": output.appendingPathComponent("input.tsv").path],
+          environment: profilingEnvironment(output),
           cwd: URL(fileURLWithPath: args[index + 1]),
           artifacts: output,
         )
         defer { t.close() }
-        try t.wait("1 · Pull requests")
+        try t.wait("Pull requests")
         let expression = try NSRegularExpression(pattern: #"#(\d+) "#)
         func itemIDs() -> [String] {
           var ids: [String] = []
           for row in 0 ..< t.rows / 2 {
-            let line = String(t.line(row).prefix(44))
+            let line = String(t.line(row).prefix(t.sidebarWidth))
             if let match = expression.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
                let range = Range(match.range(at: 1), in: line),
                !ids.contains(String(line[range]))
@@ -133,7 +178,7 @@ struct Smoke {
     terminal.key("R")
     try terminal.wait("Write your review")
     terminal.key("\u{1B}")
-    try terminal.wait("1 · Pull requests")
+    try terminal.wait("Pull requests")
     terminal.key("c")
     try terminal.wait("Choose a source line")
     terminal.key("\u{1B}")
@@ -164,6 +209,329 @@ struct Smoke {
     print("Swift PTY: demo, real difftastic, four themes, five languages and terminal restoration passed.")
   }
 
+  static func presentation(_ binary: URL, artifacts: URL) throws {
+    let t = try PTY(
+      binary: binary,
+      arguments: ["--demo", "--language", "en", "--theme", "mocha", "--files-view", "tree"],
+      rows: 48,
+      artifacts: artifacts,
+    )
+    defer { t.close() }
+    try t.wait("Ready")
+    try expect(t.sidebarWidth == 52, "Default sidebar width is not 52 columns.")
+    try t.wait("Approved")
+    try t.screenshot("overview-compact")
+    t.key("i")
+    try t.wait("Milestone")
+    try t.wait("Requested reviewers")
+    try expect(t.line(4).contains("@contributor"), "Rich PR row did not show its author on the second line.")
+    try t.screenshot("overview-rich")
+    t.key("i")
+    try t.waitUntil("compact overview") { !t.text.contains("Milestone") }
+    t.key("\r")
+    try t.wait("Normal · Files")
+    t.key("\r")
+    try t.wait("Normal · Diff")
+    try t.wait("Boundary case checked.")
+    try expect(t.activeBorder(3), "Enter did not visibly focus Diff.")
+    try expect(!t.text.contains("**Keep the empty"), "Comment markdown delimiters were displayed literally.")
+    try t.screenshot("inline-comments")
+    t.key("/return\r")
+    try t.wait("1/2")
+    t.key("\u{1B}")
+    try t.wait("Normal · Diff")
+    t.key("c")
+    try t.wait("Write your review")
+    t.key("The selection stays responsive while the next file loads.")
+    try t.wait("The selection stays responsive while the next file loads.")
+    try t.screenshot("inline-composer")
+    t.key("\u{1B}")
+    try t.wait("Normal · Diff")
+    t.key("]")
+    try t.wait("#42 · Discussion")
+    try t.wait("Ready")
+    try t.wait("Boundary case checked.")
+    for theme in ["latte", "frappe", "macchiato", "mocha"] {
+      t.key("T")
+      try t.wait(theme)
+      try t.screenshot("discussion-" + theme)
+    }
+    t.key("R")
+    try t.wait("Write your review")
+    try t.screenshot("review")
+    t.key("\u{1B}")
+    try t.wait("Normal · Discussion")
+    t.key("f")
+    try t.wait("Preset name")
+    try t.screenshot("filters")
+    t.key("\u{1B}")
+    try t.wait("Normal · Discussion")
+    t.key("?")
+    try t.wait("Previous pane")
+    try t.screenshot("help")
+    t.key("\u{1B}")
+    try t.wait("Normal · Discussion")
+    t.resize(columns: 104, rows: 32)
+    try t.wait("Ready")
+    try expect(t.sidebarWidth == 44, "Narrow sidebar does not preserve 60 content columns.")
+    try t.screenshot("compact")
+    t.key("q")
+    try t.finish()
+    let config = artifacts.appendingPathComponent("config.toml")
+    try "sidebar_width = 64\n".write(to: config, atomically: true, encoding: .utf8)
+    for override in [false, true] {
+      let custom = try PTY(
+        binary: binary,
+        arguments: ["--demo", "--language", "en", "--config", config.path] + (override ? ["--sidebar-width", "44"] : []),
+        artifacts: artifacts.appendingPathComponent(override ? "override" : "configured"),
+      )
+      defer { custom.close() }
+      try custom.wait("Ready")
+      try expect(custom.sidebarWidth == (override ? 44 : 64), "Sidebar configuration precedence is wrong.")
+      custom.key("q")
+      try custom.finish()
+    }
+    print(
+      "Swift PTY: Enter progression, configured sidebar width, comment Markdown, all themes, forms and compact presentation passed; no forge writes.",
+    )
+  }
+
+  static func vim(_ binary: URL, artifacts: URL) throws {
+    let t = try PTY(
+      binary: binary,
+      arguments: ["--demo", "--language", "en", "--theme", "mocha", "--files-view", "tree"],
+      artifacts: artifacts,
+    )
+    defer { t.close() }
+    try t.wait("Ready")
+    t.key("]")
+    try t.wait("guard files.indices.contains")
+    try t.wait("Ready")
+    try t.focusPane(2)
+    t.key("h")
+    try t.wait("Sources/Selection.swift")
+    try t.wait("Ready")
+    try t.focusPane(3)
+    for (theme, added, removed) in [
+      ("latte", UInt32(0xD0E2D1), UInt32(0xEAC8D3)),
+      ("frappe", 0x455052, 0x514251),
+      ("macchiato", 0x3B474A, 0x48384B),
+      ("mocha", 0x364143, 0x443244),
+    ] {
+      t.key("T")
+      try t.wait(theme)
+      try expect(!t.hasBackground(added) && !t.hasBackground(removed), "Added or removed source acquired a diff background.")
+    }
+    try t.snapshot("native-diff-background")
+    t.key("/return\r")
+    try t.waitUntil("forward regex result") { t.cursorLine() == 5 && t.text.contains("Find · Diff") }
+    t.key("#")
+    try t.wait("(?<!\\w)return(?!\\w)")
+    try t.waitUntil("backward word wraps to previous match") { t.cursorLine() == 6 }
+    t.key("n")
+    try t.waitUntil("n follows backward direction") { t.cursorLine() == 5 }
+    t.key("N")
+    try t.waitUntil("N reverses backward direction") { t.cursorLine() == 6 }
+    t.key("*")
+    try t.waitUntil("star searches forward") { t.cursorLine() == 5 }
+    t.key("g*")
+    try t.waitUntil("partial word forward") { t.cursorLine() == 6 && t.line(-2).contains("/return ") }
+    t.key("g#")
+    try t.waitUntil("partial word backward") { t.cursorLine() == 5 }
+    try t.snapshot("word-search")
+    t.key("\u{1B}")
+    try t.wait("Normal · Diff")
+    t.resize(columns: 176, rows: 16)
+    try t.wait("Ready")
+    t.key("zt")
+    try t.waitUntil("source at top") { t.line(3).contains("guard files.indices.contains") }
+    try expect(t.cursorLine() == 5, "zt changed the source cursor.")
+    t.key("zz")
+    try t.waitUntil("source at center") { t.line(8).contains("guard files.indices.contains") }
+    t.key("zb")
+    try t.waitUntil("bottom command completed") { !t.line(-1).contains("z…") }
+    try expect(t.cursorLine() == 5 && t.keyboardPane == 3, "Viewport command moved source or pane focus.")
+    t.key("?")
+    try t.wait("Previous pane")
+    t.key("/Search word")
+    try t.wait("Search word backward")
+    try t.snapshot("word-command-help")
+    t.key("\u{1B}")
+    try t.wait("Previous pane")
+    t.key("\u{1B}")
+    try t.wait("Normal · Diff")
+    t.key("q")
+    try t.finish()
+    print(
+      "Swift PTY: #/* and g#/g*, direction-preserving n/N, zt/zz/zb, generated help and no added diff backgrounds passed; no forge writes.",
+    )
+  }
+
+  static func searchReview(_ binary: URL, artifacts: URL) throws {
+    let t = try PTY(
+      binary: binary,
+      arguments: ["--demo", "--language", "en", "--files-view", "tree", "--theme", "mocha"],
+      artifacts: artifacts,
+    )
+    defer { t.close() }
+    try t.wait("Ready")
+    t.key("/label:bug\r")
+    try t.wait("No matches.")
+    try t.wait("Filter · Pull requests")
+    t.key("\u{1B}")
+    try t.wait("Keep review navigation")
+    try t.wait("Ready")
+    t.key("f")
+    try t.wait("Filters and presets")
+    try t.click("Labels")
+    try t.wait("[ ] bug")
+    try t.click("[ ] bug")
+    try t.wait("label:\"bug\"")
+    try t.wait("[x] bug")
+    try t.click("[x] bug")
+    try t.wait("[ ] bug")
+    try t.click("good first issue")
+    try t.wait("label:\"good first issue\"")
+    try t.snapshot("label-picker")
+    t.key("\u{1B}")
+    try t.wait("Normal · Pull requests")
+    try t.focusPane(2)
+    t.key("/^struct Selection\r")
+    try t.wait("Selection.swift:1")
+    try t.wait("Files · 1/2")
+    try t.wait("Ready")
+    try t.snapshot("file-content-search")
+    t.key("\u{1B}")
+    try t.wait("Normal · Files")
+    t.key("h")
+    try t.wait("Sources/ReviewQueue.swift")
+    try t.wait("Sources/Selection.swift")
+    try t.wait("Boundary case checked.")
+    try t.wait("Outdated")
+    try t.wait("Ready")
+    try t.focusPane(3)
+    t.key("/return\r")
+    try t.wait("Find · Diff")
+    try t.wait("Ready")
+    try expect(t.cursorLine() == 5, "Search did not select the first matching source line.")
+    t.key("n")
+    try t.waitUntil("next occurrence") { t.cursorLine() == 6 }
+    t.key("N")
+    try t.waitUntil("previous occurrence") { t.cursorLine() == 5 }
+    for (theme, border, search) in [
+      ("latte", UInt32(0x7287FD), UInt32(0xE6ADBD)),
+      ("frappe", 0xBABBF1, 0x674B59),
+      ("macchiato", 0xB7BDF8, 0x604456),
+      ("mocha", 0xB4BEFE, 0x5E3F53),
+    ] {
+      t.key("T")
+      try t.wait(theme)
+      try expect(t.activeBorder(3, color: border), "Incorrect active border for \(theme).")
+      try expect(t.hasBackground(search), "Missing active search background for \(theme).")
+      try t.snapshot("search-" + theme)
+    }
+    t.key("\u{1B}")
+    try t.wait("Normal · Diff")
+    t.key("Vj")
+    try t.wait("Visual · Diff")
+    try t.waitUntil("visual range ends on line 6") { t.cursorLine() == 6 }
+    t.key("c")
+    try t.wait("RIGHT · 5–6")
+    t.key("In-place draft.")
+    try t.wait("In-place draft.")
+    try expect(t.text.contains("Keep review navigation"), "Inline editor replaced the PR pane.")
+    try expect(t.text.contains("return files[index + 1]"), "Inline editor removed the selected source.")
+    try t.snapshot("inline-expanded")
+    t.resize(columns: 96, rows: 28)
+    try t.wait("RIGHT · 5–6")
+    try t.wait("In-place draft.")
+    try t.wait("return files[index + 1]")
+    try t.snapshot("inline-compact")
+    t.resize(columns: 176, rows: 40)
+    try t.wait("RIGHT · 5–6")
+    try t.wait("Ready")
+    try t.click("Add comment to review")
+    try t.wait("Preview · 1")
+    try t.click("Preview")
+    try t.wait("This will be posted to GitHub.")
+    try t.wait("In-place draft.")
+    try expect(t.text.contains("return files[index + 1]"), "Preview replaced the source pane.")
+    try t.snapshot("inline-preview")
+    t.key("\u{1B}")
+    try t.wait("Normal · Diff")
+    try t.wait("Ready")
+    try t.wait("@Draft · RIGHT:5–6")
+    try expect(t.cursorLine() == 6, "Adding a comment changed the source cursor.")
+    t.key("q")
+    try t.finish()
+    print(
+      "Swift PTY: GitHub query, label toggles, source-content grep, folder diff, existing comments, regex n/N, four palettes, inline editing and resized preview passed; no forge writes.",
+    )
+  }
+
+  static func editors(_ binary: URL, artifacts: URL) throws {
+    let t = try PTY(
+      binary: binary,
+      arguments: ["--demo", "--language", "en", "--ascii", "--no-color", "--accessible"],
+      artifacts: artifacts,
+    )
+    defer { t.close() }
+    try t.wait("Ready")
+    t.key("R")
+    try t.wait("Write your review")
+    let original = "Alpha 한글 👩🏽‍💻 → ▸\nBeta end."
+    t.key("\u{1B}[200~" + original + "\u{1B}[201~")
+    try t.wait("Beta end.")
+    try t.wait("Alpha 한글")
+    try t.wait("→ ▸")
+    // SwiftTerm 1.20 drops this ZWJ grapheme from translated cell text; verify the emitted sequence separately.
+    try expect(t.raw.range(of: Data("👩🏽‍💻".utf8)) != nil, "The editor dropped the ZWJ grapheme from terminal output.")
+    t.key("\u{1A}")
+    try t.waitUntil("paste undo") { !t.text.contains("Beta end.") }
+    t.key("\u{1B}[122;6u")
+    try t.wait("Beta end.")
+    t.mouse(column: 3, row: 10, pressed: true)
+    t.mouse(column: 3, row: 10, pressed: false)
+    t.key("X")
+    try t.wait("XBeta end.")
+    try t.click("[  Preview  ]")
+    try t.wait("This will be posted to GitHub.")
+    try t.wait("Alpha 한글")
+    try t.wait("→ ▸")
+    // SwiftTerm 1.20 drops this ZWJ grapheme from translated cell text; verify the emitted sequence separately.
+    try expect(t.raw.range(of: Data("👩🏽‍💻".utf8)) != nil, "The editor dropped the ZWJ grapheme from terminal output.")
+    try t.wait("XBeta end.")
+    try t.click("Edit")
+    try t.wait("Preview")
+    t.mouse(column: 3, row: 9, pressed: true)
+    t.mouse(column: 3, row: 9, pressed: false)
+    t.key("\u{1B}[97;9u")
+    let long = (0 ..< 120).map { "Preview row \($0) " + String(
+      repeating: "한글 word ",
+      count: 30,
+    ) }.joined(separator: "\n") + "\nPREVIEW_END"
+    t.key("\u{1B}[200~" + long + "\u{1B}[201~")
+    try t.wait("PREVIEW_END")
+    try t.click("[  Preview  ]")
+    try t.wait("This will be posted to GitHub.")
+    try t.wait("Preview row 0")
+    t.key("\u{1B}[F")
+    try t.wait("PREVIEW_END")
+    t.resize(columns: 100, rows: 30)
+    try t.wait("This will be posted to GitHub.")
+    t.key("\u{1B}[F")
+    try t.wait("PREVIEW_END")
+    try t.snapshot("multiline-preview")
+    try expect(t.raw.range(of: Data(";2;203;166;247".utf8)) == nil, "--no-color emitted the accent RGB color.")
+    t.key("\u{1B}")
+    try t.wait("Normal ·")
+    t.key("q")
+    try t.finish()
+    print(
+      "Swift PTY: multiline Unicode paste, undo/redo, mouse cursor, ASCII source preservation, no color and complete resized preview passed; no forge writes.",
+    )
+  }
+
   static func features(_ binary: URL, artifacts: URL) throws {
     let state = FileManager.default.temporaryDirectory.appendingPathComponent("tatara-feature-state-\(UUID())")
     defer { try? FileManager.default.removeItem(at: state) }
@@ -177,18 +545,20 @@ struct Smoke {
     defer { t.close() }
     try t.wait("ReviewQueue.swift")
     try t.wait("Ready")
-    t.key("2")
+    try t.focusPane(2)
     try t.wait("Normal · Files")
     try expect(t.activeBorder(2), "The active file pane border is not accented.")
+    try expect(t.selectedLabelHasBackground("Keep review"), "Selected PR text lost the row background.")
+    try expect(t.selectedLabelHasBackground("ReviewQueue.swift"), "Selected file text lost the row background.")
     t.key("h")
     t.read(for: 0.1)
     t.key("\r")
-    try t.waitUntil("collapsed source folder") { !t.text.contains("ReviewQueue.swift") }
+    try t.waitUntil("collapsed source folder") { t.text.contains("▸ Sources") }
     t.key("\r")
     try t.wait("ReviewQueue.swift")
     t.key("l")
     try t.wait("guard files.indices.contains")
-    t.key("3")
+    try t.focusPane(3)
     try t.wait("Normal · Diff")
     try expect(t.activeBorder(3), "The active diff pane border is not accented.")
     try t.waitUntil("diff cursor") { t.cursorLine() != nil }
@@ -216,8 +586,9 @@ struct Smoke {
     try t.snapshot("range-preview")
     t.key("\u{1B}")
     try t.wait("Normal · Diff")
+    try t.wait("Ready")
     t.key("h")
-    t.read(for: 0.1)
+    try t.wait("LEFT ·")
     t.key("r")
     try t.wait("Write your review")
     try t.wait("LEFT ·")
@@ -255,7 +626,7 @@ struct Smoke {
     try reopened.click("My review queue")
     try reopened.wait("▸ My review queue")
     try reopened.click("Apply")
-    try reopened.wait("Normal · Pull requests")
+    try reopened.wait("Filter · Pull requests")
     reopened.key("q")
     try reopened.finish()
     print(
@@ -273,7 +644,7 @@ struct Smoke {
       artifacts: artifacts,
     )
     defer { t.close() }
-    try t.wait("1 · Pull requests")
+    try t.wait("Pull requests")
     t.read(for: 1)
     t.key("/\(item)\r")
     try t.wait("#\(item)")
@@ -285,7 +656,7 @@ struct Smoke {
       repeat {
         for (key, label) in labels {
           let start = ProcessInfo.processInfo.systemUptime
-          t.key(key)
+          try t.navigationKey(key)
           try t.wait(label)
           times.append((ProcessInfo.processInfo.systemUptime - start) * 1000)
         }
@@ -295,13 +666,15 @@ struct Smoke {
     try t.wait("Ready")
     try bounds(t)
     try t.snapshot("overview")
-    t.key("2\r")
+    try t.focusPane(2)
+    t.key("\r")
+    try t.focusPane(3)
     try t.wait("Normal · Diff")
     try exerciseFocus([("1", "Normal · Pull requests"), ("2", "Normal · Files"), ("3", "Normal · Diff")])
     try t.wait("Ready", timeout: 60)
     try t.snapshot("diff")
     t.key("[")
-    t.key("3")
+    try t.focusPane(3)
     try t.wait("Normal · Overview")
     t.key("\u{6}")
     try t.waitUntil("main paging") { position(t) > 1 }
@@ -349,25 +722,43 @@ struct Smoke {
     var env = ["PATH": fixture.path + ":" + (ProcessInfo.processInfo.environment["PATH"] ?? ""),
                "TATARA_SMOKE_FIXTURE": fixture.path, "TATARA_SMOKE_STRESS": stress ? "1" : "0",
                "TATARA_SMOKE_WIDE": CommandLine.arguments.contains("--wide-lines") ? "1" : "0",
+               "TATARA_SMOKE_SHORT_SOURCE": CommandLine.arguments.contains("--wheel-boundary") ? "1" : "0",
+               "TATARA_SMOKE_DENSE": CommandLine.arguments.contains("--dense-navigation") || CommandLine.arguments
+                 .contains("--wheel") ? "1" : "0",
                "XDG_DATA_HOME": fixture.appendingPathComponent("data").path,
                "XDG_CACHE_HOME": fixture.appendingPathComponent("cache").path]
     if profile {
-      env["SWIFTTUI_DIAGNOSTICS"] = artifacts.appendingPathComponent("diagnostics.tsv").path
-      env["TATARA_INPUT_TRACE"] = artifacts.appendingPathComponent("input.tsv").path
+      env.merge(profilingEnvironment(artifacts)) { _, new in new }
     }
     let t = try PTY(
       binary: binary,
-      arguments: ["--repo", "example/reviews", "--language", "en"],
+      arguments: ["--repo", "example/reviews", "--language", "en"] + (CommandLine.arguments.contains("--rich") ? [
+        "--detail-level",
+        "rich",
+      ] : []),
       columns: columns,
       rows: rows,
       environment: env,
       artifacts: artifacts,
+      recordPreview: CommandLine.arguments.contains("--record-preview"),
     )
     defer { t.close() }
-    try t.wait("1 · Pull requests")
+    try t.wait("Pull requests")
     try t.wait("Long overview")
+    if CommandLine.arguments.contains("--wheel-boundary") {
+      try wheelBoundary(t, binary: binary, artifacts: artifacts)
+      return
+    }
+    if CommandLine.arguments.contains("--wheel-reversal") {
+      try wheelReversal(t, binary: binary, artifacts: artifacts)
+      return
+    }
+    if CommandLine.arguments.contains("--wheel") {
+      try wheelAxes(t)
+      return
+    }
     if navigation {
-      try profileNavigation(t, binary: binary, artifacts: artifacts)
+      try profileNavigation(t, binary: binary, artifacts: artifacts, requestLog: fixture.appendingPathComponent("requests.log"))
       return
     }
     if stress {
@@ -391,13 +782,15 @@ struct Smoke {
       repeat {
         for (key, label) in [("2", "Normal · Files"), ("1", "Normal · Pull requests")] {
           let start = ProcessInfo.processInfo.systemUptime
-          t.key(key)
+          try t.navigationKey(key)
           try t.wait(label)
           times.append((ProcessInfo.processInfo.systemUptime - start) * 1000)
         }
       } while ProcessInfo.processInfo.systemUptime < focusDeadline
       try t.wait("Ready", timeout: 60)
-      t.key("2\r")
+      try t.focusPane(2)
+      t.key("\r")
+      try t.focusPane(3)
       try t.wait("Loading diff")
       if !profile {
         try t.snapshot("loading-diff")
@@ -406,13 +799,13 @@ struct Smoke {
       repeat {
         for (key, label) in [("1", "Normal · Pull requests"), ("2", "Normal · Files"), ("3", "Normal · Diff")] {
           let start = ProcessInfo.processInfo.systemUptime
-          t.key(key)
+          try t.navigationKey(key)
           try t.wait(label)
           times.append((ProcessInfo.processInfo.systemUptime - start) * 1000)
         }
       } while ProcessInfo.processInfo.systemUptime < diffDeadline
       try t.wait("Ready", timeout: 60)
-      t.key("2")
+      try t.focusPane(2)
       try t.wait("Normal · Files")
       t.key("j")
       try t.wait("Loading diff")
@@ -425,12 +818,13 @@ struct Smoke {
         "samples": times.count,
         "columns": columns, "rows": rows,
         "cpu_sampling": sampling,
+        "diagnostics": env["TATARA_INPUT_TRACE"] != nil,
         "binary_sha256": SHA256.hash(data: Data(contentsOf: binary, options: .mappedIfSafe))
           .map { String(format: "%02x", $0) }.joined(),
         "os": ProcessInfo.processInfo.operatingSystemVersionString,
       ]
       if profile {
-        t.key("3")
+        try t.focusPane(3)
         try t.wait("Normal · Diff")
         try t.waitUntil("settled diff viewport", timeout: 60) {
           t.line(-2).contains("Ready") && t.text.contains("let value = 2") && position(t) == 1
@@ -440,7 +834,7 @@ struct Smoke {
         for step in 0 ..< 20 {
           for (key, moved) in [("\u{6}", true), ("\u{2}", false)] {
             let start = ProcessInfo.processInfo.systemUptime
-            t.key(key)
+            try t.navigationKey(key)
             try t
               .waitUntil("profile main scrolling \(moved ? "down" : "up") \(step)") { moved ? position(t) > 1 : position(t) == 1 }
             scrollTimes.append((ProcessInfo.processInfo.systemUptime - start) * 1000)
@@ -466,7 +860,7 @@ struct Smoke {
           "CPU sample output is missing.",
         )
       }
-      if profile {
+      if profile, env["SWIFTTUI_DIAGNOSTICS"] != nil {
         try summarizeFrames(artifacts)
       }
       print("Swift PTY: focus during large PR preparation and an in-flight diff passed.")
@@ -480,17 +874,12 @@ struct Smoke {
     try expect(t.text.contains("Normal · Pull requests"), "Wheel scrolling stole keyboard focus.")
     t.wheel(column: 100, row: 10, down: false, count: 3)
     try t.waitUntil("main wheel top boundary") { position(t) == 1 }
+    let overviewTitle = t.line(2)
     t.wheel(column: 10, row: 7, down: true)
-    try t.wait("Short.")
-    t.wheel(column: 10, row: 7, down: false)
-    try t.wait("BODY 0000")
     t.wheel(column: 10, row: 25, down: true)
-    try t.wait("let value = 2")
-    try expect(t.text.contains("Normal · Pull requests"), "File wheel scrolling stole keyboard focus.")
-    t.wheel(column: 10, row: 25, down: false)
-    try t.wait("Ready")
-    t.key("[")
-    try t.wait("BODY 0000")
+    t.read(for: 0.2)
+    try expect(t.line(2) == overviewTitle && t.text.contains("BODY 0000"), "Sidebar wheel changed the selected PR or file.")
+    try expect(t.text.contains("Normal · Pull requests"), "Sidebar wheel stole keyboard focus.")
     t.key("\u{6}")
     try t.waitUntil("sidebar paging") { position(t) > 1 }
     t.key("\u{2}")
@@ -499,7 +888,8 @@ struct Smoke {
     try t.wait("Filter · Pull requests")
     t.key("\u{1B}")
     try t.wait("Normal · Pull requests")
-    t.key("2/Tests\r")
+    try t.focusPane(2)
+    t.key("/Tests\r")
     try t.wait("Filter · Files")
     try t.wait("6/12")
     try t.wait("Ready")
@@ -507,7 +897,8 @@ struct Smoke {
     try t.wait("Normal · Files")
     t.key("[")
     try t.wait("BODY 0000")
-    t.key("3/TARGET\r")
+    try t.focusPane(3)
+    t.key("/TARGET\r")
     try t.wait("Find · Overview")
     try t.wait("BODY 0250")
     t.key("n")
@@ -547,14 +938,18 @@ struct Smoke {
     let before = try repositoryRequests()
     let warm = try PTY(
       binary: binary,
-      arguments: ["--repo", "example/reviews", "--language", "en"],
+      arguments: ["--repo", "example/reviews", "--language", "en"] + (CommandLine.arguments.contains("--rich") ? [
+        "--detail-level",
+        "rich",
+      ] : []),
       environment: env,
       artifacts: artifacts.appendingPathComponent("warm"),
     )
     defer { warm.close() }
     try warm.wait("BODY 0000")
     try warm.wait("Ready")
-    warm.key("2/Tests\r")
+    try warm.focusPane(2)
+    warm.key("/Tests\r")
     try warm.wait("Filter · Files")
     try warm.wait("let value = 2")
     try expect(try repositoryRequests() == before, "Warm restart repeated repository API calls.")
@@ -562,6 +957,234 @@ struct Smoke {
     try warm.finish()
     print("Swift PTY: pane search, popup, mouse wheel, scrollbar, paging, resize and Escape passed.")
     print("Swift PTY: persistent cache reused metadata, snapshots and diff across processes.")
+  }
+
+  static func wheelBoundary(_ t: PTY, binary: URL, artifacts: URL) throws {
+    try t.wait("File0.swift", timeout: 60)
+    try t.focusPane(2)
+    t.key("\r")
+    try t.focusPane(3)
+    try t.waitUntil("short diff prepared", timeout: 60) {
+      t.line(2).contains("Diff") && t.line(-2).contains("/81") && t.line(-2).contains("Ready")
+    }
+    let bottom = max(1, 81 - (t.rows - 6) + 1)
+    func cursorStatus() -> String? {
+      t.line(-2).components(separatedBy: "RIGHT · ").dropFirst().first?.split(separator: " ").first.map(String.init)
+    }
+    guard let originalCursor = cursorStatus() else { throw SmokeError("Missing source cursor status.") }
+    var measurements: [[String: Any]] = []
+    for downFirst in [true, false] {
+      var frames: [(time: Double, offset: Int)] = []
+      t.onCompletedFrame = { frames.append(($0, position(t))) }
+      let down = "\u{1B}[<65;100;10M", up = "\u{1B}[<64;100;10M"
+      let count = 240
+      let start = ProcessInfo.processInfo.systemUptime
+      let lastInput = try t.replay(
+        Array(repeating: downFirst ? down : up, count: count)
+          + Array(repeating: downFirst ? up : down, count: 6),
+        interval: 0.001,
+      )
+      let reversed = t.lastReplayInputTimes[count]
+      let boundary = downFirst ? bottom : 1
+      let expected = downFirst ? max(1, bottom - 18) : min(bottom, 19)
+      try t.waitUntil("reversed away from boundary", timeout: 60) { position(t) == expected }
+      t.onCompletedFrame = nil
+      guard let reached = frames.first(where: { $0.offset == boundary }), reached.time <= reversed,
+            let firstReverse = frames.first(where: { $0.time >= reversed && (downFirst ? $0.offset < bottom : $0.offset > 1) })
+      else { throw SmokeError("The wheel replay did not reach its boundary before reversal.") }
+      measurements.append([
+        "boundary": downFirst ? "bottom" : "top", "initial_direction_events": count,
+        "boundary_before_reverse_ms": (reversed - reached.time) * 1000,
+        "first_reverse_frame_ms": (firstReverse.time - reversed) * 1000,
+        "tail_after_last_input_ms": max(0, ((frames.last?.time ?? lastInput) - lastInput) * 1000),
+        "frames": frames.map { ["at_ms": ($0.time - start) * 1000, "offset": Double($0.offset)] },
+      ])
+      try expect(t.keyboardPane == 3 && cursorStatus() == originalCursor, "Boundary wheel changed focus or source cursor.")
+    }
+    let result: [String: Any] = try [
+      "binary_sha256": SHA256.hash(data: Data(contentsOf: binary)).map { String(format: "%02x", $0) }.joined(),
+      "columns": t.columns, "rows": t.rows, "measurements": measurements,
+    ]
+    try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
+      .write(to: artifacts.appendingPathComponent("boundary.json"))
+    for var m in measurements {
+      m["frames"] = nil
+      try print(String(decoding: JSONSerialization.data(withJSONObject: m, options: [.sortedKeys]), as: UTF8.self))
+    }
+    t.key("q")
+    try t.finish()
+  }
+
+  static func wheelReversal(_ t: PTY, binary: URL, artifacts: URL) throws {
+    try t.wait("File0.swift", timeout: 60)
+    try t.focusPane(2)
+    t.key("\r")
+    try t.focusPane(3)
+    try t.wait("25001", timeout: 60)
+    try t
+      .waitUntil("prepared reversal document", timeout: 60) {
+        position(t) == 1 && (t.line(-2).contains("Ready") || t.line(-2).contains("L · Load more"))
+      }
+    var measurements: [[String: Any]] = []
+    let repetitions = CommandLine.arguments.firstIndex(of: "--reversal-repetitions").flatMap { index in
+      CommandLine.arguments.indices.contains(index + 1) ? Int(CommandLine.arguments[index + 1]) : nil
+    } ?? 1
+    try expect((1 ... 10).contains(repetitions), "Reversal repetitions must be between 1 and 10.")
+    for (trial, interval) in (0 ..< repetitions).flatMap({ trial in [0.001, 0.004, 0.012].map { (trial, $0) } }) {
+      var frames: [(time: Double, offset: Int)] = []
+      t.onCompletedFrame = { time in frames.append((time, position(t))) }
+      let count = 60
+      let down = "\u{1B}[<65;100;10M", up = "\u{1B}[<64;100;10M"
+      let initial = ProcessInfo.processInfo.systemUptime
+      let lastSent = try t.replay(Array(repeating: down, count: count) + Array(repeating: up, count: count), interval: interval)
+      let reversed = t.lastReplayInputTimes[count]
+      try t.waitUntil("reversal returned to top", timeout: 60) { position(t) == 1 }
+      t.onCompletedFrame = nil
+      let atReversal = frames.last(where: { $0.time <= reversed })?.offset ?? 1
+      var previous = atReversal
+      var firstReverse: Double?
+      var wrongDirectionFrames = 0
+      for frame in frames where frame.time >= reversed {
+        if frame.offset > previous {
+          wrongDirectionFrames += 1
+        }
+        if firstReverse == nil, frame.offset < previous {
+          firstReverse = frame.time
+        }
+        previous = frame.offset
+      }
+      guard let firstReverse else { throw SmokeError("No reversed scrolling frame was observed.") }
+      measurements.append([
+        "trial": trial + 1, "interval_ms": interval * 1000, "events_each_direction": count,
+        "offset_when_reversed": atReversal,
+        "first_reverse_frame_ms": (firstReverse - reversed) * 1000,
+        "old_direction_frames_after_reversal": wrongDirectionFrames,
+        "tail_after_last_input_ms": max(0, ((frames.last?.time ?? lastSent) - lastSent) * 1000),
+        "frames": frames.map { ["at_ms": ($0.time - initial) * 1000, "offset": Double($0.offset)] },
+        "reverse_input_at_ms": (reversed - initial) * 1000,
+      ])
+      try expect(t.keyboardPane == 3, "Wheel reversal changed focus.")
+    }
+    let result: [String: Any] = try [
+      "binary_sha256": SHA256.hash(data: Data(contentsOf: binary)).map { String(format: "%02x", $0) }.joined(),
+      "columns": t.columns, "rows": t.rows, "measurements": measurements,
+    ]
+    try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
+      .write(to: artifacts.appendingPathComponent("reversal.json"))
+    for var measurement in measurements {
+      measurement["frames"] = nil
+      try print(String(decoding: JSONSerialization.data(withJSONObject: measurement, options: [.sortedKeys]), as: UTF8.self))
+    }
+    let down = "\u{1B}[<65;100;10M", up = "\u{1B}[<64;100;10M"
+    t.key(String(repeating: down, count: 60) + "\t" + String(repeating: up, count: 60))
+    try t.waitUntil("wheel and keyboard barrier preserved") { t.keyboardPane == 1 && position(t) == 1 }
+    t.key("q")
+    try t.finish()
+  }
+
+  static func wheelAxes(_ t: PTY) throws {
+    try t.wait("Files · 120/120", timeout: 60)
+    try t.wait("A large paragraph")
+    var failures: [String] = []
+    for pane in 1 ... 3 {
+      try t.focusPane(pane)
+      if pane == 3 {
+        try t.wait("25001")
+      }
+      let column = pane == 3 ? 100 : 10
+      let row = pane == 2 ? 25 : 10
+      func current() -> Int? {
+        pane == 3 ? position(t) : t.visibleFixtureIndices(files: pane == 2).first
+      }
+      if pane == 2 {
+        try t.waitUntil("file list after PR reversal") { current() != nil && t.text.contains("Files · 120/120") }
+      }
+      try t.waitUntil("prepared wheel target", timeout: 60) {
+        !t.line(-2).contains("Loading") && !t.line(-2).contains("Preparing")
+      }
+      let focusedPane = t.keyboardPane
+      func documentHeader() -> String {
+        String(t.line(2).dropFirst(t.sidebarWidth + 1).dropLast())
+      }
+      let documentTitle = documentHeader()
+      let cursorStatus = t.line(-2).components(separatedBy: "RIGHT · ").dropFirst().first?.split(separator: " ").first
+        .map(String.init)
+      t.wheel(column: column, row: row, down: true, count: 4)
+      try t.waitUntil("wheel baseline in pane \(pane)") { (current() ?? 0) >= 12 }
+      for slow in [true, false] {
+        let before = current()
+        // SGR 66/67 are horizontal wheel buttons; modifiers must retain that axis.
+        for code in [66, 67, 70, 71, 82, 83] {
+          t.key("\u{1B}[<\(code);\(column);\(row)M")
+          if slow {
+            t.read(for: 0.12)
+          }
+          if slow, current() != before {
+            failures
+              .append("pane \(pane), horizontal code \(code): \(String(describing: before)) -> \(String(describing: current()))")
+          }
+        }
+        t.read(for: 0.2)
+        if current() != before {
+          failures.append("pane \(pane), horizontal burst changed position")
+        }
+        let start = current()!
+        for _ in 0 ..< 4 {
+          t.key("\u{1B}[<65;\(column);\(row)M\u{1B}[<66;\(column);\(row)M")
+          if slow {
+            t.read(for: 0.12)
+          }
+        }
+        t.read(for: 0.2)
+        if current() != start +
+          12
+        {
+          failures.append("pane \(pane), mixed downward wheel: expected \(start + 12), got \(String(describing: current()))")
+        }
+        t.wheel(column: column, row: row, down: false, count: 4)
+        t.read(for: 0.2)
+        if current() != start {
+          failures.append("pane \(pane), upward wheel did not return to baseline")
+        }
+      }
+      try expect(t.keyboardPane == focusedPane, "Wheel input changed keyboard focus.")
+      try expect(documentHeader() == documentTitle, "Wheel input changed the selected PR/file or prepared document.")
+      if pane == 3 {
+        let currentCursor = t.line(-2).components(separatedBy: "RIGHT · ").dropFirst().first?.split(separator: " ").first
+          .map(String.init)
+        try expect(currentCursor == cursorStatus, "Wheel input moved the Diff source cursor.")
+      }
+      if pane < 3 {
+        let files = pane == 2
+        t.key("gg" + String(repeating: "j", count: 20))
+        try t.waitUntil("sidebar reversal baseline") { t.selectedFixtureIndex(files: files) == 20 }
+        let first = t.visibleFixtureIndices(files: files).min()!
+        for selected in stride(from: 19, through: first + 2, by: -1) {
+          t.key("k")
+          try t.waitUntil("sidebar upward selection \(selected)") { t.selectedFixtureIndex(files: files) == selected }
+          if t.visibleFixtureIndices(files: files).min() != first {
+            failures.append("pane \(pane), viewport moved before the upper context margin")
+          }
+        }
+        t.key("k")
+        try t.waitUntil("sidebar upper margin crossed") { t.selectedFixtureIndex(files: files) == first + 1 }
+        if t.visibleFixtureIndices(files: files).min() != first - 1 {
+          failures.append("pane \(pane), crossing upper margin did not scroll one row")
+        }
+        t.key("j")
+        try t.waitUntil("sidebar downward reversal") { t.selectedFixtureIndex(files: files) == first + 2 }
+        if t.visibleFixtureIndices(files: files).min() != first - 1 {
+          failures.append("pane \(pane), downward reversal moved the viewport inside its margins")
+        }
+      }
+      try t.snapshot("pane-\(pane)")
+    }
+    try expect(failures.isEmpty, failures.joined(separator: "\n"))
+    t.key("q")
+    try t.finish()
+    print(
+      "Swift PTY: independent viewport scrolling, preserved pane focus and source cursor, wheel axes, and keyboard selection margins passed.",
+    )
   }
 
   static func position(_ t: PTY) -> Int {
@@ -574,21 +1197,54 @@ struct Smoke {
     return Int(text[range]) ?? 0
   }
 
-  static func profileNavigation(_ t: PTY, binary: URL, artifacts: URL, itemNumbers: [String] = ["1", "2"]) throws {
+  static func profilingEnvironment(_ directory: URL) -> [String: String] {
+    guard !CommandLine.arguments.contains("--no-diagnostics") else { return [:] }
+    var environment = ["TATARA_INPUT_TRACE": directory.appendingPathComponent("input.tsv").path]
+    // Retained only for comparisons against archived SwiftTUI executables.
+    if CommandLine.arguments.contains("--legacy-frame-diagnostics") {
+      environment["SWIFTTUI_DIAGNOSTICS"] = directory.appendingPathComponent("diagnostics.tsv").path
+    }
+    return environment
+  }
+
+  static func profileNavigation(
+    _ t: PTY, binary: URL, artifacts: URL, itemNumbers: [String] = ["1", "2"], requestLog: URL? = nil,
+  ) throws {
     var observations: [[String: Any]] = []
+    var skippedMeasurements: [String] = []
+    let rendererProbe = CommandLine.arguments.contains("--renderer-probe")
+    try expect(
+      !rendererProbe || requestLog != nil && ["--loading-burst", "--dense-navigation", "--directional-burst"]
+        .allSatisfy(CommandLine.arguments.contains),
+      "Renderer probe requires the dense directional loading fixture.",
+    )
+    func selectedPR(_ number: String) -> Bool {
+      (0 ..< t.rows / 2).contains { row in
+        let sidebar = String(t.line(row).prefix(t.sidebarWidth))
+        return sidebar.dropFirst().hasPrefix("▸") && sidebar.contains("#\(number) ")
+      }
+    }
     let origin = ProcessInfo.processInfo.systemUptime
     let sampler = Process()
     let sampling = CommandLine.arguments.contains("--sample")
     func settled() throws {
-      try t.waitUntil("settled selected document", timeout: 60) { t.line(-2).contains("Ready") && position(t) > 0 }
+      try t.waitUntil("settled selected document", timeout: 60) {
+        (t.line(-2).contains("Ready") || t.line(-2).contains("L · Load more")) && position(t) > 0
+      }
+      try validateDocumentViewport(t, fixture: requestLog != nil)
     }
     func select(_ key: String, stage: String, _ selected: () -> Bool) throws {
       let start = ProcessInfo.processInfo.systemUptime
-      t.key(key)
+      try t.navigationKey(key)
       try t.waitUntil("\(stage) selection \(key)", selected)
       observations.append(["stage": stage, "key": key, "at_ms": (start - origin) * 1000,
                            "latency_ms": (ProcessInfo.processInfo.systemUptime - start) * 1000,
                            "status": t.line(-2).trimmingCharacters(in: .whitespaces)])
+      if stage.hasSuffix("warmup") {
+        try settled()
+        observations.append(["stage": stage + "-ready", "key": key, "at_ms": (start - origin) * 1000,
+                             "latency_ms": (ProcessInfo.processInfo.systemUptime - start) * 1000])
+      }
     }
     func bursts(_ stage: String, scope: String) throws {
       guard CommandLine.arguments.contains("--burst") else { return }
@@ -606,62 +1262,201 @@ struct Smoke {
         }
       }
     }
-    try settled()
-    try select("j", stage: "pr-warmup") { t.text.contains("▸ #\(itemNumbers[1]) ") }
-    try settled()
-    try select("k", stage: "pr-warmup") { t.text.contains("▸ #\(itemNumbers[0]) ") }
-    try settled()
-    if sampling {
-      sampler.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
-      sampler.arguments = [String(t.pid), "20", "1", "-file", artifacts.appendingPathComponent("cpu.sample.txt").path]
-      sampler.standardOutput = FileHandle.nullDevice
-      sampler.standardError = FileHandle.nullDevice
-      try sampler.run()
-    }
-    defer {
-      if sampling {
-        sampler.waitUntilExit()
+    func loadingBursts(_ stage: String, scope: String) throws {
+      guard CommandLine.arguments.contains("--loading-burst") else { return }
+      let directional = CommandLine.arguments.contains("--directional-burst")
+      try expect(
+        !directional || requestLog != nil && CommandLine.arguments.contains("--dense-navigation"),
+        "Directional replay requires the dense synthetic fixture.",
+      )
+      for count in [8, 32, 64] {
+        let start = ProcessInfo.processInfo.systemUptime
+        let initialStatus = t.line(-2).trimmingCharacters(in: .whitespaces)
+        var frames: [[String: Any]] = []
+        t.onCompletedFrame = { time in
+          let selected: Int? = if requestLog != nil {
+            t.selectedFixtureIndex(files: stage == "file")
+          } else if stage == "pr" {
+            itemNumbers.firstIndex { selectedPR($0) }
+          } else {
+            (0 ..< 2).first { t.selectedFileRow($0) }
+          }
+          frames.append(["at_ms": (time - start) * 1000,
+                         "selected_index": selected ?? -1])
+        }
+        let keys = directional ? Array(repeating: "j", count: count) :
+          Array(repeating: ["j", "k"], count: count / 2).flatMap(\.self) + ["?"]
+        let sent = try t.replay(keys, interval: 0.025)
+        if directional {
+          try t.waitUntil("all \(count) navigation inputs reflected") { t.selectedFixtureIndex(files: stage == "file") == count }
+        } else if !t.hasCompletedFrame(containing: "Previous pane") {
+          try t.wait("Previous pane")
+        }
+        let completed = ProcessInfo.processInfo.systemUptime
+        t.onCompletedFrame = nil
+        if directional {
+          try t.requireSelectionContext(files: stage == "file", selected: count)
+        }
+        observations.append(["stage": "\(stage)-loading-burst-\(count)", "key": directional ? "j" : "?",
+                             "at_ms": (start - origin) * 1000, "sent_uptime_ms": sent * 1000,
+                             "input_count": count, "interval_ms": 25,
+                             "input_sent_ms": t.lastReplayInputTimes.map { ($0 - start) * 1000 },
+                             "replay_ms": (sent - start) * 1000,
+                             "total_ms": (completed - start) * 1000,
+                             "latency_ms": (completed - sent) * 1000, "initial_status": initialStatus,
+                             "frames": frames])
+        if !directional {
+          t.key("\u{1B}")
+          try t.wait("Normal · \(scope)")
+        }
+        observations[observations.count - 1]["final_status"] = t.line(-2).trimmingCharacters(in: .whitespaces)
+        try t.snapshot("\(stage)-loading-burst-\(count)")
+        if directional {
+          t.key("gg")
+          try t.waitUntil("reset selection after directional replay") { t.selectedFixtureIndex(files: stage == "file") == 0 }
+        }
       }
     }
-    for _ in 0 ..< 4 {
-      try select("j", stage: "pr-settled") { t.text.contains("▸ #\(itemNumbers[1]) ") }
+    if CommandLine.arguments.contains("--viewport-check") {
       try settled()
-      try select("k", stage: "pr-settled") { t.text.contains("▸ #\(itemNumbers[0]) ") }
+      try t.focusPane(3)
+      try t.wait("Normal · Overview")
+      for size in [(80, 30), (160, 42), (104, 56)] {
+        t.resize(columns: size.0, rows: size.1)
+        try t.waitUntil("resized document and rendered viewport agree", timeout: 30) {
+          let ready = t.line(-2).contains("Ready") || t.line(-2).contains("L · Load more")
+          guard ready, position(t) > 0 else { return false }
+          return (try? validateDocumentViewport(t, fixture: requestLog != nil)) != nil
+        }
+        try t.snapshot("viewport-\(size.0)x\(size.1)")
+      }
+      t.key("q")
+      try t.finish()
+      print("Verified initial viewport, resized document ranges, and continuous source text.")
+      return
+    }
+    try loadingBursts("pr", scope: "Pull requests")
+    if !rendererProbe {
+      if CommandLine.arguments.contains("--cold-navigation") {
+        for _ in 0 ..< 10 {
+          try select("j", stage: "pr-cold") { selectedPR(itemNumbers[1]) }
+          try select("k", stage: "pr-cold") { selectedPR(itemNumbers[0]) }
+        }
+      }
       try settled()
+      try select("j", stage: "pr-warmup") { selectedPR(itemNumbers[1]) }
+      try settled()
+      try select("k", stage: "pr-warmup") { selectedPR(itemNumbers[0]) }
+      try settled()
+      if sampling {
+        sampler.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
+        sampler.arguments = [String(t.pid), "20", "1", "-file", artifacts.appendingPathComponent("cpu.sample.txt").path]
+        sampler.standardOutput = FileHandle.nullDevice
+        sampler.standardError = FileHandle.nullDevice
+        try sampler.run()
+      }
+      defer {
+        if sampling {
+          sampler.waitUntilExit()
+        }
+      }
+      for _ in 0 ..< 4 {
+        try select("j", stage: "pr-settled") { selectedPR(itemNumbers[1]) }
+        try settled()
+        try select("k", stage: "pr-settled") { selectedPR(itemNumbers[0]) }
+        try settled()
+      }
+      for _ in 0 ..< 12 {
+        try select("j", stage: "pr-inflight") { selectedPR(itemNumbers[1]) }
+        t.read(for: 0.15)
+        try select("k", stage: "pr-inflight") { selectedPR(itemNumbers[0]) }
+        t.read(for: 0.15)
+      }
+      try bursts("pr", scope: "Pull requests")
     }
-    for _ in 0 ..< 12 {
-      try select("j", stage: "pr-inflight") { t.text.contains("▸ #\(itemNumbers[1]) ") }
-      t.read(for: 0.15)
-      try select("k", stage: "pr-inflight") { t.text.contains("▸ #\(itemNumbers[0]) ") }
-      t.read(for: 0.15)
-    }
-    try bursts("pr", scope: "Pull requests")
     try settled()
-    t.key("2")
+    if rendererProbe {
+      try t.snapshot("settled-overview")
+    }
+    try t.focusPane(2)
     try t.wait("Normal · Files")
     t.key("\r")
+    try t.focusPane(3)
     try t.wait("Normal · Diff")
-    try settled()
-    t.key("2")
-    try t.wait("Normal · Files")
-    try select("j", stage: "file-warmup") { t.selectedFileRow(1) }
-    try settled()
-    try select("k", stage: "file-warmup") { t.selectedFileRow(0) }
-    try settled()
-    for _ in 0 ..< 8 {
-      try select("j", stage: "file-settled") { t.selectedFileRow(1) }
-      try settled()
-      try select("k", stage: "file-settled") { t.selectedFileRow(0) }
-      try settled()
+    if CommandLine.arguments.contains("--loading-burst") {
+      try t.focusPane(2)
+      try t.wait("Normal · Files")
+      try loadingBursts("file", scope: "Files")
+      try t.focusPane(3)
+      try t.wait("Normal · Diff")
     }
-    for _ in 0 ..< 12 {
-      try select("j", stage: "file-inflight") { t.selectedFileRow(1) }
-      t.read(for: 0.15)
-      try select("k", stage: "file-inflight") { t.selectedFileRow(0) }
-      t.read(for: 0.15)
+    if !rendererProbe {
+      if CommandLine.arguments.contains("--cold-navigation") {
+        try t.focusPane(2)
+        try t.wait("Normal · Files")
+        for _ in 0 ..< 10 {
+          try select("j", stage: "file-cold") { t.selectedFileRow(1) }
+          try select("k", stage: "file-cold") { t.selectedFileRow(0) }
+        }
+        try t.focusPane(3)
+        try t.wait("Normal · Diff")
+      }
+      try settled()
+      try t.focusPane(2)
+      try t.wait("Normal · Files")
+      try select("j", stage: "file-warmup") { t.selectedFileRow(1) }
+      try settled()
+      try select("k", stage: "file-warmup") { t.selectedFileRow(0) }
+      try settled()
+      for _ in 0 ..< 8 {
+        try select("j", stage: "file-settled") { t.selectedFileRow(1) }
+        try settled()
+        try select("k", stage: "file-settled") { t.selectedFileRow(0) }
+        try settled()
+      }
+      for _ in 0 ..< 12 {
+        try select("j", stage: "file-inflight") { t.selectedFileRow(1) }
+        t.read(for: 0.15)
+        try select("k", stage: "file-inflight") { t.selectedFileRow(0) }
+        t.read(for: 0.15)
+      }
+      try bursts("file", scope: "Files")
+      try settled()
+      if requestLog != nil {
+        try t.focusPane(3)
+        try t.wait("Normal · Diff")
+        for _ in 0 ..< 8 {
+          for key in ["j", "k"] {
+            let previous = t.cursorLine()
+            try select(key, stage: "diff-cursor") { t.cursorLine() != previous }
+          }
+        }
+        let query = CommandLine.arguments.contains("--wide-lines") ? "source" : "value"
+        for _ in 0 ..< 6 {
+          try select("/" + query + "\r", stage: "diff-search") {
+            t.line(-2).contains("Find · Diff") && t.line(-2).contains("1/") && !t.line(-2).contains("Finding")
+          }
+          t.key("\u{1B}")
+          try t.wait("Normal · Diff")
+        }
+      }
     }
-    try bursts("file", scope: "Files")
     try settled()
+    if rendererProbe {
+      let footer = t.line(-2)
+      guard let rowCount = footer.split(separator: "/").last.flatMap({ Int($0.trimmingCharacters(in: .whitespaces)) })
+      else { throw SmokeError("Cannot read the document row count before paging.") }
+      if rowCount > t.rows - 6 {
+        for _ in 0 ..< 8 {
+          let start = position(t)
+          try select("\u{6}", stage: "diff-page") { position(t) > start }
+          try select("\u{2}", stage: "diff-page") { position(t) == start }
+        }
+      } else {
+        skippedMeasurements.append("diff-page: all \(rowCount) source rows fit in the viewport")
+      }
+      try t.snapshot("settled-diff")
+    }
     t.key("q")
     try t.finish()
     if sampling {
@@ -669,8 +1464,17 @@ struct Smoke {
       try expect(sampler.terminationStatus == 0, "CPU sampling failed.")
     }
     var result: [String: Any] = try ["samples": observations, "cpu_sampling": sampling, "columns": t.columns, "rows": t.rows,
+                                     "preview_recording": CommandLine.arguments.contains("--record-preview"),
+                                     "skipped_measurements": skippedMeasurements,
+                                     "renderer": ProcessInfo.processInfo.environment["TATARA_PROBE_RENDERER"] ?? "termloom",
                                      "binary_sha256": SHA256.hash(data: Data(contentsOf: binary))
                                        .map { String(format: "%02x", $0) }.joined()]
+    if let requestLog {
+      let requests = try String(contentsOf: requestLog, encoding: .utf8)
+      try requests.write(to: artifacts.appendingPathComponent("requests.log"), atomically: true, encoding: .utf8)
+      result["requests"] = Dictionary(grouping: requests.split(separator: "\n").map(String.init), by: { $0 })
+        .mapValues(\.count)
+    }
     for stage in Set(observations.compactMap { $0["stage"] as? String }) {
       let values = observations.filter { $0["stage"] as? String == stage }.compactMap { $0["latency_ms"] as? Double }.sorted()
       result[stage] = [
@@ -681,9 +1485,38 @@ struct Smoke {
     }
     let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
     try data.write(to: artifacts.appendingPathComponent("navigation.json"))
-    try summarizeFrames(artifacts)
+    if CommandLine.arguments.contains("--legacy-frame-diagnostics") {
+      try summarizeFrames(artifacts)
+    }
     result["samples"] = observations.count
     try print(String(decoding: JSONSerialization.data(withJSONObject: result, options: .sortedKeys), as: UTF8.self))
+  }
+
+  static func validateDocumentViewport(_ t: PTY, fixture: Bool) throws {
+    let footer = t.line(-2)
+    let expression = try NSRegularExpression(pattern: #"(\d+)–(\d+)/(\d+)"#)
+    guard let match = expression.firstMatch(in: footer, range: NSRange(footer.startIndex..., in: footer)) else {
+      throw SmokeError("Missing document range in the completed frame.")
+    }
+    let values = (1 ... 3).map { Int(footer[Range(match.range(at: $0), in: footer)!])! }
+    let expectedEnd = min(values[2], values[0] + max(1, t.rows - 6) - 1)
+    try expect(values[1] == expectedEnd, "Document model height does not match the rendered viewport.")
+    guard fixture else { return }
+
+    // Synthetic sidebar labels are ASCII, so these offsets also name terminal cells.
+    let sidebarWidth = t.sidebarWidth
+    let contentWidth = max(1, t.columns - sidebarWidth - 2)
+    func content(_ row: Int) -> String {
+      String(t.line(row).dropFirst(sidebarWidth + 1).prefix(contentWidth))
+    }
+    guard let paragraph = (0 ..< max(0, t.rows - 3)).first(where: {
+      content($0).hasPrefix("A large paragraph with")
+    }) else { return }
+    let displayed = (paragraph ..< min(paragraph + 3, t.rows - 3)).map(content)
+      .joined(separator: " ").split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    let expected = String(repeating: "A large paragraph with source coordinates and searchable text. ", count: 16)
+      .split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    try expect(expected.hasPrefix(displayed), "The visible paragraph loses source text between wrapped rows.")
   }
 
   static func summarizeFrames(_ directory: URL) throws {
@@ -707,7 +1540,7 @@ struct Smoke {
 
   static func bounds(_ t: PTY) throws {
     try expect(t.line(-1).contains("Help"), "Footer left the viewport.")
-    try expect(t.text.contains("2 · Files"), "Files pane left the viewport.")
+    try expect(t.text.contains("Files ·"), "Files pane left the viewport.")
   }
 
   static func fixtureTool(_ name: String) throws {
@@ -715,11 +1548,12 @@ struct Smoke {
     guard let folder = env["TATARA_SMOKE_FIXTURE"] else { throw SmokeError("Missing fixture directory.") }
     let stress = env["TATARA_SMOKE_STRESS"] == "1"
     let args = Array(CommandLine.arguments.dropFirst())
-    let endpoint = args.first { $0.hasPrefix("repos/") || $0 == "search/issues" } ?? "user"
+    let endpoint = args.first { $0.hasPrefix("repos/") || $0 == "search/issues" || $0 == "graphql" } ?? "user"
     let log = URL(fileURLWithPath: folder).appendingPathComponent("requests.log")
     let fd = Darwin.open(log.path, O_WRONLY | O_CREAT | O_APPEND, 0o600)
     if fd >= 0 {
-      let text = Data("\(name) \(endpoint)\n".utf8)
+      let command = name == "difft" ? (args.contains("--version") ? "version" : "render") : endpoint
+      let text = Data("\(name) \(command)\n".utf8)
       text.withUnsafeBytes { _ = Darwin.write(fd, $0.baseAddress, $0.count) }
       _ = Darwin.close(fd)
     }
@@ -779,7 +1613,9 @@ struct Smoke {
         count: 5,
       ) }.joined(separator: "\n")
     let base = String(repeating: "a", count: 40), head = String(repeating: "b", count: 40)
-    let items: [[String: Any]] = (1 ... 2).map { [
+    let itemCount = env["TATARA_SMOKE_DENSE"] == "1" ? 100 : 2
+    let fileCount = env["TATARA_SMOKE_DENSE"] == "1" ? 120 : 12
+    let items: [[String: Any]] = (1 ... itemCount).map { [
       "number": $0,
       "title": $0 == 1 ? "Long overview" : "Short overview",
       "user": ["login": "author"],
@@ -789,7 +1625,25 @@ struct Smoke {
       "labels": [],
       "draft": false,
     ] }
-    let files: [[String: Any]] = (0 ..< 12).map { [
+    if endpoint == "graphql" {
+      let input = try JSONSerialization.jsonObject(with: FileHandle.standardInput.readDataToEndOfFile()) as? [String: Any]
+      let query = input?["query"] as? String ?? ""
+      var nodes: [String: Any] = [:]
+      for (index, item) in items.enumerated() where query.contains("p\(index + 1): pullRequest") {
+        nodes["p\(index + 1)"] = [
+          "number": index + 1, "url": item["html_url"]!, "state": "OPEN", "isDraft": false,
+          "title": item["title"]!, "body": item["body"]!, "author": ["login": "author"],
+          "createdAt": "2026-09-08T00:00:00Z", "updatedAt": "2026-09-10T00:00:00Z",
+          "headRefOid": head, "headRefName": "feature", "baseRefName": "main",
+          "reviewDecision": "REVIEW_REQUIRED", "statusCheckRollup": ["state": "SUCCESS"],
+          "totalCommentsCount": 0, "additions": fileCount, "deletions": fileCount,
+          "changedFiles": fileCount, "commits": ["totalCount": 1],
+        ]
+      }
+      try FileHandle.standardOutput.write(JSONSerialization.data(withJSONObject: ["data": ["repository": nodes]]))
+      return
+    }
+    let files: [[String: Any]] = (0 ..< fileCount).map { [
       "filename": "\($0 % 2 == 0 ? "Sources" : "Tests")/File\($0).swift",
       "status": "modified",
       "additions": 1,
@@ -803,7 +1657,10 @@ struct Smoke {
       if stress, env["TATARA_SMOKE_WIDE"] == "1" {
         print(String(repeating: String(repeating: "source ", count: 3000) + "\(value)\n", count: 8), terminator: "")
       } else if stress {
-        print(String(repeating: "let value = \(value)\n", count: 25000), terminator: "")
+        print(
+          String(repeating: "let value = \(value)\n", count: env["TATARA_SMOKE_SHORT_SOURCE"] == "1" ? 80 : 25000),
+          terminator: "",
+        )
       } else {
         print("let value = \(value)")
       }
@@ -819,18 +1676,20 @@ struct Smoke {
       result = [["check_runs": []]]
     } else if endpoint.hasSuffix("/status") {
       result = ["statuses": []]
+    } else if endpoint.contains("/labels?") {
+      result = [[["name": "bug"], ["name": "enhancement"]]]
     } else if endpoint.contains("/comments?") || endpoint.contains("/reviews?") {
       result = [[]] as [[String]]
     } else if endpoint.contains("/pulls?") {
       result = items
-    } else if let number = Int(endpoint.components(separatedBy: "/").last ?? ""), (1 ... 2).contains(number) {
+    } else if let number = Int(endpoint.components(separatedBy: "/").last ?? ""), (1 ... itemCount).contains(number) {
       if stress {
         Thread.sleep(forTimeInterval: 2)
       }
       var pr = items[number - 1]
       pr.merge([
         "merged": false,
-        "changed_files": 12,
+        "changed_files": fileCount,
         "mergeable_state": "clean",
         "base": ["sha": base, "ref": "main", "label": "example:main"],
         "head": ["sha": head, "ref": "feature", "label": "example:feature"],

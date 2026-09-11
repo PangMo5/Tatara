@@ -14,8 +14,16 @@ public struct FilterFeature {
     public var query: String
     public var name = ""
     public var presets: [FilterPreset] = []
+    public var labelOffset = 0
+    public var isLoadingLabels = false
+    public var labelsGeneration = 0
+    public var labels: [String] = []
+    public var showsLabels = false
+    public var selectedLabel: String?
+    public var labelsError: TataraError?
     public var selectedID: String?
     public var isSaving = false
+    public var generation = 0
     public var error: TataraError?
     public var message: String?
     public var allPresets: [FilterPreset] {
@@ -31,22 +39,75 @@ public struct FilterFeature {
 
   public enum Action {
     case appeared, apply, close, save, delete
+    case sectionSelected(labels: Bool), labelSelected(String), labelsScrolled(Int)
+    case labelsLoaded(generation: Int, Result<[String], TataraError>)
     case queryChanged(String), nameChanged(String), presetSelected(String)
-    case loaded(Result<[FilterPreset], TataraError>)
+    case loaded(generation: Int, Result<[FilterPreset], TataraError>)
     case delegate(Delegate)
     public enum Delegate { case apply(String), close }
   }
 
+  private enum CancelID { case load, labels }
+
+  @Dependency(ForgeClient.self) var forge
   @Dependency(FilterPresetClient.self) var storage
   @Dependency(\.uuid) var uuid
   public init() {}
   public var body: some ReducerOf<Self> {
     Reduce { state, action in
       switch action {
-      case .appeared: return .run { [repository = state.repository, storage] send in
-          do { try await send(.loaded(.success(storage.load(repository)))) }
-          catch { await send(.loaded(.failure(.wrapping(error)))) }
+      case .appeared:
+        guard !state.isSaving else { return .none }
+        state.generation += 1
+        let generation = state.generation
+        state.isLoadingLabels = true
+        state.labelsGeneration += 1
+        let labelsGeneration = state.labelsGeneration
+        return .merge(
+          .run { [repository = state.repository, forge] send in
+            do {
+              let labels = try await forge.labels(repository)
+              try Task.checkCancellation()
+              await send(.labelsLoaded(generation: labelsGeneration, .success(labels)))
+            } catch is CancellationError {} catch {
+              if !Task.isCancelled {
+                await send(.labelsLoaded(generation: labelsGeneration, .failure(.wrapping(error))))
+              }
+            }
+          }.cancellable(id: CancelID.labels, cancelInFlight: true),
+          .concatenate(.cancel(id: CancelID.load), .run { [repository = state.repository, storage] send in
+            do {
+              let presets = try await storage.load(repository)
+              try Task.checkCancellation()
+              await send(.loaded(generation: generation, .success(presets)))
+            } catch is CancellationError {
+            } catch {
+              if !Task.isCancelled {
+                await send(.loaded(generation: generation, .failure(.wrapping(error))))
+              }
+            }
+          }.cancellable(id: CancelID.load)),
+        )
+      case let .sectionSelected(labels): state.showsLabels = labels
+        return .none
+      case let .labelSelected(label):
+        guard state.labels.contains(label) else { return .none }
+        state.selectedLabel = label
+        state.query = LabelQuery.toggling(label, in: state.query)
+        state.message = nil
+        return .none
+      case let .labelsScrolled(delta):
+        state.labelOffset = max(0, min(max(0, state.labels.count - 1), state.labelOffset + delta))
+        return .none
+      case let .labelsLoaded(generation, result):
+        guard generation == state.labelsGeneration else { return .none }
+        state.isLoadingLabels = false
+        switch result {
+        case let .success(labels): state.labels = labels
+          state.labelsError = nil
+        case let .failure(error): state.labelsError = error
         }
+        return .none
       case let .queryChanged(query): state.query = query
         state.message = nil
         return .none
@@ -74,23 +135,42 @@ public struct FilterFeature {
           name: name,
           query: state.query,
         )
+        state.generation += 1
+        let generation = state.generation
         state.isSaving = true
         state.selectedID = preset.id
-        return .run { [repository = state.repository, storage] send in
+        return .concatenate(.cancel(id: CancelID.load), .run { [repository = state.repository, storage] send in
           do { try await storage.save(repository, preset)
-            try await send(.loaded(.success(storage.load(repository))))
-          } catch { await send(.loaded(.failure(.wrapping(error)))) }
-        }
+            let presets = try await storage.load(repository)
+            try Task.checkCancellation()
+            await send(.loaded(generation: generation, .success(presets)))
+          } catch is CancellationError {
+          } catch {
+            if !Task.isCancelled {
+              await send(.loaded(generation: generation, .failure(.wrapping(error))))
+            }
+          }
+        })
       case .delete:
         guard !state.isSaving, let id = state.selectedID, state.presets.contains(where: { $0.id == id }) else { return .none }
+        state.generation += 1
+        let generation = state.generation
         state.isSaving = true
         state.selectedID = nil
-        return .run { [repository = state.repository, storage] send in
+        return .concatenate(.cancel(id: CancelID.load), .run { [repository = state.repository, storage] send in
           do { try await storage.delete(repository, id)
-            try await send(.loaded(.success(storage.load(repository))))
-          } catch { await send(.loaded(.failure(.wrapping(error)))) }
-        }
-      case let .loaded(result):
+            let presets = try await storage.load(repository)
+            try Task.checkCancellation()
+            await send(.loaded(generation: generation, .success(presets)))
+          } catch is CancellationError {
+          } catch {
+            if !Task.isCancelled {
+              await send(.loaded(generation: generation, .failure(.wrapping(error))))
+            }
+          }
+        })
+      case let .loaded(generation, result):
+        guard generation == state.generation else { return .none }
         state.isSaving = false
         switch result {
         case let .success(presets): state.presets = presets

@@ -3,7 +3,6 @@
 
 import ComposableArchitecture
 import Foundation
-import SwiftTUI
 import TataraCore
 import TataraGitHub
 import TataraKit
@@ -58,6 +57,18 @@ struct ReviewWorkflowTests {
     #expect(throws: TataraError.self) { try Configuration.load(path: file.path) }
   }
 
+  @Test func `sidebar width is configurable and invalid dimensions are visible errors`() throws {
+    let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".toml")
+    defer { try? FileManager.default.removeItem(at: file) }
+    #expect(Preferences().sidebarWidth == 52)
+    try "sidebar_width = 64".write(to: file, atomically: true, encoding: .utf8)
+    #expect(try Configuration.load(path: file.path).sidebarWidth == 64)
+    for invalid in ["-1", "23", "\"wide\""] {
+      try "sidebar_width = \(invalid)".write(to: file, atomically: true, encoding: .utf8)
+      #expect(throws: TataraError.self) { try Configuration.load(path: file.path) }
+    }
+  }
+
   @Test func `structured diff maps original source coordinates and changed tokens`() throws {
     let json = #"{"language":"Swift","status":"changed","aligned_lines":[[0,0],[1,1],[null,2],[2,3]],"chunks":[[{"lhs":{"line_number":0,"changes":[{"start":8,"end":9,"content":"1","highlight":"normal"}]},"rhs":{"line_number":0,"changes":[{"start":8,"end":9,"content":"3","highlight":"normal"}]}},{"rhs":{"line_number":2,"changes":[{"start":0,"end":3,"content":"let","highlight":"keyword"}]}}]]}"#
     let diff = try ReviewDiff.decode(
@@ -70,7 +81,7 @@ struct ReviewWorkflowTests {
     #expect(diff.rows[0].left?.number == 1)
     #expect(diff.rows[2].left == nil)
     #expect(diff.rows[2].right?.number == 3)
-    #expect(diff.rows[0].right?.spans.contains(.init(text: "3", color: 2)) == true)
+    #expect(diff.rows[0].right?.spans.contains(.init(text: "3", role: .added)) == true)
     let invalid = json.replacingOccurrences(of: "\"start\":8", with: "\"start\":99")
     #expect(throws: TataraError.self) { try ReviewDiff.decode(
       Data(invalid.utf8),
@@ -121,7 +132,11 @@ struct ReviewWorkflowTests {
       diff: .init(path: file.path, language: "Swift", status: "changed", rows: rows, revision: state.detail?.revision),
       checkingCancellation: {},
     )
-    let store = TestStore(initialState: state) { WorkspaceFeature() }
+    let diff = try #require(state.document.diff)
+    let store = TestStore(initialState: state) { WorkspaceFeature() } withDependencies: {
+      $0[DiffClient.self].render = { _ in diff }
+      $0[DocumentClient.self] = DocumentRenderer.client
+    }
     store.exhaustivity = .off
     await store.send(.commandPressed(.selectLines))
     #expect(store.state.visualStart == 1)
@@ -132,6 +147,27 @@ struct ReviewWorkflowTests {
     #expect(store.state.review?.inlineSide == .right)
     #expect(store.state.review?.inlineAnchorLocked == true)
     #expect(store.state.visualStart == nil)
+    await store.send(.review(.inlineBodyChanged("Preserve this draft.")))
+    await store.send(.review(.addInlineButtonPressed))
+    await store.send(.review(.previewButtonPressed))
+    #expect(store.state.review?.isConfirming == true)
+    await store.send(.reviewDismissed)
+    await store.receive(\.contentResponse)
+    await store.finish()
+    await store.send(.commandPressed(.comment))
+    #expect(store.state.review?.isEditingInline == true)
+    #expect(store.state.review?.isConfirming == false)
+    #expect(store.state.review?.comments.first?.body == "Preserve this draft.")
+    await store.send(.review(.cancelInlineButtonPressed))
+    await store.send(.review(.previewButtonPressed))
+    #expect(store.state.review?.isConfirming == true)
+    await store.send(.reviewDismissed)
+    await store.receive(\.contentResponse)
+    await store.finish()
+    await store.send(.commandPressed(.review))
+    #expect(store.state.review?.isEditingInline == false)
+    #expect(store.state.review?.isConfirming == false)
+    #expect(store.state.review?.comments.first?.body == "Preserve this draft.")
   }
 
   @Test func `presets survive reopening and stay repository scoped`() async throws {
@@ -152,7 +188,12 @@ struct ReviewWorkflowTests {
 
   @Test func `remote search preserves merged pull request state`() async throws {
     let payload = #"{"total_count":1,"incomplete_results":false,"items":[{"number":1,"title":"Merged","user":{"login":"author"},"html_url":"https://github.com/owner/repo/pull/1","state":"closed","labels":[],"pull_request":{"merged_at":"2026-09-07T00:00:00Z"}}]}"#
-    let adapter = GitHubAdapter(runner: .init { _, _, _ in .init(output: Data(payload.utf8)) })
+    let adapter = GitHubAdapter(runner: .init { _, arguments, _ in
+      if arguments.contains("graphql") {
+        return try .init(output: GitHubTests.summaryData([1], state: "MERGED"))
+      }
+      return .init(output: Data(payload.utf8))
+    })
     let page = try await adapter.search(RepositoryID("owner/repo"), .pullRequest, "is:merged", 1)
     #expect(page.items.first?.state == .merged)
   }
@@ -167,5 +208,16 @@ struct ReviewWorkflowTests {
     do { _ = try await adapter.search(RepositoryID("owner/repo"), .pullRequest, "is:open label:bug", 1)
       Issue.record("Foreign search result was accepted.")
     } catch { #expect((error as? TataraError)?.code == .invalidResponse) }
+  }
+
+  @Test func `decoded file snapshots rebuild anchors without serializing derived state`() throws {
+    let file = ChangedFile(path: "Source.swift", patch: "@@ -1,2 +1,2 @@\n-old\n+new\n context\n@@ -20 +20 @@\n-next\n+updated")
+    let data = try JSONEncoder().encode(file)
+    let decoded = try JSONDecoder().decode(ChangedFile.self, from: data)
+    #expect(decoded == file)
+    #expect(decoded.anchors.contains(range: 1 ... 2, side: .left))
+    #expect(decoded.anchors.contains(range: 20 ... 20, side: .right))
+    #expect(!decoded.anchors.contains(range: 2 ... 20, side: .right))
+    #expect(!String(decoding: data, as: UTF8.self).contains("anchors"))
   }
 }

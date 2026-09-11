@@ -2,6 +2,20 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 public struct ScrollMetrics: Equatable, Sendable {
+  /// Keep neighboring entries visible around a selection, including in short panes.
+  public static func selectionOffset(selected: Int, total: Int, page: Int, previous: Int = 0) -> Int {
+    let page = max(1, page), context = min(2, max(0, (page - 1) / 2))
+    let selected = min(max(0, total - 1), max(0, selected))
+    let maximum = max(0, total - page), previous = min(maximum, max(0, previous))
+    if selected < previous + context {
+      return max(0, selected - context)
+    }
+    if selected >= previous + page - context {
+      return min(maximum, selected - page + 1 + context)
+    }
+    return previous
+  }
+
   public let total: Int
   public let page: Int
   public let offset: Int

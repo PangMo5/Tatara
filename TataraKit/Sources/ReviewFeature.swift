@@ -107,9 +107,13 @@ public struct ReviewFeature {
         state.error = nil
         return .none
       case .addInlineButtonPressed:
+        guard !state.isSubmitting else { return .none }
+        guard !state.revisionChanged else { state.error = .init(.revisionChanged)
+          return .none
+        }
         guard let file = state.selectedFile, let line = Int(state.inlineLine),
               let start = state.inlineStartLine.isEmpty ? line : Int(state.inlineStartLine), start > 0, start <= line,
-              ReviewAnchor.contains(range: start ... line, side: state.inlineSide, patch: file.patch)
+              file.anchors.contains(range: start ... line, side: state.inlineSide)
         else { state.error = .init(.invalidLine)
           return .none
         }
@@ -152,6 +156,10 @@ public struct ReviewFeature {
         state.isConfirming = false
         return .none
       case .previewButtonPressed:
+        guard !state.isSubmitting else { return .none }
+        guard !state.revisionChanged else { state.error = .init(.revisionChanged)
+          return .none
+        }
         guard !state.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !state.comments.isEmpty || state
           .event == .approve
         else {
@@ -166,7 +174,7 @@ public struct ReviewFeature {
         state.isConfirming = false
         return .none
       case .submitButtonPressed:
-        guard state.isConfirming, !state.isSubmitting else { return .none }
+        guard state.isConfirming, !state.isSubmitting, !state.revisionChanged else { return .none }
         state.isSubmitting = true
         let submission = ReviewSubmission(
           item: state.item,

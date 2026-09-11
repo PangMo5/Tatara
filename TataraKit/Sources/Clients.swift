@@ -10,6 +10,7 @@ public struct ForgeClient: Sendable {
   public var invalidate: @Sendable (RepositoryID) async throws -> Void = { _ in }
   public var list: @Sendable (RepositoryID, ItemKind, Int) async throws -> ItemPage
   public var search: @Sendable (RepositoryID, ItemKind, String, Int) async throws -> ItemPage
+  public var labels: @Sendable (RepositoryID) async throws -> [String]
   public var detail: @Sendable (ForgeItem) async throws -> ItemDetail
   public var content: @Sendable (RepositoryID, String, String) async throws -> Data
   public var submit: @Sendable (ReviewSubmission) async throws -> Void
@@ -85,7 +86,9 @@ extension DiffClient: TestDependencyKey {
 @DependencyClient
 public struct DocumentClient: Sendable {
   public var prepare: @Sendable (_ text: String, _ width: Int) async throws -> ReviewDocument
-  public var search: @Sendable (ReviewDocument, String) async throws -> [Int]
+  public var prepareComment: @Sendable (_ markdown: String, _ width: Int) async throws -> ReviewDocument
+  public var search: @Sendable (ReviewDocument, String) async throws -> SearchMatches
+  public var revealMatch: @Sendable (ReviewDocument, SearchMatches, Int, Int) async throws -> ReviewDocument
   public var prepareDiff: @Sendable (ReviewDiff, Int, InlineComment.Side) async throws -> ReviewDocument
 }
 

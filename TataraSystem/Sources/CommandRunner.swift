@@ -27,8 +27,10 @@ public struct CommandRunner: Sendable {
   }
 
   public static let live = Self { executable, arguments, input in
-    try await withThrowingTaskGroup(of: CommandResult.self) { group in
+    try Task.checkCancellation()
+    return try await withThrowingTaskGroup(of: CommandResult.self) { group in
       group.addTask {
+        try Task.checkCancellation()
         var options = PlatformOptions()
         options.createSession = true
         options.qualityOfService = .utility
@@ -65,6 +67,7 @@ public struct CommandRunner: Sendable {
   }
 
   public func checked(_ executable: String, _ arguments: [String], input: String? = nil) async throws -> CommandResult {
+    try Task.checkCancellation()
     let result = try await run(executable, arguments, input)
     guard result.status == 0 else {
       let code: TataraError.Code = result.error.contains("gh auth login") || result.error

@@ -2,14 +2,61 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import Foundation
-import SwiftTUI
+import Observation
+import Synchronization
 import TataraCore
 import TataraKit
 import TataraPersistence
 import TataraSystem
+import TermLoom
 import Testing
 
 struct CacheAndLoadingTests {
+  @Test func `replacing a pending request does not invalidate the unchanged preview currency`() throws {
+    var state = try WorkspaceFeature.State(repository: RepositoryID("example/reviews"))
+    state.contentGeneration = 1
+    state.isPreparingDocument = true
+    let changes = Mutex(0)
+    withObservationTracking {
+      _ = state.isDocumentCurrent
+    } onChange: {
+      changes.withLock { $0 += 1 }
+    }
+
+    state.contentGeneration = 2
+    state.contentGeneration = 3
+    state.documentGeneration = 3
+    #expect(!state.isDocumentCurrent)
+    #expect(changes.withLock { $0 } == 0)
+
+    state.isPreparingDocument = false
+    #expect(state.isDocumentCurrent)
+    #expect(changes.withLock { $0 } == 1)
+  }
+
+  @Test func `document currency invalidates on ownership changes without a preparing transition`() throws {
+    var state = try WorkspaceFeature.State(repository: RepositoryID("example/reviews"))
+    let changes = Mutex(0)
+    withObservationTracking {
+      _ = state.isDocumentCurrent
+    } onChange: {
+      changes.withLock { $0 += 1 }
+    }
+
+    state.contentGeneration += 1
+    #expect(!state.isDocumentCurrent)
+    #expect(changes.withLock { $0 } == 1)
+
+    withObservationTracking {
+      _ = state.isDocumentCurrent
+    } onChange: {
+      changes.withLock { $0 += 1 }
+    }
+    state.documentGeneration = state.contentGeneration
+    #expect(state.isDocumentCurrent)
+    #expect(changes.withLock { $0 } == 2)
+  }
+
   @Test func `wide diff rows retain source and search with bounded presentation`() async throws {
     let source = String(repeating: "한국어😀 source ", count: 10000) + "needle"
     let diff = ReviewDiff(path: "Source.swift", language: "Swift", status: "changed", rows: [
@@ -19,8 +66,11 @@ struct CacheAndLoadingTests {
     #expect(document.lines[0].map(\.text).joined().hasSuffix("needle"))
     #expect(document.searchableLines[0].contains("needle"))
     let rendered = document.displayLines[0].map(\.text).joined()
-    #expect(layoutText(for: rendered, width: nil).lines.flatMap(\.clusters).reduce(0) { $0 + $1.cellWidth } <= 160)
+    #expect(TerminalWidth.of(rendered) <= 160)
     #expect(!rendered.contains("needle"))
+    let matches = try await DocumentRenderer.search(document, "(?i)NEEDLE")
+    #expect(matches.lines == [0])
+    #expect(matches.membership == [0])
   }
 
   @Test func `presentation clipping respects wide graphemes and style boundaries`() async throws {
@@ -68,14 +118,9 @@ struct CacheAndLoadingTests {
 
   private actor RenderCalls {
     var renders = 0
-    var waits = 0
     var cacheReads = 0
     func record() {
       renders += 1
-    }
-
-    func wait() {
-      waits += 1
     }
 
     func read() {
@@ -107,7 +152,7 @@ struct CacheAndLoadingTests {
       width: 120,
       theme: .mocha,
     )
-    let first = Difftastic(forge: forge, runner: runner, cache: storage.client, settle: { await calls.wait() })
+    let first = Difftastic(forge: forge, runner: runner, cache: storage.client)
     #expect(try await first.render(request).status == "unchanged")
     let reopened = try await PersistentCache.bootstrapDatabase(at: url)
     forge.content = { _, _, _ in
@@ -118,11 +163,10 @@ struct CacheAndLoadingTests {
       await calls.read()
       return try await reopened.client.read(namespace, key, age)
     }, write: reopened.client.write, invalidate: reopened.client.invalidate)
-    let second = Difftastic(forge: forge, runner: runner, cache: monitored, settle: { await calls.wait() })
+    let second = Difftastic(forge: forge, runner: runner, cache: monitored)
     #expect(try await second.render(request).status == "unchanged")
     #expect(try await second.render(request).status == "unchanged")
     #expect(await calls.renders == 1)
-    #expect(await calls.waits == 1)
     #expect(await calls.cacheReads == 1)
   }
 
@@ -196,10 +240,12 @@ struct CacheAndLoadingTests {
   }
 
   @Test(arguments: [String(repeating: "A sentence with words. ", count: 600), String(repeating: "한국어😀 text ", count: 1000)])
-  func `chunked wrapping matches native layout`(_ source: String) async throws {
+  func `chunked wrapping preserves words and terminal column bounds`(_ source: String) async throws {
     let document = try await DocumentRenderer.prepare(source, 79)
-    let expected = layoutText(for: source, width: 79).lines.map(\.text)
-    #expect(document.lines.map { $0.map(\.text).joined() } == expected)
+    let rendered = document.lines.map { $0.map(\.text).joined() }
+    #expect(rendered.allSatisfy { TerminalWidth.of($0) <= 79 })
+    #expect(rendered.flatMap { $0.split(whereSeparator: \.isWhitespace) }
+      == source.split(whereSeparator: \.isWhitespace))
   }
 
   @Test func `oversized tokens wrap without changing their text`() async throws {
@@ -220,5 +266,106 @@ struct CacheAndLoadingTests {
     let almostVisible = ScrollMetrics(total: 101, page: 100, offset: 0, track: 20)
     #expect(almostVisible.thumbLength < almostVisible.track)
     #expect(almostVisible.offset(at: 20) == 1)
+  }
+
+  @Test func `indexed cursor navigation skips absent sides and preserves nearest ties`() {
+    let rows: [ReviewDiffRow] = (0 ..< 10000).map { index in
+      .init(
+        left: index % 3 == 0 ? .init(number: index + 1, spans: []) : nil,
+        right: index % 2 == 0 ? .init(number: index + 1, spans: []) : nil,
+      )
+    }
+    let document = ReviewDocument(
+      lines: rows.map { _ in [] },
+      diff: .init(path: "File.swift", language: "Swift", status: "changed", rows: rows),
+      checkingCancellation: {},
+    )
+    #expect(document.diffRow(at: 5001, side: .right) == 5000)
+    #expect(document.diffRow(at: 5001, side: .right, direction: 1) == 5002)
+    #expect(document.diffRow(at: 5001, side: .right, direction: -1) == 5000)
+    #expect(document.diffRow(at: 5001, side: .left) == 5001)
+    #expect(document.diffRow(at: 9999, side: .right, direction: 1) == nil)
+    #expect(document.diffRow(at: -1, side: .left, direction: -1) == nil)
+    #expect(ReviewDocument().diffRow(at: 0, side: .left) == nil)
+  }
+
+  @Test func `cancelling the last diff consumer cancels its producer`() async throws {
+    let (started, start) = AsyncStream<Void>.makeStream()
+    let (cancelled, cancellation) = AsyncStream<Void>.makeStream()
+    var forge = ForgeClient()
+    forge.content = { _, _, _ in Data("source".utf8) }
+    let renderer = Difftastic(forge: forge, runner: .init { _, arguments, _ in
+      if arguments == ["--version"] {
+        return .init(output: Data("difft test".utf8))
+      }
+      start.yield(())
+      do { try await Task.sleep(for: .seconds(30)) }
+      catch {
+        cancellation.yield(())
+        cancellation.finish()
+        throw error
+      }
+      Issue.record("An abandoned producer was not cancelled.")
+      return .init()
+    })
+    let request = try DiffRequest(
+      repository: RepositoryID("owner/repo"),
+      revision: .init(mergeBase: "base", head: "head"),
+      file: .init(path: "File.swift"),
+      width: 120,
+      theme: .mocha,
+    )
+    let task = Task { try await renderer.render(request) }
+    for await _ in started {
+      break
+    }
+    task.cancel()
+    await #expect(throws: CancellationError.self) { try await task.value }
+    for await _ in cancelled {
+      break
+    }
+    start.finish()
+  }
+
+  @Test func `concurrent diff consumers share production across widths and themes`() async throws {
+    let calls = RenderCalls()
+    var forge = ForgeClient()
+    forge.content = { _, _, _ in Data("source".utf8) }
+    let renderer = Difftastic(forge: forge, runner: .init { _, arguments, _ in
+      // A fixture operation stays in flight while other consumers arrive.
+      try await Task.sleep(for: .milliseconds(20))
+      if arguments == ["--version"] {
+        return .init(output: Data("difft test".utf8))
+      }
+      await calls.record()
+      return .init(output: Data(#"{"status":"unchanged","language":"Swift"}"#.utf8))
+    })
+    let request = try DiffRequest(
+      repository: RepositoryID("owner/repo"),
+      revision: .init(mergeBase: "base", head: "head"),
+      file: .init(path: "File.swift"),
+      width: 120,
+      theme: .mocha,
+    )
+    let results = try await withThrowingTaskGroup(of: ReviewDiff.self) { group in
+      for index in 0 ..< 12 {
+        var request = request
+        request.width += index
+        request.theme = index.isMultiple(of: 2) ? .latte : .mocha
+        group.addTask { try await renderer.render(request) }
+      }
+      var results: [ReviewDiff] = []
+      for try await result in group {
+        results.append(result)
+      }
+      return results
+    }
+    #expect(results.count == 12)
+    #expect(results.allSatisfy { $0 == results[0] })
+    #expect(await calls.renders == 1)
+    var changed = request
+    changed.revision.head = "new-head"
+    #expect(try await renderer.render(changed).revision == changed.revision)
+    #expect(await calls.renders == 2)
   }
 }

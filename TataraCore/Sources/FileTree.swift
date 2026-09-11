@@ -59,6 +59,9 @@ public struct FileTree: Equatable, Sendable {
   }
 
   public func visible(collapsed: Set<String>, matching paths: Set<String>? = nil) -> [FileTreeRow] {
+    if collapsed.isEmpty, paths == nil {
+      return rows
+    }
     var included = paths ?? []
     if let paths {
       for path in paths {

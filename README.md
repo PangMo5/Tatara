@@ -61,31 +61,58 @@ corresponding-source reference. See [release setup](docs/RELEASING.md).
 
 ## Review workflow
 
-- `j/k` or arrows move the selection or diff cursor. `Tab`, `Shift-Tab`, or
-  `1/2/3` change panes. The active pane has an accented border.
+- `j/k` or arrows move the selection or diff cursor. `Tab` and `Shift-Tab`
+  cycle keyboard pane focus. `Enter` opens a PR into Files and a file into Diff.
+  The active pane has a Lavender border.
+- PR and file lists keep up to two neighboring entries visible above and below
+  the selection. The viewport stays in place until the selection crosses either
+  margin, including when reversing direction. Short panes use smaller margins.
+- `i` toggles compact/rich information. Compact PR rows show state, CI (`CI`),
+  review decision (`R`), and comment count (`c`); rich rows add author, update date,
+  and labels. `✓`/`+` means passed/approved, `!` means failed/changes requested,
+  and `?` means review required. The Overview spells out each status. Missing
+  metadata is not treated as a success or zero.
+- Rich Overview adds assignees, requested reviewers/teams, milestone, timestamps,
+  and revision identity. Both modes show branches and change totals when available.
+  Use `--detail-level rich` or configure the default below. GitHub metadata is
+  refreshed with the existing `r` action; Projects and derived checklist progress
+  are not currently fetched. See [the field mapping](docs/PROVIDER_INFORMATION_2026-09-10.md).
 - Files use a directory tree by default. `Enter` folds/unfolds directories;
   `h` collapses or selects the parent, and `l` expands or enters a child.
+  Focusing a directory shows the combined diff of its changed descendants.
 - `[` / `]` switch Overview, Diff, Discussion and Checks.
 - `gg/G` jump to first/last; `Ctrl-d/Ctrl-u` move half a page.
-- `/` searches the focused pane: filter PRs/files or find text in the main pane.
-  `Enter` keeps the query active; `Esc` clears it without changing panes.
-  `n/N` move between results. `L` loads another page.
+- `/` in PRs submits a GitHub search query on `Enter`, including qualifiers such
+  as `is:open label:bug author:@me`. In Files it searches changed-file contents
+  with a regular expression, preserving matching files and their parent folders.
+  Added/modified files use the reviewed head; deleted files use the merge base.
+- `/` in Diff highlights regular-expression matches; `n/N` move to the next or
+  previous occurrence and reveal matches beyond the visible columns. Patterns
+  are case-sensitive; use `(?i)` for case-insensitive search. `Enter` keeps the
+  query active; `Esc` clears it without changing panes. `L` loads another page.
+- In Diff, `*` / `#` search the current word forward/backward; `g*` / `g#`
+  also match inside longer words. The line cursor uses the first keyword on the
+  line, or the word at the current search hit. `n` follows the search direction;
+  `N` reverses it. `zt` / `zz` / `zb` place the current line toward the top,
+  center, or bottom of the viewport, clamped at document boundaries.
 - `Ctrl-f/Ctrl-b` scroll the main pane by half a page while keeping sidebar focus.
 - Scrollbars show the visible range in each pane and help. Click or drag a track
-  to scroll; sidebar tracks move the selection with the viewport.
+  to scroll without changing keyboard focus, item selection or the Diff cursor.
 - Use the mouse wheel or trackpad over a pane to scroll it without moving
-  keyboard focus. Sidebar scrolling changes the selected item or file; the help
-  popup owns scrolling while open.
+  keyboard focus or the Diff source cursor. Sidebar scrolling preserves the
+  selected item and file; the help popup owns scrolling while open.
 - `I` switches PRs and issues. `r` refreshes from a sidebar. `o` opens the original in a browser.
 - `Space` marks the selected file reviewed for this PR's exact base/head revision.
 - In Diff, `h/l` choose LEFT/RIGHT. `Shift-V` starts linewise selection, `j/k`
   extend it, and `Esc` clears it. `c` or `r` opens the cursor/range comment editor
-  with its source address filled in. A range must fit a reviewable GitHub hunk.
-  `R` opens the review summary. Preview shows every comment and range before
+  inline beneath the source line. Existing comments and pending drafts appear
+  in the diff; outdated comments are identified under their file header.
+  A range must fit one file and a reviewable GitHub hunk.
+  `R` opens the review summary inline in Diff. Preview shows every comment and range before
   Submit; no review is posted just by pressing `c` or `r`.
 - `c` from a file list also supports manual source coordinates. Issues support
   ordinary comments.
-- `f` opens remote filters and saved presets. Use GitHub qualifiers such as
+- `f` opens remote filters, a repository label picker, and saved presets. Use GitHub qualifiers such as
   `is:open author:@me`, `review-requested:@me`, `label:bug`, `draft:false` or
   `is:merged`. Built-in presets cover common queues; named custom presets are
   stored per forge/repository in `$XDG_DATA_HOME/tatara/state/filters.sqlite`
@@ -105,13 +132,18 @@ Create `$XDG_CONFIG_HOME/tatara/config.toml` (default `~/.config/tatara/config.t
 theme = "mocha" # latte, frappe, macchiato, mocha
 language = "ko" # en, ko, ja, zh-Hans, zh-Hant
 files_view = "tree" # tree or list
+sidebar_width = 52 # preferred PR/Files width in columns; minimum 24
+detail_level = "compact" # compact or rich; i toggles for the current session
 
 [keys]
 quit = ["Q"]
 ```
 
-`--theme`, `--language`, `--files-view` and `--config` override the defaults. Conflicting bindings
-are errors. `--no-color`, `--ascii` and `--accessible` are provided by SwiftTUI.
+`--theme`, `--language`, `--files-view`, `--sidebar-width`, `--detail-level` and `--config` override the defaults.
+PR and Files share the configured width. Narrow windows reduce it to leave at
+least 60 columns for content; windows below 100 columns show one pane at a time.
+Conflicting bindings
+are errors. `--no-color`, `--ascii` and `--accessible` are provided by Tatara.
 The complete locale policy is in [LOCALIZATION.md](docs/LOCALIZATION.md).
 
 ## Local cache
@@ -137,11 +169,15 @@ invent cursor anchors. The adapter is validated against difftastic 0.69/0.70.
 
 ## Development
 
-Tuist owns the project graph. TCA owns application state and effects. SwiftTUI
+Tuist owns the project graph. TCA owns application state and effects. TermLoom
 owns terminal layout, input and rendering. Swift Subprocess runs `gh` and `difft`
 with explicit arguments and cancellation. TOML configures user preferences.
 All project automation is Swift: `Scripts/Tatara.swift` drives development and
 releases; `Scripts/Smoke` is a Swift package using SwiftTerm for real PTY checks.
+The generation command applies a checksum-verified patch to the pinned TermLoom
+input parser so horizontal wheel events retain their axis. Build validation rejects
+an unpatched checkout. Remove the patch in `Scripts/Tatara.swift` when the upstream
+dependency provides the fix; changed source checksums require an explicit review.
 
 ```sh
 mise run test

@@ -28,7 +28,22 @@ selects while preparation can still be in flight. `--wide-lines` uses eight
 for each frame. Its burst result measures the final help key's response after
 the replay, separately from individual `j/k` latency. There is no artificial
 sleep after the final key. Raw samples and stage summaries are in
-`navigation.json`, beside the frame diagnostics.
+`navigation.json`, beside the frame diagnostics. `*-warmup-ready` records the
+same key through final document readiness, separately from immediate selection.
+The helper also measures diff cursor movement and fixture content search. Fixture
+request counts and `requests.log` distinguish cache reuse from extra external work.
+
+For search and review behavior, run:
+
+```sh
+swift Scripts/Tatara.swift smoke PATH_TO_BINARY --search-review
+```
+
+This checks GitHub query submission, label toggles, immutable file-content search,
+combined folder diffs, existing and outdated comments, regex highlighting and n/N,
+all four palettes, and an inline range editor/preview across terminal resizes.
+It uses demo fixtures and performs no forge writes. `--features`, `--editors`, and
+`--workspace` cover the remaining navigation, editor, mouse, cache and popup flows.
 
 The live navigation mode uses the first two open PRs and first two files,
 with no forge writes. Confirm that these are the items that reproduce a report;
@@ -41,8 +56,9 @@ Results live in `.artifacts/swift-pty/profile-current/`:
 - `latency.json`: key-send to expected rendered terminal state, including the
   terminal emulator's parsing time; median, p95, maximum, sample count, screen
   dimensions, OS and executable SHA-256.
-- `diagnostics.tsv`: SwiftTUI's per-frame pipeline timings and damaged rows.
-- `frames-summary.json`: summaries of resolve, raster, pipeline, main-actor and
+- `diagnostics.tsv`: optional legacy SwiftTUI per-frame diagnostics when comparing
+  an archived SwiftTUI executable. TermLoom does not emit this file.
+- `frames-summary.json`: legacy summaries of resolve, raster, pipeline, main-actor and
   input-to-commit timings. These describe runtime stages, not physical display latency.
 - `input.tsv`: synchronous `Store.send` duration for navigation input, written on
   a separate actor when `TATARA_INPUT_TRACE` is enabled. It includes reducer and
@@ -68,26 +84,59 @@ Real API timings vary and may hit the persistent cache. Treat this as runtime
 verification, not a controlled before/after benchmark. Captures can contain
 private source text; `.artifacts` is ignored by Git.
 
-For an interactive session, set `SWIFTTUI_DIAGNOSTICS` to a writable TSV file
-path before launching Tatara. The runtime records each frame until the process
-exits. This can capture an interaction that the synthetic workload does not reproduce.
+Current TermLoom runs use `TATARA_INPUT_TRACE` for reducer timing and the PTY's
+synchronized output timestamps for visible completion. Use `--no-diagnostics`
+for timing runs without tracing. `SWIFTTUI_DIAGNOSTICS` applies only to archived
+SwiftTUI executables; it is not a TermLoom setting.
 
 The helper preserves mise's own data/cache directories while isolating Tatara's
 XDG state. Comparisons across ANSI and structured-renderer versions must use the
 matching helper fixture format; their payload sizes are not identical workloads.
 
-The September 7 investigation separated synchronous input handling from the
-frame pipeline. In the sampled live repository, `Store.send` had a median of
-0.251 ms and maximum of 1.19 ms, while an observed selection took up to 122.6 ms.
-This rules out synchronous reducer work as the dominant delay in that run.
-It does not identify every source of the remaining arrival-to-frame interval.
-SwiftTUI queues input while an asynchronous frame is being acquired, and its
-pipeline timings do not include the entire event-to-presentation lifetime.
+Dated findings and before/after evidence belong in audit reports rather than
+repository-wide agent instructions. See the [September 8 audit](PERFORMANCE_AUDIT_2026-09-08.md)
+for the historical SwiftTUI audit's scope, workload and limitations.
 
-The application now avoids whole-document ANSI decoding, reuses structured
-immutable diffs, promotes disk hits into memory, and waits for selection settling
-only on a diff cache miss. These changes remove repeated work; they do not prove
-that every rapid-navigation pause is resolved. A temporary SwiftTUI color-storage
-experiment reduced internal raster time but only modestly changed input latency.
-It was reverted, along with temporary damage-timing instrumentation. The shipped
-build uses the resolved upstream dependency without checkout patches.
+When comparing archived SwiftTUI traces, `input.tsv` includes `frame_started_ms`
+on a compatible monotonic time base. Legacy `pipeline_ms` and
+`main_actor_blocked_ms` do not describe TermLoom and must not be used as its frame
+or UI-thread timings. Report the active binary hash and renderer explicitly.
+
+See the [September 8 isolation experiments](PERFORMANCE_ISOLATION_2026-09-08.md)
+for component removals, minimal-state controls, clock alignment, and phase timing.
+
+Add `--cold-navigation` to a fixture `--navigation` run to measure twenty j/k
+selections before the initial PR detail and file diff reads can finish. Inspect
+the recorded status for each `pr-cold`/`file-cold` sample; selection feedback and
+remote completion are different timings.
+
+To measure continuous selection through uncached items, without waiting for each
+frame, run:
+
+```sh
+swift Scripts/Tatara.swift smoke PATH_TO_BINARY --navigation loading-burst --loading-burst --dense-navigation --directional-burst --columns 104 --rows 56
+```
+
+The dense fixture has 100 PRs and 120 files. Directional replay sends 8, 32, then
+64 `j` inputs at a nominal 25 ms interval, checks that every input contributes to
+the final selected index, and resets with `gg` between runs. It records selection
+at each completed synchronized output frame, initial/final loading status, replay
+duration, and final-key-to-final-selection latency. Inspect gaps between selection
+changes as well as the final latency: a responsive help key after a burst does
+not establish continuous selection feedback during that burst.
+
+Without `--directional-burst`, `--loading-burst` alternates `j/k` and measures the
+final help key. Directional replay requires the dense synthetic fixture; it does
+not assume real PR numbers or file names are consecutive. These measurements
+include PTY parsing, but exclude the terminal window compositor and display.
+
+
+## Wheel reversal under continuous input
+
+Run `Scripts/Smoke/.build/release/tatara-smoke BINARY --wheel-reversal LABEL --columns 320 --rows 64`
+to replay downward and upward wheel input without waiting for intermediate frames.
+The writer runs independently of terminal parsing. `reversal.json` records actual input
+reversal time, completed frame offsets, old-direction frames emitted after reversal,
+first reversed-frame latency and the tail after the final input. Compare the same
+binary workload, terminal size and input cadence; final scroll position alone does not
+establish prompt reversal. See [the reversal investigation](SCROLL_REVERSAL_2026-09-11.md).

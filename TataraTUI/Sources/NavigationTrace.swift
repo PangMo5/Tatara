@@ -13,14 +13,16 @@ actor NavigationTrace {
     guard let destination = Self.destination else { return }
     let url = URL(fileURLWithPath: destination)
     try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-    try Data("started_ms\tsynchronous_ms\n".utf8).write(to: url, options: .atomic)
+    try Data("started_ms\tsynchronous_ms\tframe_started_ms\n".utf8).write(to: url, options: .atomic)
     file = try FileHandle(forWritingTo: url)
     try file?.seekToEnd()
   }
 
-  func record(start: Double, elapsed: Double) {
+  func record(start: Double, elapsed: Double, frameStart: Duration) {
     guard let file else { return }
-    do { try file.write(contentsOf: Data("\(start * 1000)\t\(elapsed * 1000)\n".utf8)) }
+    let components = frameStart.components
+    let frameMilliseconds = Double(components.seconds) * 1000 + Double(components.attoseconds) / 1e15
+    do { try file.write(contentsOf: Data("\(start * 1000)\t\(elapsed * 1000)\t\(frameMilliseconds)\n".utf8)) }
     catch {
       Logger(subsystem: "dev.PangMo5.tatara", category: "profiling")
         .error("Input trace failed: \(String(describing: error), privacy: .public)")

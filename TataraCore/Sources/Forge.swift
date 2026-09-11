@@ -55,6 +55,7 @@ public struct ForgeItem: Identifiable, Equatable, Codable, Sendable {
   public var state: ItemState
   public var labels: [String]
   public var isDraft: Bool
+  public var github: GitHubItemSummary?
 
   public init(
     id: ItemID,
@@ -66,6 +67,7 @@ public struct ForgeItem: Identifiable, Equatable, Codable, Sendable {
     state: ItemState = .open,
     labels: [String] = [],
     isDraft: Bool = false,
+    github: GitHubItemSummary? = nil,
   ) {
     self.id = id
     self.kind = kind
@@ -76,6 +78,103 @@ public struct ForgeItem: Identifiable, Equatable, Codable, Sendable {
     self.state = state
     self.labels = labels
     self.isDraft = isDraft
+    self.github = github
+  }
+}
+
+/// Nullable GitHub fields retain absence; review decisions are never inferred from review counts.
+public struct GitHubItemSummary: Equatable, Codable, Sendable {
+  public enum ReviewDecision: String, Codable, Sendable {
+    case approved = "APPROVED", changesRequested = "CHANGES_REQUESTED", reviewRequired = "REVIEW_REQUIRED"
+  }
+
+  public enum ChecksState: String, Codable, Sendable {
+    case success = "SUCCESS", failure = "FAILURE", error = "ERROR", pending = "PENDING", expected = "EXPECTED"
+  }
+
+  public var createdAt: String?
+  public var updatedAt: String?
+  public var closedAt: String?
+  public var mergedAt: String?
+  public var assignees: [String]
+  public var milestone: String?
+  public var requestedReviewers: [String]
+  public var requestedTeams: [String]
+  public var commentCount: Int?
+  public var reviewDecision: ReviewDecision?
+  public var checksState: ChecksState?
+  public var headOID: String?
+  public var headBranch: String?
+  public var baseBranch: String?
+  public var additions: Int?
+  public var deletions: Int?
+  public var changedFiles: Int?
+  public var commits: Int?
+
+  public init(
+    createdAt: String? = nil,
+    updatedAt: String? = nil,
+    closedAt: String? = nil,
+    mergedAt: String? = nil,
+    assignees: [String] = [],
+    milestone: String? = nil,
+    requestedReviewers: [String] = [],
+    requestedTeams: [String] = [],
+    commentCount: Int? = nil,
+    reviewDecision: ReviewDecision? = nil,
+    checksState: ChecksState? = nil,
+    headOID: String? = nil,
+    headBranch: String? = nil,
+    baseBranch: String? = nil,
+    additions: Int? = nil,
+    deletions: Int? = nil,
+    changedFiles: Int? = nil,
+    commits: Int? = nil,
+  ) {
+    self.createdAt = createdAt
+    self.updatedAt = updatedAt
+    self.closedAt = closedAt
+    self.mergedAt = mergedAt
+    self.assignees = assignees
+    self.milestone = milestone
+    self.requestedReviewers = requestedReviewers
+    self.requestedTeams = requestedTeams
+    self.commentCount = commentCount
+    self.reviewDecision = reviewDecision
+    self.checksState = checksState
+    self.headOID = headOID
+    self.headBranch = headBranch
+    self.baseBranch = baseBranch
+    self.additions = additions
+    self.deletions = deletions
+    self.changedFiles = changedFiles
+    self.commits = commits
+  }
+
+  public var reviewTitleKey: String {
+    switch reviewDecision {
+    case .approved: "Approved"
+    case .changesRequested: "Changes requested"
+    case .reviewRequired: "Review required"
+    case nil: "Not reported"
+    }
+  }
+
+  public var checksTitleKey: String {
+    switch checksState {
+    case .success: "Passed"
+    case .failure: "Failed"
+    case .error: "Error"
+    case .pending: "Pending"
+    case .expected: "Expected"
+    case nil: "Not reported"
+    }
+  }
+
+  public var estimatedByteCount: Int {
+    (assignees + requestedReviewers + requestedTeams +
+      [createdAt, updatedAt, closedAt, mergedAt, milestone, headOID, headBranch, baseBranch].compactMap(\.self))
+      .reduce(512) { $0 + $1.utf8.count + 32 }
   }
 }
 
@@ -104,11 +203,41 @@ public struct DiscussionComment: Identifiable, Equatable, Codable, Sendable {
   public var author: String
   public var body: String
   public var context: String?
-  public init(id: Int, author: String, body: String, context: String? = nil) {
+  public var anchor: DiscussionAnchor?
+  public init(id: Int, author: String, body: String, context: String? = nil, anchor: DiscussionAnchor? = nil) {
     self.id = id
     self.author = author
     self.body = body
     self.context = context
+    self.anchor = anchor
+  }
+}
+
+/// GitHub's current diff coordinates are distinct from the original, potentially outdated line.
+public struct DiscussionAnchor: Equatable, Codable, Sendable {
+  public var path: String
+  public var line: Int?
+  public var startLine: Int?
+  public var side: InlineComment.Side?
+  public var subjectType: String?
+  public var originalLine: Int?
+  public var commitID: String?
+  public init(
+    path: String,
+    line: Int?,
+    side: InlineComment.Side?,
+    startLine: Int? = nil,
+    originalLine: Int? = nil,
+    commitID: String? = nil,
+    subjectType: String? = nil,
+  ) {
+    self.path = path
+    self.line = line
+    self.side = side
+    self.startLine = startLine
+    self.subjectType = subjectType
+    self.originalLine = originalLine
+    self.commitID = commitID
   }
 }
 
@@ -139,12 +268,14 @@ public struct GitHubMetadata: Equatable, Codable, Sendable {
 }
 
 public struct ItemDetail: Equatable, Codable, Sendable {
-  public var item: ForgeItem
-  public var revision: PullRequestRevision?
+  public let item: ForgeItem
+  public let revision: PullRequestRevision?
   public let files: [ChangedFile]
   public let fileTree: FileTree
-  public var comments: [DiscussionComment]
-  public var metadata: ForgeMetadata?
+  private let fileIndices: [String: Int]
+  public let comments: [DiscussionComment]
+  public let metadata: ForgeMetadata?
+  public let estimatedByteCount: Int
   public init(
     item: ForgeItem,
     revision: PullRequestRevision? = nil,
@@ -156,8 +287,28 @@ public struct ItemDetail: Equatable, Codable, Sendable {
     self.revision = revision
     self.files = files
     fileTree = FileTree(paths: files.map(\.path))
+    fileIndices = Dictionary(files.enumerated().map { ($0.element.path, $0.offset) }, uniquingKeysWith: { first, _ in first })
     self.comments = comments
     self.metadata = metadata
+    let itemBytes = [item.title, item.author, item.body, item.url.absoluteString].reduce(512) { $0 + $1.utf8.count }
+      + item.labels.reduce(0) { $0 + $1.utf8.count + 32 }
+    let fileBytes = files.reduce(0) { $0 + $1.path.utf8.count * 3 + ($1.previousPath?.utf8.count ?? 0)
+      + ($1.patch?.utf8.count ?? 0) + 512
+    }
+    let commentBytes = comments.reduce(0) { $0 + $1.body.utf8.count + $1.author.utf8.count
+      + ($1.context?.utf8.count ?? 0) + 128
+    }
+    let metadataBytes: Int = if case let .github(value) = metadata {
+      (value.checks + value.reviews + [value.baseBranch, value.headBranch, value.mergeableState])
+        .reduce(0) { $0 + $1.utf8.count + 32 }
+    } else {
+      0
+    }
+    estimatedByteCount = itemBytes + fileBytes + commentBytes + metadataBytes + (item.github?.estimatedByteCount ?? 0)
+  }
+
+  public func file(at path: String) -> ChangedFile? {
+    fileIndices[path].map { files[$0] }
   }
 
   private enum CodingKeys: String, CodingKey { case item, revision, files, comments, metadata }
@@ -188,7 +339,8 @@ public struct ChangedFile: Identifiable, Equatable, Codable, Sendable {
   public var status: String
   public var additions: Int
   public var deletions: Int
-  public var patch: String?
+  public let patch: String?
+  public let anchors: ReviewAnchorIndex
   public var id: String {
     path
   }
@@ -207,6 +359,20 @@ public struct ChangedFile: Identifiable, Equatable, Codable, Sendable {
     self.additions = additions
     self.deletions = deletions
     self.patch = patch
+    anchors = ReviewAnchorIndex(patch: patch)
+  }
+
+  private enum CodingKeys: String, CodingKey { case path, previousPath, status, additions, deletions, patch }
+  public init(from decoder: any Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    try self.init(
+      path: values.decode(String.self, forKey: .path),
+      previousPath: values.decodeIfPresent(String.self, forKey: .previousPath),
+      status: values.decode(String.self, forKey: .status),
+      additions: values.decode(Int.self, forKey: .additions),
+      deletions: values.decode(Int.self, forKey: .deletions),
+      patch: values.decodeIfPresent(String.self, forKey: .patch),
+    )
   }
 }
 

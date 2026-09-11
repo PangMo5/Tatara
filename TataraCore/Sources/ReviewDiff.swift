@@ -15,9 +15,13 @@ public struct ReviewDiffLine: Equatable, Codable, Sendable {
 public struct ReviewDiffRow: Equatable, Codable, Sendable {
   public let left: ReviewDiffLine?
   public let right: ReviewDiffLine?
-  public init(left: ReviewDiffLine?, right: ReviewDiffLine?) {
+  public let path: String?
+  public let annotation: [DiffSpan]?
+  public init(left: ReviewDiffLine?, right: ReviewDiffLine?, path: String? = nil, annotation: [DiffSpan]? = nil) {
     self.left = left
     self.right = right
+    self.path = path
+    self.annotation = annotation
   }
 
   public func line(on side: InlineComment.Side) -> ReviewDiffLine? {
@@ -89,7 +93,7 @@ public struct ReviewDiff: Equatable, Codable, Sendable {
       let created = file.status == "created"
       let source = created ? right : left
       return .init(path: path, language: file.language, status: file.status, rows: source.enumerated().map {
-        let line = ReviewDiffLine(number: $0.offset + 1, spans: [.init(text: $0.element, color: created ? 2 : 1)])
+        let line = ReviewDiffLine(number: $0.offset + 1, spans: [.init(text: $0.element, role: created ? .added : .removed)])
         return .init(left: created ? nil : line, right: created ? line : nil)
       })
     }
@@ -126,7 +130,7 @@ public struct ReviewDiff: Equatable, Codable, Sendable {
         if offset < change.start {
           spans.append(.init(text: String(decoding: bytes[offset ..< change.start], as: UTF8.self)))
         }
-        spans.append(.init(text: change.content, color: color, bold: change.highlight == "keyword"))
+        spans.append(.init(text: change.content, bold: change.highlight == "keyword", role: color == 1 ? .removed : .added))
         offset = change.end
       }
       if offset < bytes.count {

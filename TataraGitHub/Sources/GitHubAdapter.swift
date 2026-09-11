@@ -23,12 +23,14 @@ public struct GitHubAdapter: Sendable {
       invalidate: { try await cache.invalidate(Self.metadataNamespace($0)) },
       list: list,
       search: search,
+      labels: labels,
       detail: detail,
       content: content,
       submit: submit,
     )
   }
 
+  @concurrent
   public func accountIdentifier(host: String) async throws -> String {
     let value = try await runner.checked("gh", ["api", "--hostname", host, "user", "--jq", ".id"]).text
       .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -40,9 +42,10 @@ public struct GitHubAdapter: Sendable {
   }
 
   private static func metadataNamespace(_ repository: RepositoryID) -> String {
-    "metadata-v1:\(repository)"
+    "metadata-v3:\(repository)"
   }
 
+  @concurrent
   public func detectRepository(host: String? = nil) async throws -> RepositoryID {
     struct Repository: Decodable { var nameWithOwner: String
       var url: URL
@@ -59,18 +62,19 @@ public struct GitHubAdapter: Sendable {
   public func list(_ repository: RepositoryID, _ kind: ItemKind, _ page: Int) async throws -> ItemPage {
     let key = "list:\(kind):\(page)"
     if let data = try await cache.read(Self.metadataNamespace(repository), key, 30) {
-      return try JSONDecoder().decode(
-        ItemPage.self,
-        from: data,
-      )
+      return try decode(ItemPage.self, data)
     }
     let collection = kind == .pullRequest ? "pulls" : "issues"
     let values: [ItemDTO] = try await get(
       repository,
       "\(collection)?state=open&sort=updated&direction=desc&per_page=100&page=\(page)",
     )
-    let items = values.filter { kind != .issue || $0.pullRequest == nil }.map { $0.model(repository, kind) }
+    let items = try await enrich(
+      values.filter { kind != .issue || $0.pullRequest == nil }.map { $0.model(repository, kind) },
+      repository: repository,
+    )
     let result = ItemPage(items: items, nextPage: values.count == 100 ? page + 1 : nil)
+    try Task.checkCancellation()
     try await cache.write(Self.metadataNamespace(repository), key, JSONEncoder().encode(result))
     return result
   }
@@ -84,13 +88,13 @@ public struct GitHubAdapter: Sendable {
     }
     let key = "search:\(kind):\(query):\(page)"
     if let data = try await cache.read(Self.metadataNamespace(repository), key, 30) {
-      return try JSONDecoder().decode(ItemPage.self, from: data)
+      return try decode(ItemPage.self, data)
     }
     let q = "repo:\(repository.slug) is:\(kind == .pullRequest ? "pr" : "issue") \(query)"
     let output = try await runner.checked("gh", ["api", "--hostname", repository.host, "--method", "GET", "search/issues",
                                                  "-f", "q=\(q)", "-f", "sort=updated", "-f", "order=desc",
                                                  "-f", "per_page=100", "-f", "page=\(page)"])
-    let result = try JSONDecoder().decode(Results.self, from: output.output)
+    let result = try decode(Results.self, output.output)
     guard !result.incomplete_results, result.total_count <= 1000 else {
       throw TataraError(.incompleteResponse, detail: "Refine the search to at most 1,000 complete results.")
     }
@@ -103,12 +107,25 @@ public struct GitHubAdapter: Sendable {
         throw TataraError(.invalidResponse, detail: "The search escaped the selected repository or item kind.")
       }
     }
-    let value = ItemPage(
-      items: result.items.map { $0.model(repository, kind) },
+    let value = try await ItemPage(
+      items: enrich(result.items.map { $0.model(repository, kind) }, repository: repository),
       nextPage: page * 100 < result.total_count ? page + 1 : nil,
     )
+    try Task.checkCancellation()
     try await cache.write(Self.metadataNamespace(repository), key, JSONEncoder().encode(value))
     return value
+  }
+
+  @concurrent
+  public func labels(_ repository: RepositoryID) async throws -> [String] {
+    if let data = try await cache.read(Self.metadataNamespace(repository), "labels", 300) {
+      return try decode([String].self, data)
+    }
+    let values: [LabelDTO] = try await pages(repository, "labels")
+    let result = values.map(\.name).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    try Task.checkCancellation()
+    try await cache.write(Self.metadataNamespace(repository), "labels", JSONEncoder().encode(result))
+    return result
   }
 
   @concurrent
@@ -117,8 +134,11 @@ public struct GitHubAdapter: Sendable {
     let number = item.id.number
     let key = "detail:\(number)"
     if let data = try await cache.read(Self.metadataNamespace(repository), key, 30) {
-      let result = try JSONDecoder().decode(ItemDetail.self, from: data)
-      if result.item.title == item.title, result.item.body == item.body, result.item.isDraft == item.isDraft {
+      let result = try decode(ItemDetail.self, data)
+      if result.item.title == item.title, result.item.body == item.body, result.item.isDraft == item.isDraft,
+         result.item.state == item.state, result.item.labels == item.labels,
+         result.item.github == item.github
+      {
         return result
       }
     }
@@ -126,10 +146,12 @@ public struct GitHubAdapter: Sendable {
     if item.kind == .issue {
       let value: ItemDTO = try await get(repository, "issues/\(number)")
       let result = try await ItemDetail(item: value.model(repository, .issue), comments: comments.map(\.model))
+      try Task.checkCancellation()
       try await cache.write(Self.metadataNamespace(repository), key, JSONEncoder().encode(result))
       return result
     }
     let value: PullRequestDTO = try await get(repository, "pulls/\(number)")
+    async let summary = enrich([value.model(repository)], repository: repository)
     async let files: [FileDTO] = pages(repository, "pulls/\(number)/files")
     async let comparison: CompareDTO = get(repository, "compare/\(value.base.sha)...\(value.head.sha)")
     async let reviews: [ReviewDTO] = pages(repository, "pulls/\(number)/reviews")
@@ -155,17 +177,26 @@ public struct GitHubAdapter: Sendable {
         + commitStatus.statuses.map { "\($0.context): \($0.state)" },
       reviews: reviewed.map { "@\($0.user?.login ?? "ghost"): \($0.state)" },
     )
+    let enriched = try await summary
+    guard let current = enriched.first, current.github?.headOID == value.head.sha else {
+      throw TataraError(
+        .revisionChanged,
+        detail: "The pull request head changed while loading metadata. Refresh to load its current head.",
+      )
+    }
     let result = ItemDetail(
-      item: value.model(repository),
+      item: current,
       revision: .init(mergeBase: compared.mergeBaseCommit.sha, head: value.head.sha),
       files: changed.map(\.model),
       comments: (conversation + discussions).map(\.model),
       metadata: .github(metadata),
     )
+    try Task.checkCancellation()
     try await cache.write(Self.metadataNamespace(repository), key, JSONEncoder().encode(result))
     return result
   }
 
+  @concurrent
   public func content(_ repository: RepositoryID, _ revision: String, _ path: String) async throws -> Data {
     guard revision.range(of: "^[a-fA-F0-9]{40,64}$", options: .regularExpression) != nil else {
       throw TataraError(.invalidResponse, detail: "Invalid Git object ID.")
@@ -180,10 +211,12 @@ public struct GitHubAdapter: Sendable {
       "api", "--hostname", repository.host, "--method", "GET", "-H", "Accept: application/vnd.github.raw+json",
       "repos/\(repository.slug)/contents/\(escaped)?ref=\(revision)",
     ]).output
+    try Task.checkCancellation()
     try await cache.write(namespace, path, result)
     return result
   }
 
+  @concurrent
   public func submit(_ submission: ReviewSubmission) async throws {
     guard !submission.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !submission.comments.isEmpty || submission
       .event == .approve
@@ -230,6 +263,75 @@ public struct GitHubAdapter: Sendable {
     )
   }
 
+  /// One bounded GraphQL request enriches a REST page; no per-row subprocesses or inferred decisions.
+  private func enrich(_ items: [ForgeItem], repository: RepositoryID) async throws -> [ForgeItem] {
+    let pulls = items.filter { $0.kind == .pullRequest }
+    guard !pulls.isEmpty else { return items }
+    let fields = pulls.map { "p\($0.id.number): pullRequest(number: \($0.id.number)) { ...Summary }" }.joined(separator: "\n")
+    let query = """
+    query($owner: String!, $name: String!) {
+      repository(owner: $owner, name: $name) { \(fields) }
+    }
+    fragment Summary on PullRequest {
+      number url state isDraft
+      createdAt updatedAt closedAt mergedAt headRefOid headRefName baseRefName
+      reviewDecision totalCommentsCount statusCheckRollup { state }
+      additions deletions changedFiles commits { totalCount }
+    }
+    """
+    let payload = try JSONSerialization.data(withJSONObject: [
+      "query": query,
+      "variables": ["owner": repository.owner, "name": repository.name],
+    ])
+    let output = try await runner.checked(
+      "gh",
+      ["api", "--hostname", repository.host, "graphql", "--input", "-"],
+      input: String(decoding: payload, as: UTF8.self),
+    )
+    let response = try decode(SummaryResponse.self, output.output)
+    if let errors = response.errors, !errors.isEmpty {
+      throw TataraError(.invalidResponse, detail: errors.map(\.message).joined(separator: "\n"))
+    }
+    guard let values = response.data?.repository else {
+      throw TataraError(.incompleteResponse, detail: "GitHub did not return pull request metadata.")
+    }
+    return try items.map { item in
+      guard item.kind == .pullRequest else { return item }
+      guard let optional = values["p\(item.id.number)"], let summary = optional,
+            summary.number == item.id.number, summary.url == item.url
+      else {
+        throw TataraError(.incompleteResponse, detail: "GitHub metadata does not match pull request #\(item.id.number).")
+      }
+      // REST owns labels, assignees and requested reviewers; reject mixed update snapshots.
+      if let updated = item.github?.updatedAt, updated != summary.updatedAt {
+        throw TataraError(
+          .revisionChanged,
+          detail: "Pull request #\(item.id.number) changed while loading. Refresh to load current metadata.",
+        )
+      }
+      var result = item
+      result.state = summary.state == "MERGED" ? .merged : summary.state == "OPEN" ? .open : .closed
+      result.isDraft = summary.isDraft
+      var info = item.github ?? .init()
+      info.createdAt = summary.createdAt
+      info.updatedAt = summary.updatedAt
+      info.closedAt = summary.closedAt
+      info.mergedAt = summary.mergedAt
+      info.headOID = summary.headRefOid
+      info.headBranch = summary.headRefName
+      info.baseBranch = summary.baseRefName
+      info.reviewDecision = summary.reviewDecision
+      info.checksState = summary.statusCheckRollup?.state
+      info.commentCount = summary.totalCommentsCount
+      info.additions = summary.additions
+      info.deletions = summary.deletions
+      info.changedFiles = summary.changedFiles
+      info.commits = summary.commits.totalCount
+      result.github = info
+      return result
+    }
+  }
+
   private func get<Value: Decodable>(_ repository: RepositoryID, _ endpoint: String) async throws -> Value {
     let result = try await runner.checked(
       "gh",
@@ -261,19 +363,63 @@ public struct GitHubAdapter: Sendable {
   }
 
   private func decode<Value: Decodable>(_ type: Value.Type, _ data: Data) throws -> Value {
-    do { return try JSONDecoder().decode(type, from: data) }
+    try Task.checkCancellation()
+    let value: Value
+    do { value = try JSONDecoder().decode(type, from: data) }
     catch { throw TataraError(.invalidResponse, detail: String(describing: error)) }
+    try Task.checkCancellation()
+    return value
   }
 }
 
 private struct UserDTO: Decodable { var login: String }
 private struct LabelDTO: Decodable { var name: String }
+private struct MilestoneDTO: Decodable { var title: String }
+private struct TeamDTO: Decodable { var slug: String }
+private struct SummaryResponse: Decodable {
+  struct Payload: Decodable { var repository: [String: PullSummaryDTO?]? }
+  struct Failure: Decodable { var message: String }
+  var data: Payload?
+  var errors: [Failure]?
+}
+
+private struct PullSummaryDTO: Decodable {
+  struct Rollup: Decodable { var state: GitHubItemSummary.ChecksState }
+  struct Count: Decodable { var totalCount: Int }
+  var number: Int
+  var url: URL
+  var state: String
+  var isDraft: Bool
+  var createdAt: String
+  var updatedAt: String
+  var closedAt: String?
+  var mergedAt: String?
+  var headRefOid: String
+  var headRefName: String
+  var baseRefName: String
+  var reviewDecision: GitHubItemSummary.ReviewDecision?
+  var totalCommentsCount: Int?
+  var statusCheckRollup: Rollup?
+  var additions: Int
+  var deletions: Int
+  var changedFiles: Int
+  var commits: Count
+}
+
 private struct ItemDTO: Decodable {
   struct PullMarker: Decodable {
     var mergedAt: String?
     enum CodingKeys: String, CodingKey { case mergedAt = "merged_at" }
   }
 
+  var createdAt: String?
+  var updatedAt: String?
+  var closedAt: String?
+  var assignees: [UserDTO]?
+  var milestone: MilestoneDTO?
+  var requestedReviewers: [UserDTO]?
+  var requestedTeams: [TeamDTO]?
+  var comments: Int?
   var number: Int
   var title: String
   var user: UserDTO?
@@ -283,7 +429,11 @@ private struct ItemDTO: Decodable {
   var labels: [LabelDTO]
   var draft: Bool?
   var pullRequest: PullMarker?
-  enum CodingKeys: String, CodingKey { case number, title, user, body, state, labels, draft
+  enum CodingKeys: String, CodingKey {
+    case createdAt = "created_at", updatedAt = "updated_at", closedAt = "closed_at"
+    case requestedReviewers = "requested_reviewers", requestedTeams = "requested_teams"
+    case assignees, milestone, comments
+    case number, title, user, body, state, labels, draft
     case htmlURL = "html_url", pullRequest = "pull_request"
   }
 
@@ -298,6 +448,16 @@ private struct ItemDTO: Decodable {
       state: pullRequest?.mergedAt != nil ? .merged : state == "open" ? .open : .closed,
       labels: labels.map(\.name),
       isDraft: draft ?? false,
+      github: .init(
+        createdAt: createdAt,
+        updatedAt: updatedAt,
+        closedAt: closedAt,
+        assignees: assignees?.map(\.login) ?? [],
+        milestone: milestone?.title,
+        requestedReviewers: requestedReviewers?.map(\.login) ?? [],
+        requestedTeams: requestedTeams?.map(\.slug) ?? [],
+        commentCount: kind == .issue ? comments : nil,
+      ),
     )
   }
 }
@@ -308,6 +468,14 @@ private struct PullRequestDTO: Decodable {
     var label: String
   }
 
+  var createdAt: String?
+  var updatedAt: String?
+  var closedAt: String?
+  var assignees: [UserDTO]?
+  var milestone: MilestoneDTO?
+  var requestedReviewers: [UserDTO]?
+  var requestedTeams: [TeamDTO]?
+  var comments: Int?
   var number: Int
   var title: String
   var user: UserDTO?
@@ -322,6 +490,9 @@ private struct PullRequestDTO: Decodable {
   var changedFiles: Int
   var mergeableState: String?
   enum CodingKeys: String, CodingKey {
+    case createdAt = "created_at", updatedAt = "updated_at", closedAt = "closed_at"
+    case requestedReviewers = "requested_reviewers", requestedTeams = "requested_teams"
+    case assignees, milestone, comments
     case number, title, user, body, state, labels, draft, merged, base, head
     case htmlURL = "html_url", changedFiles = "changed_files", mergeableState = "mergeable_state"
   }
@@ -337,6 +508,16 @@ private struct PullRequestDTO: Decodable {
       state: merged ? .merged : state == "open" ? .open : .closed,
       labels: labels.map(\.name),
       isDraft: draft,
+      github: .init(
+        createdAt: createdAt,
+        updatedAt: updatedAt,
+        closedAt: closedAt,
+        assignees: assignees?.map(\.login) ?? [],
+        milestone: milestone?.title,
+        requestedReviewers: requestedReviewers?.map(\.login) ?? [],
+        requestedTeams: requestedTeams?.map(\.slug) ?? [],
+        commentCount: nil,
+      ),
     )
   }
 }
@@ -376,12 +557,28 @@ private struct CommentDTO: Decodable {
   var body: String
   var path: String?
   var line: Int?
+  var side: InlineComment.Side?
+  var start_line: Int?
+  var subject_type: String?
+  var original_line: Int?
+  var commit_id: String?
   var model: DiscussionComment {
     .init(
       id: id,
       author: user?.login ?? "ghost",
       body: body,
       context: path.map { "\($0):\(line.map(String.init) ?? "–")" },
+      anchor: path.map { path in
+        DiscussionAnchor(
+          path: path,
+          line: line,
+          side: side,
+          startLine: start_line,
+          originalLine: original_line,
+          commitID: commit_id,
+          subjectType: subject_type,
+        )
+      },
     )
   }
 }

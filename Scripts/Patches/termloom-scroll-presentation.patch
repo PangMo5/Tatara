@@ -1,0 +1,170 @@
+# SPDX-FileCopyrightText: 2026 Frank Wang
+# SPDX-FileCopyrightText: 2026 PangMo5 and contributors
+# SPDX-License-Identifier: MIT
+
+--- a/Sources/TermLoom/Application.swift
++++ b/Sources/TermLoom/Application.swift
+@@ -222,6 +222,10 @@
+   /// Automatically redraw when Swift Observation values read by `body` or widget rendering change.
+   /// Applications with a complete explicit redraw scheduler can return `false` to avoid duplicate frames.
+   var automaticallyTracksObservableState: Bool { get }
++  /// Apply consecutive wheel events at the same position before presenting their final state.
++  /// Opt in only when intermediate wheel states do not need fresh interaction maps. Input order,
++  /// per-event updates and boundary clamping are preserved; only intermediate frames are omitted.
++  var coalescesScrollPresentation: Bool { get }
+   func update(_ event: TerminalEvent) async -> ApplicationUpdate
+   /// Returns the canonical source-backed document rendered above the retained viewport.
+   /// Return `nil` while an overlay temporarily defers native-history updates.
+@@ -239,10 +243,15 @@
+     self.input = input
+   }
+ 
+-  func next(wakeup: TerminalWakeup? = nil) async throws -> TerminalEvent? {
++  func next(
++    wakeup: TerminalWakeup? = nil, timeoutMilliseconds: Int32 = 50,
++    flushPendingEscape: Bool = true
++  ) async throws -> TerminalEvent? {
+     try await Task.detached { [self] in
+       try lock.withLock {
+-        try input.readEvent(wakeup: wakeup)
++        try input.readEvent(
++          timeoutMilliseconds: timeoutMilliseconds, wakeup: wakeup,
++          flushPendingEscape: flushPendingEscape)
+       }
+     }.value
+   }
+@@ -257,6 +266,7 @@
+ 
+ extension TerminalApplication {
+   public var automaticallyTracksObservableState: Bool { true }
++  public var coalescesScrollPresentation: Bool { false }
+   public func inlineDocument(size: Size) -> InlineDocument<InlineDocumentID>? { nil }
+   public func takePendingHistoryInsertions(size: Size) -> [TerminalHistoryInsertion] { [] }
+   public func terminalHistoryDidReset() {}
+@@ -298,9 +308,28 @@
+     }
+     var refreshObservationTracking = true
+     var periodicRedrawWasActive = false
++    var pendingEvent: TerminalEvent?
++    var previousScroll: MouseEvent?
++    var scrollEventsSinceFrame = 0
++    // Bound input work between frames without waiting for a timer or discarding any event.
++    let maximumScrollEventsPerFrame = 64
+ 
+     while isRunning, !Task.isCancelled {
+-      if needsRedraw {
++      var deferScrollRedraw = false
++      if needsRedraw, coalescesScrollPresentation, pendingEvent == nil,
++        let previousScroll, scrollEventsSinceFrame < maximumScrollEventsPerFrame
++      {
++        pendingEvent = try await input.next(
++          timeoutMilliseconds: 0, flushPendingEscape: false)
++        if let scroll = pendingEvent?.presentationScroll,
++          scroll.position == previousScroll.position, scroll.modifiers == previousScroll.modifiers
++        {
++          deferScrollRedraw = true
++        }
++      }
++      if needsRedraw, !deferScrollRedraw {
++        previousScroll = nil
++        scrollEventsSinceFrame = 0
+         let refreshTracking = refreshObservationTracking
+         refreshObservationTracking = false
+         let terminalSize = try terminal.withBackend { (try $0.windowSize()).cells }
+@@ -439,7 +468,13 @@
+         }
+       }
+ 
+-      let nextEvent = try await input.next(wakeup: invalidation.wakeupSource)
++      let nextEvent: TerminalEvent?
++      if let buffered = pendingEvent {
++        nextEvent = buffered
++        pendingEvent = nil
++      } else {
++        nextEvent = try await input.next(wakeup: invalidation.wakeupSource)
++      }
+       let observationInvalidated = invalidation.take()
+       if observationInvalidated { refreshObservationTracking = true }
+       guard let event = nextEvent else {
+@@ -469,6 +504,7 @@
+       }
+       let routed = interactionRouter.route(event, through: interactions)
+       needsRedraw = needsRedraw || routed.focusChanged
++      var canContinueScrollPresentation = !routed.focusChanged
+       for routedEvent in routed.events {
+         if case .endOfInput = routedEvent {
+           isRunning = false
+@@ -483,9 +519,11 @@
+             needsRedraw = true
+           }
+         case .clearViewport:
++          canContinueScrollPresentation = false
+           try terminal.clear()
+           needsRedraw = true
+         case .resetTerminalHistory:
++          canContinueScrollPresentation = false
+           try session.clearScrollbackAndResetViewport()
+           inlineDocumentRuntime.reset()
+           terminalHistoryDidReset()
+@@ -494,6 +532,7 @@
+           input.synchronize(with: session)
+           needsRedraw = true
+         case .suspend:
++          canContinueScrollPresentation = false
+           try await session.withRestoredTerminal {
+             await performSuspendedAction()
+           }
+@@ -507,8 +546,16 @@
+           input.synchronize(with: session)
+           needsRedraw = true
+         case .quit:
++          canContinueScrollPresentation = false
+           isRunning = false
+         }
++      }
++      if canContinueScrollPresentation, let scroll = event.presentationScroll {
++        previousScroll = scroll
++        scrollEventsSinceFrame += 1
++      } else {
++        previousScroll = nil
++        scrollEventsSinceFrame = 0
+       }
+       let trailingInvalidation = invalidation.take()
+       needsRedraw = needsRedraw || trailingInvalidation
+@@ -516,3 +563,13 @@
+     }
+   }
+ }
++
++private extension TerminalEvent {
++  var presentationScroll: MouseEvent? {
++    guard case .mouse(let mouse) = self else { return nil }
++    switch mouse.kind {
++    case .scrollUp, .scrollDown, .scrollLeft, .scrollRight: return mouse
++    default: return nil
++    }
++  }
++}
+--- a/Sources/TermLoom/TerminalSession.swift
++++ b/Sources/TermLoom/TerminalSession.swift
+@@ -774,7 +774,8 @@
+ 
+   mutating func readEvent(
+     timeoutMilliseconds: Int32 = 50,
+-    wakeup: TerminalWakeup?
++    wakeup: TerminalWakeup?,
++    flushPendingEscape: Bool = true
+   ) throws -> TerminalEvent? {
+     if !queuedEvents.isEmpty {
+       return queuedEvents.removeFirst()
+@@ -797,7 +798,9 @@
+     let wakeupFired =
+       descriptors.count > 1 && descriptors[1].revents & Int16(POLLIN) != 0
+     if wakeupFired { wakeup?.drain() }
+-    if result == 0 { return parser.flushEscape().map(localize) }
++    if result == 0 {
++      return flushPendingEscape ? parser.flushEscape().map(localize) : nil
++    }
+     if input.revents & Int16(POLLHUP) != 0,
+       input.revents & Int16(POLLIN) == 0
+     {

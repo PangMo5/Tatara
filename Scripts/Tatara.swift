@@ -149,28 +149,32 @@ func localizations(check: Bool) throws {
 func notices(check: Bool) throws {
   guard let pins = try json(path("Tuist/Package.resolved"))["pins"] as? [[String: Any]]
   else { throw ToolError("Missing package pins.") }
-  if fm.fileExists(atPath: path("Scripts/Smoke/Package.resolved").path),
-     let toolPins = try json(path("Scripts/Smoke/Package.resolved"))["pins"] as? [[String: Any]]
-  {
+  var sources = pins.map { ($0, path("Tuist/.build/checkouts/\($0["identity"] as? String ?? "")")) }
+  if let toolPins = try json(path("Scripts/Smoke/Package.resolved"))["pins"] as? [[String: Any]] {
     for pin in toolPins {
       let revision = (pin["state"] as? [String: String])?["revision"]
-      try require(
-        pins
-          .contains {
-            $0["identity"] as? String == pin["identity"] as? String && ($0["state"] as? [String: String])?["revision"] == revision
-          },
-        "Smoke dependency is not covered by the resolved notices. Align its pin with Tuist/Package.resolved.",
-      )
+      if !sources
+        .contains(where: {
+          $0
+            .0["identity"] as? String == pin["identity"] as? String && ($0.0["state"] as? [String: String])?["revision"] ==
+            revision
+        })
+      {
+        sources.append((pin, path("Scripts/Smoke/.build/checkouts/\(pin["identity"] as? String ?? "")")))
+      }
     }
   }
-  var parts = ["# Third-Party Notices", "", "Tatara is licensed under AGPL-3.0-only. Dependencies retain their own licenses.",
-               "Versions below come from Tuist/Package.resolved. Notices include build dependencies and vendored components.", "",
+  var parts = ["# Third-Party Notices",
+               "",
+               "Tatara is licensed under AGPL-3.0-only. Dependencies retain their own licenses.",
+               "Versions below come from Tuist/Package.resolved and Scripts/Smoke/Package.resolved. Notices include build dependencies and vendored components.",
+               "",
                "<!-- REUSE-IgnoreStart -->", ""]
-  for pin in pins {
+  for (pin, sourceDirectory) in sources {
     guard let identity = pin["identity"] as? String, let location = pin["location"] as? String,
           let state = pin["state"] as? [String: String],
           let revision = state["revision"] else { throw ToolError("Invalid dependency pin.") }
-    let directory = path("Tuist/.build/checkouts/\(identity)").resolvingSymlinksInPath()
+    let directory = sourceDirectory.resolvingSymlinksInPath()
     guard let enumerator = fm.enumerator(at: directory, includingPropertiesForKeys: [.isRegularFileKey])
     else { throw ToolError("Run tuist install first.") }
     var files: [URL] = []
@@ -187,7 +191,8 @@ func notices(check: Bool) throws {
       }
     }
     try require(!files.isEmpty, "No license found for \(identity)")
-    parts += ["## \(identity) \(state["version"] ?? "")", "", "Source: \(location)", "", "Revision: `\(revision)`", ""]
+    let heading = state["version"].map { "\(identity) \($0)" } ?? identity
+    parts += ["## \(heading)", "", "Source: \(location)", "", "Revision: `\(revision)`", ""]
     for file in files.sorted(by: { $0.path < $1.path }) {
       try parts += [
         "### \(file.path.dropFirst(directory.path.count + 1))",
@@ -215,7 +220,7 @@ func notices(check: Bool) throws {
                 "<!-- REUSE-IgnoreEnd -->",
                 ""]
   try generated(parts.joined(separator: "\n"), at: path("THIRD_PARTY_NOTICES.md"), check: check)
-  print("Validated notices for \(pins.count) resolved packages and Catppuccin.")
+  print("Validated notices for \(sources.count) resolved packages and Catppuccin.")
 }
 
 func releaseNotes() throws -> String {
@@ -370,10 +375,78 @@ func formula(artifacts: URL, output: URL) throws {
   """ + "\n", output)
 }
 
+func patchWheelDirections(check: Bool) throws {
+  // Remove this patch when TermLoom supports all four SGR wheel directions.
+  let input = path("Tuist/.build/checkouts/termloom/Sources/TermLoom/Input.swift")
+  let originalHash = "dab82626e590f5964827dc541a5a704cdc22191e5e56031dbc2c6abbbf391885"
+  let patchedHash = "dd5b6d2daa50a8ebf3ec95fc9c346a87736ea0c443cebb596c61d9db0df727b0"
+  func hash(_ text: String) -> String {
+    SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+  }
+  let source = try read(input)
+  if hash(source) == patchedHash {
+    return
+  }
+  try require(!check, "TermLoom wheel-axis patch is missing. Run swift Scripts/Tatara.swift generate.")
+  try require(hash(source) == originalHash, "TermLoom Input.swift changed. Re-evaluate the wheel-axis patch before upgrading.")
+  let patched = source
+    .replacingOccurrences(of: "  case scrollDown\n", with: "  case scrollDown\n  case scrollLeft\n  case scrollRight\n")
+    .replacingOccurrences(of: "      kind = code & 1 == 0 ? .scrollUp : .scrollDown", with: [
+      "      switch code & 3 {",
+      "      case 0: kind = .scrollUp",
+      "      case 1: kind = .scrollDown",
+      "      case 2: kind = .scrollLeft",
+      "      default: kind = .scrollRight",
+      "      }",
+    ].joined(separator: "\n"))
+  try require(hash(patched) == patchedHash, "TermLoom wheel-axis patch produced unexpected content.")
+  try write(patched, input)
+  print("Applied TermLoom wheel-axis patch.")
+}
+
+func patchDependencies(check: Bool = false) throws {
+  try patchWheelDirections(check: check)
+  // Remove this patch when the pinned TermLoom runtime supports bounded scroll presentation batches.
+  let checkout = path("Tuist/.build/checkouts/termloom")
+  let files = [
+    (
+      "Application.swift",
+      "4d1208ff8744dc0161d01fae121b1df64b4969f4569956932812e87f4dfa772b",
+      "6e4d85e74652dd01e90e352060417b499e3b73b4830b0858d0257f756be1b269",
+    ),
+    (
+      "TerminalSession.swift",
+      "60ff1166b2294e704976b71d2d83bd0b0febf65d3a8b6be8c75116791bd61df6",
+      "515d10c3d8127bbf33484e82db1c2f23427f2a9f84aca3d824e87e00e125eb5f",
+    ),
+  ]
+  let hashes = try files.map { try digest(checkout.appendingPathComponent("Sources/TermLoom/" + $0.0)) }
+  if zip(files, hashes).allSatisfy({ $0.0.2 == $0.1 }) {
+    return
+  }
+  try require(!check, "TermLoom scroll presentation patch is missing. Run swift Scripts/Tatara.swift generate.")
+  try require(
+    zip(files, hashes).allSatisfy { $0.0.1 == $0.1 },
+    "TermLoom runtime changed. Re-evaluate the scroll presentation patch before upgrading.",
+  )
+  let patch = path("Scripts/Patches/termloom-scroll-presentation.patch").path
+  try run("git", ["apply", "--check", patch], cwd: checkout)
+  try run("git", ["apply", patch], cwd: checkout)
+  for (name, _, expected) in files {
+    try require(
+      digest(checkout.appendingPathComponent("Sources/TermLoom/" + name)) == expected,
+      "TermLoom scroll presentation patch produced unexpected content: \(name)",
+    )
+  }
+  print("Applied TermLoom scroll presentation patch.")
+}
+
 func generate(locked: Bool = false) throws {
   try run("tuist", ["install"])
+  try patchDependencies()
+  try run("swift", ["package", "--package-path", "Scripts/Smoke", "resolve"])
   if locked {
-    try run("git", ["diff", "--exit-code", "--", "Tuist/Package.resolved"])
+    try run("git", ["diff", "--exit-code", "--", "Tuist/Package.resolved", "Scripts/Smoke/Package.resolved"])
   }
   try run("tuist", ["generate", "--no-open"])
 }
@@ -381,6 +454,187 @@ func generate(locked: Bool = false) throws {
 func build(_ configuration: String, scheme: String = "Tatara", extra: [String] = []) throws {
   try run("xcodebuild", ["build", "-workspace", "Tatara.xcworkspace", "-scheme", scheme, "-configuration", configuration,
                          "-destination", "generic/platform=macOS", "-derivedDataPath", "DerivedData"] + extra)
+}
+
+func summarizeRendererComparisons(_ labels: [String]) throws {
+  try require(!labels.isEmpty, "Expected one or more comparison labels.")
+  let directory = path(".artifacts/swift-pty")
+  var measurements: [String: [String: [Double]]] = [:]
+  var sources: [String] = []
+  var excluded: [String] = []
+  for runDirectory in try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+    .sorted(by: { $0.path < $1.path })
+    where labels.contains(where: { runDirectory.lastPathComponent.hasPrefix("navigation-" + $0 + "-") })
+  {
+    let report = runDirectory.appendingPathComponent("navigation.json")
+    guard fm.fileExists(atPath: report.path) else {
+      excluded.append(runDirectory.lastPathComponent)
+      continue
+    }
+    let value = try json(report)
+    try require(
+      value["preview_recording"] as? Bool != true && value["cpu_sampling"] as? Bool != true,
+      "Preview recordings and CPU profiles cannot be included in renderer timing summaries: \(report.path)",
+    )
+    guard let backend = value["renderer"] as? String, let columns = value["columns"] as? Int,
+          let rows = value["rows"] as? Int, let samples = value["samples"] as? [[String: Any]]
+    else { throw ToolError("Malformed renderer report: \(report.path)") }
+    let key = "\(columns)x\(rows)/\(backend)"
+    for sample in samples {
+      guard let stage = sample["stage"] as? String else { throw ToolError("Missing measurement stage.") }
+      if stage == "diff-page", let latency = sample["latency_ms"] as? Double {
+        measurements[key, default: [:]]["diff_page_ms", default: []].append(latency)
+      }
+      guard stage.contains("loading-burst") else { continue }
+      guard let sent = sample["input_sent_ms"] as? [Double], let frames = sample["frames"] as? [[String: Any]],
+            let count = sample["input_count"] as? Int, count == sent.count
+      else { throw ToolError("Incomplete directional input receipt: \(report.path)") }
+      var previous = -1
+      for frame in frames {
+        guard let index = frame["selected_index"] as? Int else { throw ToolError("Missing selection index.") }
+        if index >= 0 {
+          try require(index >= previous, "Selection moved backwards during a directional burst: \(report.path)")
+          previous = index
+        }
+      }
+      try require(previous == count, "Directional replay ended at the wrong selection: \(report.path)")
+      let scope = stage.hasPrefix("pr-") ? "pr" : "file"
+      for (index, time) in sent.enumerated() {
+        guard let frame = frames.first(where: { ($0["selected_index"] as? Int ?? -1) >= index + 1 }),
+              let visible = frame["at_ms"] as? Double
+        else { throw ToolError("An input was never visible: \(report.path)") }
+        try require(visible >= time, "A selection predates its input: \(report.path)")
+        measurements[key, default: [:]][scope + "_key_visible_ms", default: []].append(visible - time)
+        if index + 1 == count {
+          measurements[key, default: [:]][scope + "_final_frame_ms", default: []].append(visible - time)
+        }
+      }
+    }
+    sources.append(report.path)
+  }
+  var summary: [String: Any] = [:]
+  for (key, metrics) in measurements {
+    var result: [String: Any] = [:]
+    for (metric, values) in metrics {
+      let ordered = values.sorted()
+      result[metric] = ["count": ordered.count, "median_ms": ordered[ordered.count / 2],
+                        "p95_ms": ordered[Int(ceil(Double(ordered.count) * 0.95)) - 1], "maximum_ms": ordered.last!]
+    }
+    summary[key] = result
+  }
+  let output: [String: Any] = ["metrics": summary, "source_reports": sources, "excluded_incomplete_runs": excluded,
+                               "definition": "Each input is paired with the first completed frame whose selection includes that motion."]
+  let destination = path(".artifacts/renderer-comparison-summary.json")
+  try JSONSerialization.data(withJSONObject: output, options: [.prettyPrinted, .sortedKeys]).write(to: destination)
+  print("Summarized \(sources.count) completed runs; excluded \(excluded.count) incomplete runs. \(destination.path)")
+}
+
+func createRendererPreview(_ labels: [String]) throws {
+  try require((2 ... 3).contains(labels.count), "Expected two or three recorded navigation labels.")
+  let captures: [[String: Any]] = try labels.map { label in
+    try require(URL(fileURLWithPath: label).lastPathComponent == label, "Expected a navigation label, not a path.")
+    let directory = path(".artifacts/swift-pty/navigation-" + label)
+    let navigation = try json(directory.appendingPathComponent("navigation.json"))
+    let preview = try json(directory.appendingPathComponent("preview.json"))
+    try require(navigation["preview_recording"] as? Bool == true, "Navigation was not recorded as a preview: \(label)")
+    guard let frames = preview["frames"] as? [[String: Any]], !frames.isEmpty,
+          let samples = navigation["samples"] as? [[String: Any]]
+    else { throw ToolError("Incomplete preview: \(label)") }
+    let inputRows = try String(contentsOf: directory.appendingPathComponent("input.tsv"), encoding: .utf8)
+      .split(separator: "\n")
+    try require(inputRows.first?.hasPrefix("started_ms\t") == true, "Missing input trace header: \(label)")
+    let handlerTimes = try inputRows.dropFirst().map { row in
+      guard let value = row.split(separator: "\t").first.flatMap({ Double($0) })
+      else { throw ToolError("Invalid input trace timestamp: \(label)") }
+      return value
+    }
+    let phases: [[String: Any]] = try samples.compactMap { sample in
+      guard let stage = sample["stage"] as? String, stage.contains("loading-burst") else { return nil }
+      guard let sent = sample["sent_uptime_ms"] as? Double, let replay = sample["replay_ms"] as? Double,
+            let duration = sample["total_ms"] as? Double, let inputs = sample["input_sent_ms"] as? [Double]
+      else { throw ToolError("Incomplete preview input sequence: \(label)/\(stage)") }
+      let origin = sent - replay
+      let handlers = handlerTimes.filter { origin <= $0 && $0 <= origin + duration }.map { $0 - origin }
+      try require(handlers.count == inputs.count, "Preview input trace count differs: \(label)/\(stage)")
+      return ["name": stage, "origin": origin, "duration": duration, "inputs": inputs, "handlers": handlers]
+    }
+    return ["label": label, "renderer": navigation["renderer"] ?? label,
+            "binary_sha256": navigation["binary_sha256"] ?? "unknown", "frames": frames, "phases": phases]
+  }
+  let encoded = try String(decoding: JSONSerialization.data(withJSONObject: captures, options: [.sortedKeys]), as: UTF8.self)
+    .replacingOccurrences(of: "<", with: "\\u003c")
+  let html = """
+  <!doctype html>
+  <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Terminal input and rendering preview</title>
+  <style>
+  :root{font-family:system-ui,sans-serif;color:#202530;background:#f6f7fa}body{margin:24px}
+  h1{font-size:24px;margin-bottom:8px}p{max-width:1000px;line-height:1.5;color:#485365}
+  .controls{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:24px 0}
+  button,select{font:inherit;padding:8px;border:1px solid #bac1cc;border-radius:6px;background:white}
+  input[type=range]{width:min(400px,70vw)}#panels{display:grid;grid-template-columns:repeat(auto-fit,minmax(540px,1fr));gap:20px}
+  article{min-width:0}h2{font-size:18px;margin:0 0 8px}.metadata{font:12px ui-monospace,monospace;color:#526075}
+  .status{font-variant-numeric:tabular-nums;margin:12px 0;min-height:24px}
+    pre{font:9px/1.25 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre;overflow:auto;margin:0;padding:12px;
+    background:#1e1e2e;color:#cdd6f4;border-radius:8px;min-height:630px}output{font-variant-numeric:tabular-nums}
+  @media(max-width:600px){body{margin:12px}#panels{grid-template-columns:minmax(0,1fr)}}
+  </style>
+  <h1>Input and rendering: recorded terminal preview</h1>
+  <p>Actual completed terminal-cell text, replayed at its recorded timestamps. Styling is omitted.
+  Each panel starts at the same named input burst; its input counter follows the actual write times.
+  These captures include recording overhead and are not performance measurements.
+  Renderer labels identify the binary used for each recording. Historical prototype runs are not production migration evidence.</p>
+  <div class="controls">
+  <label>Burst <select id="phase"></select></label><button id="play">Play</button><button id="reset">Reset</button>
+  <label>Speed <select id="speed"><option value="0.25">0.25×</option><option value="1" selected>1×</option><option value="2">2×</option></select></label>
+  <input id="time" type="range" min="0" value="0" step="1" aria-label="Elapsed milliseconds"><output id="clock">0 ms</output>
+  </div><main id="panels"></main>
+  <script id="recordings" type="application/json">\(encoded)</script>
+  <script>
+  (()=>{
+    const data=JSON.parse(document.getElementById('recordings').textContent);
+    const phase=document.getElementById('phase'), play=document.getElementById('play'), reset=document.getElementById('reset');
+    const speed=document.getElementById('speed'), time=document.getElementById('time'), clock=document.getElementById('clock');
+    const panels=document.getElementById('panels'); let elapsed=0, duration=0, playing=false, previous=0, animation=0;
+    const names=data[0].phases.map(p=>p.name).filter(name=>data.every(d=>d.phases.some(p=>p.name===name)));
+    if(!names.length)throw new Error('Recordings have no matching input burst');
+    for(const name of names){const option=document.createElement('option');option.value=name;option.textContent=name;phase.append(option)}
+    phase.value=names.includes('file-loading-burst-64')?'file-loading-burst-64':names[0];
+    const views=data.map(d=>{
+      const article=document.createElement('article'),title=document.createElement('h2'),meta=document.createElement('div');
+      const status=document.createElement('div'),screen=document.createElement('pre');
+      title.textContent=d.renderer;meta.className='metadata';meta.textContent=d.label+' · '+d.binary_sha256.slice(0,12);
+      status.className='status';screen.setAttribute('aria-label',d.renderer+' recorded terminal');
+      article.append(title,meta,status,screen);panels.append(article);return {status,screen,last:-1};
+    });
+    function render(){
+      clock.textContent=Math.round(elapsed)+' ms';time.value=elapsed;
+      data.forEach((d,i)=>{
+          const p=d.phases.find(p=>p.name===phase.value), at=p.origin+Math.min(elapsed,p.duration);
+        let lo=0,hi=d.frames.length;while(lo<hi){const mid=(lo+hi)>>1;if(d.frames[mid].uptime_ms<=at)lo=mid+1;else hi=mid}
+        const index=Math.max(0,lo-1), f=d.frames[index], v=views[i];
+        if(v.last!==index){v.screen.textContent=f.text;v.last=index}
+        const sent=p.inputs.filter(t=>t<=elapsed).length, handled=p.handlers.filter(t=>t<=elapsed).length;
+        v.status.textContent='Sent '+sent+'/'+p.inputs.length+' · Handler started '+handled+' · PR index '+(f.pr_index??'—')+' · File index '+(f.file_index??'—')+' · '+f.columns+'×'+f.rows;
+      });
+    }
+    function stop(){playing=false;cancelAnimationFrame(animation);animation=0;play.textContent='Play'}
+    function configure(){stop();elapsed=0;
+      duration=Math.max(...data.map(d=>d.phases.find(p=>p.name===phase.value).duration))+300;
+      time.max=duration;views.forEach(v=>v.last=-1);render();
+    }
+    function tick(now){if(!playing)return;elapsed=Math.min(duration,elapsed+(now-previous)*Number(speed.value));previous=now;render();
+      if(elapsed>=duration){stop()}else animation=requestAnimationFrame(tick);
+    }
+    play.addEventListener('click',()=>{if(playing){stop();return}playing=true;play.textContent='Pause';if(elapsed>=duration)elapsed=0;previous=performance.now();animation=requestAnimationFrame(tick)});
+    reset.addEventListener('click',configure);phase.addEventListener('change',configure);
+    time.addEventListener('input',()=>{stop();elapsed=Number(time.value);render()});configure();
+  })();
+  </script></html>
+  """
+  let destination = path(".artifacts/renderer-review-preview.html")
+  try html.write(to: destination, atomically: true, encoding: .utf8)
+  print("Created recorded terminal preview: \(destination.path)")
 }
 
 func lint() throws {
@@ -600,7 +854,10 @@ do {
         .appendingPathComponent(".local/share/tatara/local").path),
     )
   case "generate": try generate(locked: args.contains("--locked"))
+  case "patch-dependencies": try patchDependencies(check: args.contains("--check"))
   case "build": try build(args.first ?? "Debug")
+  case "renderer-summary": try summarizeRendererComparisons(args)
+  case "renderer-preview": try createRendererPreview(args)
   case "release-build": try generate()
     try build("Release", extra: ["ARCHS=\(required("ARCH"))", "ONLY_ACTIVE_ARCH=NO", "CODE_SIGNING_ALLOWED=NO"])
     try signing("sign")

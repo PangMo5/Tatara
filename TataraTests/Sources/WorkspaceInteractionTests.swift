@@ -3,12 +3,102 @@
 
 import ComposableArchitecture
 import Foundation
+import Observation
+import Synchronization
 import TataraCore
 import TataraKit
 import Testing
 
 @MainActor
 struct WorkspaceInteractionTests {
+  @Test func `enter opens the selected PR into files and the selected file into diff`() async throws {
+    let item = try item()
+    var state = WorkspaceFeature.State(repository: item.id.repository, preferences: .init(filesView: .list))
+    state.items = [item]
+    state.selectedItemID = item.id
+    state.detail = .init(item: item, files: [.init(path: "A.swift")])
+    state.selectedFilePath = "A.swift"
+    state.tab = .diff
+    state.isPreparingDocument = true
+    let store = TestStore(initialState: state) { WorkspaceFeature() }
+    await store.send(.keyPressed("enter"))
+    await store.receive(\.commandPressed) { $0.pane = .files }
+    await store.send(.keyPressed("enter"))
+    await store.receive(\.commandPressed) { $0.pane = .content }
+    await store.receive(\.fileSelected)
+  }
+
+  @Test func `sidebar scroll remains stationary until selection crosses either context margin`() {
+    func offset(_ selected: Int, _ previous: Int, total: Int = 100, page: Int = 10) -> Int {
+      ScrollMetrics.selectionOffset(selected: selected, total: total, page: page, previous: previous)
+    }
+    #expect(offset(20, 0) == 13)
+    for selected in 15 ... 20 {
+      #expect(offset(selected, 13) == 13)
+    }
+    #expect(offset(14, 13) == 12)
+    #expect(offset(15, 12) == 12)
+    #expect(offset(19, 12) == 12)
+    #expect(offset(20, 12) == 13)
+    #expect(offset(0, 13) == 0)
+    #expect(offset(99, 0) == 90)
+    #expect(offset(2, 90, total: 3) == 0)
+    #expect(offset(20, 13, page: 5) == 18)
+    #expect(offset(20, 13, page: 1) == 20)
+  }
+
+  @Test(arguments: [false, true])
+  func `loading file selection does not invalidate unchanged content state`(hasSearchState: Bool) async throws {
+    let item = try item()
+    var state = WorkspaceFeature.State(repository: item.id.repository)
+    state.items = [item]
+    state.selectedItemID = item.id
+    state.detail = .init(
+      item: item,
+      revision: .init(mergeBase: String(repeating: "a", count: 40), head: String(repeating: "b", count: 40)),
+      files: [.init(path: "A.swift"), .init(path: "B.swift")],
+    )
+    state.selectedFilePath = "A.swift"
+    state.pane = .files
+    state.tab = .diff
+    state.isLoadingDiff = true
+    state.isPreparingDocument = true
+    if hasSearchState {
+      state.searches[.content] = .init()
+    }
+    let (stream, continuation) = AsyncStream<Void>.makeStream()
+    defer { continuation.finish() }
+    // Exercise the live observation boundary used by the view, not a reducer snapshot.
+    let store = Store(initialState: state) { WorkspaceFeature() } withDependencies: {
+      $0[DiffClient.self].render = { _ in
+        for await _ in stream {}
+        throw CancellationError()
+      }
+    }
+    let changes = Mutex(0)
+    withObservationTracking {
+      _ = store.state.isLoadingDiff
+      _ = store.state.isDocumentCurrent
+      _ = store.state.searches[.content]?.matchingLines
+    } onChange: {
+      changes.withLock { $0 += 1 }
+    }
+
+    let task = store.send(.fileSelected("B.swift"))
+
+    #expect(store.state.selectedFilePath == "B.swift")
+    #expect(store.state.isLoadingDiff)
+    #expect(!store.state.isDocumentCurrent)
+    #expect(changes.withLock { $0 } == 0)
+    #expect((store.state.searches[.content] != nil) == hasSearchState)
+    store.send(.contentResponse(generation: store.state.contentGeneration, .success(.init(lines: [[.init(text: "Ready")]]))))
+    #expect(!store.state.isLoadingDiff)
+    #expect(store.state.isDocumentCurrent)
+    #expect(changes.withLock { $0 } == 1)
+    task.cancel()
+    await task.finish()
+  }
+
   @Test func `selection keeps an identified preview until replacement and blocks premature reviews`() async throws {
     let first = try item(1), next = try item(2)
     let original = ReviewDocument(lines: (0 ..< 50).map { [.init(text: "Old source \($0)")] })
@@ -23,7 +113,7 @@ struct WorkspaceInteractionTests {
     state.documentTitle = "#1 · Overview"
     state.scroll = 10
     let store = TestStore(initialState: state) { WorkspaceFeature() } withDependencies: {
-      $0[DocumentClient.self].prepare = { _, _ in
+      $0[DocumentClient.self].prepareComment = { _, _ in
         for await _ in stream {
           return replacement
         }
@@ -44,7 +134,7 @@ struct WorkspaceInteractionTests {
     continuation.finish()
     await store.receive(\.contentResponse)
     await store.finish()
-    #expect(store.state.document == replacement)
+    #expect(store.state.document.lines == replacement.lines.map { [.init(text: "   ", role: .commentBody)] + $0 })
     #expect(store.state.documentTitle == "#2 · Overview")
     #expect(store.state.scroll == 0)
     #expect(!store.state.isPreparingDocument)
@@ -62,6 +152,65 @@ struct WorkspaceInteractionTests {
     #expect(store.state.pane == .files)
   }
 
+  @Test func `manual scrolling preserves sidebar selection pane focus and diff source cursor`() async throws {
+    let items = try (1 ... 50).map { try item($0) }
+    let files = (0 ..< 50).map { ChangedFile(path: "File\($0).swift") }
+    var state = WorkspaceFeature.State(repository: items[0].id.repository, preferences: .init(filesView: .list))
+    state.items = items
+    state.selectedItemID = items[0].id
+    state.detail = .init(item: items[0], files: files)
+    state.selectedFilePath = files[0].path
+    state.fileCursorID = "file:" + files[0].path
+    state.itemsHeight = 5
+    state.filesHeight = 5
+    state.contentHeight = 10
+    state.pane = .content
+    state.tab = .diff
+    state.document = .init(
+      lines: (0 ..< 100).map { [.init(text: "line \($0)")] },
+      diff: .init(
+        path: files[0].path,
+        language: "Swift",
+        status: "changed",
+        rows:
+        (0 ..< 100).map { .init(left: nil, right: .init(number: $0 + 1, spans: [.init(text: "line \($0)")])) },
+      ),
+      checkingCancellation: {},
+    )
+    state.diffCursor = 4
+    state.visualStart = 2
+    let store = TestStore(initialState: state) { WorkspaceFeature() }
+    await store.send(.wheelScrolled(.items, delta: 3)) { $0.itemsScroll = 3 }
+    await store.send(.wheelScrolled(.files, delta: 7)) { $0.filesScroll = 7 }
+    await store.send(.scrollbarMoved(.items, offset: 40)) { $0.itemsScroll = 40 }
+    await store.send(.scrollbarMoved(.files, offset: 1000)) { $0.filesScroll = 45 }
+    await store.send(.wheelScrolled(.content, delta: 30)) { $0.scroll = 30 }
+    await store.send(.scrollbarMoved(.content, offset: 60)) { $0.scroll = 60 }
+    await store.send(.commandPressed(.theme)) { $0.preferences.theme = .latte }
+    #expect(store.state.pane == .content && store.state.diffCursor == 4 && store.state.visualStart == 2)
+    #expect(store.state.selectedItemID == items[0].id && store.state.selectedFilePath == files[0].path)
+    #expect(store.state.itemsScroll == 40 && store.state.filesScroll == 45)
+    await store.send(.commandPressed(.previousPane)) { $0.pane = .files
+      $0.visualStart = nil
+    }
+    await store.send(.commandPressed(.nextPane)) { $0.pane = .content }
+    #expect(store.state.diffCursor == 4 && store.state.scroll == 60)
+    await store.send(.commandPressed(.down)) { $0.diffCursor = 5
+      $0.scroll = 5
+    }
+  }
+
+  @Test func `keyboard boundary motion reveals the selection after independent scrolling`() async throws {
+    let items = try (1 ... 20).map { try item($0) }
+    var state = WorkspaceFeature.State(repository: items[0].id.repository)
+    state.items = items
+    state.selectedItemID = items[0].id
+    state.itemsHeight = 5
+    state.itemsScroll = 12
+    let store = TestStore(initialState: state) { WorkspaceFeature() }
+    await store.send(.commandPressed(.first)) { $0.itemsScroll = 0 }
+  }
+
   @Test func `help owns wheel input while presented`() async throws {
     var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
     state.showsHelp = true
@@ -75,7 +224,7 @@ struct WorkspaceInteractionTests {
     await store.send(.wheelScrolled(.help, delta: -100)) { $0.helpScroll = 0 }
   }
 
-  @Test func `expired selection delay cannot start an API request`() async throws {
+  @Test func `obsolete detail failure cannot replace current selection`() async throws {
     let old = try item(1)
     let current = try item(2)
     var state = WorkspaceFeature.State(repository: current.id.repository)
@@ -83,7 +232,7 @@ struct WorkspaceInteractionTests {
     state.selectedItemID = current.id
     state.detailGeneration = 5
     let store = TestStore(initialState: state) { WorkspaceFeature() }
-    await store.send(.detailDelayElapsed(generation: 4, old))
+    await store.send(.detailResponse(generation: 4, .failure(.init(.timedOut))))
   }
 
   @Test func `next match without A search does not scroll`() async throws {
@@ -116,7 +265,9 @@ struct WorkspaceInteractionTests {
     state.searches[.files] = .init()
     state.searches[.files]?.query = "swift"
     let store = TestStore(initialState: state) { WorkspaceFeature() }
-    await store.send(.keyPressed("esc")) { $0.searches[.files] = .init() }
+    await store.send(.keyPressed("esc")) { $0.searches[.files] = .init()
+      $0.fileSearchGeneration = 1
+    }
     #expect(store.state.pane == .files)
     #expect(store.state.scroll == 8)
     #expect(store.state.searches[.items]?.query == "Example")
@@ -175,7 +326,6 @@ struct WorkspaceInteractionTests {
   }
 
   @Test func `content search jumps between matches and rejects stale results`() async throws {
-    let clock = TestClock()
     var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
     state.pane = .content
     state.contentHeight = 5
@@ -183,7 +333,6 @@ struct WorkspaceInteractionTests {
     state.searches[.content] = .init()
     state.searches[.content]?.isEditing = true
     let store = TestStore(initialState: state) { WorkspaceFeature() } withDependencies: {
-      $0.continuousClock = clock
       $0[DocumentClient.self].search = { _, query in query == "L" ? [2, 20] : [] }
     }
     await store.send(.keyPressed("L")) {
@@ -191,29 +340,19 @@ struct WorkspaceInteractionTests {
       $0.searchGeneration = 1
       $0.isFinding = true
     }
-    await clock.advance(by: .milliseconds(60))
     await store.receive(\.searchResponse) {
       $0.searches[.content]?.matches = [2, 20]
       $0.scroll = 2
       $0.isFinding = false
     }
-    await store.send(.keyPressed("enter")) {
-      $0.searches[.content]?.isEditing = false
-      $0.searches[.content]?.matches = []
-      $0.searchGeneration = 2
-      $0.isFinding = true
-    }
-    await clock.advance(by: .milliseconds(60))
-    await store.receive(\.searchResponse) { $0.searches[.content]?.matches = [2, 20]
-      $0.isFinding = false
-    }
+    await store.send(.keyPressed("enter")) { $0.searches[.content]?.isEditing = false }
     await store.send(.commandPressed(.nextMatch)) { $0.searches[.content]?.selection = 1
       $0.scroll = 20
     }
     await store.send(.keyPressed("esc")) { $0.searches[.content] = .init()
-      $0.searchGeneration = 3
+      $0.searchGeneration = 2
     }
-    await store.send(.searchResponse(generation: 2, matches: [29]))
+    await store.send(.searchResponse(generation: 1, matches: [29]))
     #expect(store.state.scroll == 20)
   }
 
@@ -224,33 +363,143 @@ struct WorkspaceInteractionTests {
     }
   }
 
-  @Test func `rapid selection fetches only the settled item and reuses its detail`() async throws {
-    let clock = TestClock()
+  @Test func `detail starts without a timer and a cached revisit does not fetch again`() async throws {
     let calls = Requests()
-    let items = try [item(1), item(2), item(3)]
+    let items = try [item(1), item(2)]
     var state = WorkspaceFeature.State(repository: items[0].id.repository)
     state.items = items
     let store = TestStore(initialState: state) { WorkspaceFeature() } withDependencies: {
-      $0.continuousClock = clock
-      $0[ForgeClient.self].detail = { item in await calls.record(item.id)
+      $0.continuousClock = TestClock()
+      $0[ForgeClient.self].detail = { item in
+        await calls.record(item.id)
         return .init(item: item)
       }
-      $0[DocumentClient.self].prepare = { text, _ in .init(lines: [[.init(text: text)]]) }
+      $0[DocumentClient.self].prepareComment = { text, _ in .init(lines: [[.init(text: text)]]) }
     }
     store.exhaustivity = .off
     for item in items {
       await store.send(.itemSelected(item.id))
+      await store.receive(\.detailResponse)
+      await store.finish()
     }
-    #expect(store.state.detail?.item == items[2]) // Overview is available before the network.
-    await clock.advance(by: .milliseconds(120))
-    await store.finish()
-    #expect(await calls.ids == [items[2].id])
+    #expect(await calls.ids == items.map(\.id))
     await store.send(.itemSelected(items[0].id))
-    await clock.advance(by: .milliseconds(120))
     await store.finish()
-    await store.send(.itemSelected(items[2].id))
-    await store.finish()
-    #expect(await calls.ids == [items[2].id, items[0].id])
+    #expect(await calls.ids == items.map(\.id))
+    #expect(store.state.detail?.item == items[0])
     #expect(!store.state.isLoadingDetail)
+  }
+
+  @Test func `failed replacement remains a preview and cannot provide search or review anchors`() async throws {
+    let item = try item()
+    let file = ChangedFile(path: "File.swift", patch: "@@ -1 +1 @@\n-old\n+new")
+    var state = WorkspaceFeature.State(repository: item.id.repository)
+    state.items = [item]
+    state.selectedItemID = item.id
+    state.detail = .init(item: item, revision: .init(mergeBase: "base", head: "head"), files: [file])
+    state.selectedFilePath = file.path
+    state.pane = .content
+    state.tab = .diff
+    state.contentGeneration = 1
+    state.isPreparingDocument = true
+    state.document = .init(
+      lines: [[.init(text: "old preview")]],
+      diff: .init(path: file.path, language: "Swift", status: "changed", rows: [
+        .init(left: nil, right: .init(number: 1, spans: [.init(text: "old preview")])),
+      ], revision: state.detail?.revision),
+      checkingCancellation: {},
+    )
+    let store = TestStore(initialState: state) { WorkspaceFeature() }
+    store.exhaustivity = .off
+    await store.send(.contentResponse(generation: 1, .failure(.init(.commandFailed))))
+    #expect(!store.state.isDocumentCurrent)
+    #expect(!store.state.isPreparingDocument)
+    await store.send(.commandPressed(.selectLines))
+    await store.send(.diffCursorSelected(row: 0, side: .right))
+    await store.send(.commandPressed(.comment))
+    await store.send(.commandPressed(.review))
+    #expect(store.state.visualStart == nil)
+    #expect(store.state.review == nil)
+    await store.send(.commandPressed(.search))
+    await store.send(.keyPressed("x"))
+    #expect(!store.state.isFinding)
+    #expect(store.state.document.lines[0][0].text == "old preview")
+    await store.finish()
+  }
+
+  @Test func `theme changes reuse the prepared diff and preserve selection`() async throws {
+    var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
+    state.tab = .diff
+    state.scroll = 20
+    state.visualStart = 21
+    let store = TestStore(initialState: state) { WorkspaceFeature() }
+    await store.send(.commandPressed(.theme)) { $0.preferences.theme = .latte }
+    #expect(store.state.contentGeneration == 0)
+    #expect(store.state.scroll == 20)
+    #expect(store.state.visualStart == 21)
+  }
+
+  @Test func `sidebar projections follow their inputs and preserve matching ancestors`() throws {
+    let item = try item()
+    var state = WorkspaceFeature.State(repository: item.id.repository)
+    state.items = [item]
+    state.detail = .init(item: item, files: [.init(path: "Sources/One.swift"), .init(path: "Tests/Two.swift")])
+    #expect(state.visibleItems == [item])
+    state.searches[.items] = .init()
+    state.searches[.items]?.query = "absent"
+    #expect(state.visibleItems == [item])
+    state.searches[.items] = nil
+    #expect(state.visibleItems == [item])
+    state.collapsedDirectories = ["Sources"]
+    #expect(!state.visibleFileRows.contains { $0.path == "Sources/One.swift" })
+    state.searches[.files] = .init()
+    state.searches[.files]?.query = "One"
+    state.fileMatches = ["Sources/One.swift": [1]]
+    #expect(state.visibleFileRows.map(\.path) == ["Sources", "Sources/One.swift"])
+    state.preferences.filesView = .list
+    #expect(state.visibleFileRows.map(\.path) == ["Sources/One.swift"])
+    state.searches[.files] = nil
+    state.fileMatches = nil
+    #expect(state.visibleFiles.count == 2)
+    state.detail = nil
+    #expect(state.visibleFileRows.isEmpty)
+  }
+
+  @Test func `an older preset read cannot finish a newer save`() async throws {
+    let repository = try RepositoryID("owner/repo")
+    var state = FilterFeature.State(repository: repository, kind: .pullRequest, query: "is:open")
+    state.generation = 2
+    state.isSaving = true
+    let store = TestStore(initialState: state) { FilterFeature() }
+    await store.send(.loaded(generation: 1, .success([])))
+    await store.send(.loaded(generation: 1, .failure(.init(.commandFailed))))
+    await store.send(.appeared)
+    #expect(store.state.isSaving)
+    await store.send(.loaded(generation: 2, .success([]))) { $0.isSaving = false }
+  }
+
+  @Test func `detail cache evicts an old entry without flushing recently viewed items`() async throws {
+    let items = try (1 ... 17).map { try item($0) }
+    var state = WorkspaceFeature.State(repository: items[0].id.repository)
+    state.items = items
+    let store = TestStore(initialState: state) { WorkspaceFeature() } withDependencies: {
+      $0[ForgeClient.self].detail = { .init(item: $0) }
+      $0[DocumentClient.self].prepareComment = { text, _ in .init(lines: [[.init(text: text)]]) }
+    }
+    store.exhaustivity = .off
+    for item in items.prefix(16) {
+      await store.send(.itemSelected(item.id))
+      await store.receive(\.detailResponse)
+      await store.finish()
+    }
+    await store.send(.itemSelected(items[0].id))
+    await store.finish()
+    await store.send(.itemSelected(items[16].id))
+    await store.receive(\.detailResponse)
+    await store.finish()
+    #expect(store.state.detailCache.count == 16)
+    #expect(store.state.detailCache[items[0].id] != nil)
+    #expect(store.state.detailCache[items[1].id] == nil)
+    #expect(store.state.detailCache[items[16].id] != nil)
   }
 }

@@ -11,9 +11,10 @@ let package = Package(
   name: "Tatara",
   dependencies: [
     .package(url: "https://github.com/pointfreeco/swift-composable-architecture", from: "1.26.2"),
-    .package(url: "https://github.com/SwiftTUI/swift-tui", .upToNextMinor(from: "0.10.1")),
+    .package(url: "https://github.com/Frank-III/termloom", revision: "b746967794ad2753c39f695f5923c5cdf2f6425a", traits: []),
+    .package(url: "https://github.com/apple/swift-argument-parser", from: "1.8.0"),
     .package(url: "https://github.com/swiftlang/swift-subprocess", from: "1.0.0"),
     .package(url: "https://github.com/mattt/swift-toml", from: "2.0.0"),
-    .package(url: "https://github.com/pointfreeco/sqlite-data", from: "1.0.0"),
+    .package(url: "https://github.com/pointfreeco/sqlite-data", from: "1.12.0"),
   ],
 )
