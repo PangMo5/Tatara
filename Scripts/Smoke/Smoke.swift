@@ -27,7 +27,7 @@ struct Smoke {
       if let index = args.firstIndex(of: "--metadata-live"), args.indices.contains(index + 1) {
         let t = try PTY(
           binary: binary,
-          arguments: ["--repo", args[index + 1], "--language", "en", "--detail-level", "rich"],
+          arguments: ["--repo", args[index + 1], "--language", "en"],
           columns: 176,
           rows: 48,
           artifacts: artifacts.appendingPathComponent("metadata-live"),
@@ -44,6 +44,12 @@ struct Smoke {
         t.key("q")
         try t.finish()
         print("Swift PTY: live GitHub list and rich detail metadata passed; no forge writes.")
+      } else if args.contains("--picker-benchmark") {
+        try pickerBenchmark(binary, artifacts: artifacts.appendingPathComponent("picker-benchmark"))
+      } else if args.contains("--reading-workspace") {
+        try readingWorkspace(binary, artifacts: artifacts.appendingPathComponent("reading-workspace"))
+      } else if args.contains("--diff-layout") {
+        try diffLayout(binary, artifacts: artifacts.appendingPathComponent("diff-layout"))
       } else if args.contains("--presentation") {
         try presentation(binary, artifacts: artifacts.appendingPathComponent("presentation"))
       } else if let index = args.firstIndex(of: "--wheel-boundary"), args.indices.contains(index + 1) {
@@ -161,7 +167,7 @@ struct Smoke {
     terminal.key("?")
     try terminal.wait("Previous pane")
     terminal.key("/ctrl-f\r")
-    try terminal.wait("Scroll main pane down")
+    try terminal.wait("Page down in content")
     terminal.key("\u{1B}")
     try terminal.wait("Normal · Help")
     terminal.key("\u{1B}")
@@ -209,6 +215,260 @@ struct Smoke {
     print("Swift PTY: demo, real difftastic, four themes, five languages and terminal restoration passed.")
   }
 
+  static func pickerBenchmark(_ binary: URL, artifacts: URL) throws {
+    let t = try PTY(binary: binary, arguments: ["--demo", "--language", "en", "--theme", "mocha"], rows: 48, artifacts: artifacts)
+    defer { t.close() }
+    try t.wait("Ready")
+    t.key("\r")
+    try t.wait("Current pull request")
+    try t.wait("Ready")
+    var samples: [Double] = []
+    for index in 0 ..< 24 {
+      let number = index.isMultiple(of: 2) ? 43 : 42
+      let start = ProcessInfo.processInfo.systemUptime
+      t.key("\u{10}/\(number)\r")
+      try t.waitUntil("quick picker burst accepted") {
+        t.line(3).contains("#\(number) ") && t.line(-2).contains("Ready")
+          && !t.line(2 + ((t.rows - 3) - 26) / 2).contains("Switch pull request")
+      }
+      if index >= 4 {
+        samples.append((ProcessInfo.processInfo.systemUptime - start) * 1000)
+      }
+    }
+    samples.sort()
+    let result: [String: Any] = try ["samples": samples,
+                                     "count": samples.count,
+                                     "median_ms": samples[samples.count / 2],
+                                     "p95_ms": samples[Int(Double(samples.count) * 0.95)],
+                                     "maximum_ms": samples.last!,
+                                     "columns": t.columns,
+                                     "rows": t.rows,
+                                     "workload": "warm demo PRs; Ctrl-p + / + number + Enter delivered in one burst; complete Ready frame",
+                                     "binary_sha256": SHA256.hash(data: Data(contentsOf: binary))
+                                       .map { String(format: "%02x", $0) }.joined()]
+    let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
+    try data.write(to: artifacts.appendingPathComponent("latency.json"))
+    print(String(decoding: data, as: UTF8.self))
+    t.key("q")
+    try t.finish()
+  }
+
+  static func readingWorkspace(_ binary: URL, artifacts: URL) throws {
+    let t = try PTY(
+      binary: binary,
+      arguments: ["--demo", "--language", "en", "--theme", "mocha", "--files-view", "tree"],
+      rows: 48,
+      artifacts: artifacts,
+    )
+    defer { t.close() }
+    try t.wait("Ready")
+    try t.wait("Requested reviewers")
+    try expect(!t.text.contains("Files · 2/2"), "PR selection must use its own full metadata screen.")
+    try t.screenshot("select-pr")
+    t.key("\r")
+    try t.wait("Normal · Files")
+    try t.wait("Current pull request")
+    try t.wait("Files · 2/2")
+    try t.wait("Ready")
+    guard let filesHeading = (0 ..< t.rows).first(where: { t.line($0).prefix(t.sidebarWidth).contains("Files ·") })
+    else { throw SmokeError("Missing Files heading") }
+    try expect(filesHeading < t.rows / 3, "Files did not receive the tall review sidebar.")
+    t.key("\u{10}")
+    try t.waitUntil("quick picker visible") { t.line(2 + ((t.rows - 3) - 26) / 2).contains("Switch pull request") }
+    try t.wait("[Normal]")
+    for (keys, number) in [("j", 43), ("k", 42), ("G", 44), ("gg", 42), ("\u{6}", 44), ("\u{2}", 42)] {
+      t.key(keys)
+      try t.waitUntil("Vim picker movement") { t.text.contains("▸ #\(number) ") }
+      try expect(t.text.contains("[Normal] / "), "Normal motion changed the picker query.")
+    }
+    try t.click("Half page")
+    try t.screenshot("picker-vim-normal")
+    t.key("/43")
+    try t.waitUntil("filtered quick picker") { t.text.contains("/ 43") && t.text.contains("#43") }
+    t.key("\r")
+    try t
+      .waitUntil("quick picker accepted") {
+        !t.line(2 + ((t.rows - 3) - 26) / 2).contains("Switch pull request") && t.line(3).contains("#43") && t.line(-2)
+          .contains("Ready")
+      }
+    t.key("\u{10}")
+    try t.waitUntil("quick picker visible") { t.line(2 + ((t.rows - 3) - 26) / 2).contains("Switch pull request") }
+    t.key("/42\r")
+    try t
+      .waitUntil("return to first PR") {
+        t.line(3).contains("#42") && !t.line(2 + ((t.rows - 3) - 26) / 2).contains("Switch pull request") && t.line(-2)
+          .contains("Ready")
+      }
+    t.key("gg")
+    try t.wait("Sources/ReviewQueue.swift")
+    try t.wait("Sources/Selection.swift")
+    try t.wait("Ready")
+    try t.screenshot("review-root")
+    let beforePage = position(t)
+    t.key("\u{6}")
+    try t.waitUntil("Files page controls content") { position(t) > beforePage }
+    try expect(t.keyboardPane == 2, "Paging content stole Files focus.")
+    t.key("\u{2}")
+    try t.waitUntil("page back") { position(t) == 1 }
+    t.key("j")
+    t.key("j")
+    try t.wait("Ready")
+    t.key("\r")
+    try t.wait("Normal · Diff")
+    try t.wait("Wrap")
+    t.key("w")
+    try t.wait("No wrap")
+    try t.wait("Ready")
+    t.key("zL")
+    try t
+      .waitUntil("horizontal source scroll") {
+        t.line(-2).contains("↔") && !t.line(-2).contains("↔0") && t.line(-2).contains("Ready")
+      }
+    try t.screenshot("horizontal-scroll")
+    t.key("w")
+    try t.waitUntil("wrapping restored") { !t.line(-2).contains("No wrap") && t.line(-2).contains("Ready") }
+    t.key("gc")
+    try t.wait("Reply")
+    try t.screenshot("focused-comment")
+    t.key("c")
+    try t.wait("@demo")
+    let popupX = (t.columns - 96) / 2, popupY = 1 + ((t.rows - 3) - 26) / 2
+    t.mouse(column: popupX + 4, row: popupY + 10, pressed: true)
+    t.mouse(column: popupX + 4, row: popupY + 10, pressed: false)
+    t.key("**A focused reply**")
+    try t.wait("A focused reply")
+    try t.click("Preview")
+    try t.wait("Confirm")
+    try expect(!t.text.contains("**A focused reply**"), "Comment preview did not render Markdown.")
+    try t.screenshot("reply-preview")
+    t.key("\u{1B}")
+    try t.waitUntil("reply dialog closed") { !t.text.contains("@demo") }
+    try t.wait("Normal · Diff")
+    for key in ["e", "D", "a", "s"] {
+      t.key(key)
+      try t.wait("@demo")
+      if key == "a" {
+        try t.click("Heart")
+      }
+      try t.click("Preview")
+      try t.wait("Confirm")
+      try t.screenshot("comment-action-" + key)
+      t.key("\u{1B}")
+      try t.waitUntil("comment dialog closed") { !t.text.contains("@demo") }
+      try t.wait("Normal · Diff")
+    }
+    t.key("gc")
+    t.resize(columns: 104, rows: 40)
+    try t.wait("Ready")
+    try t.screenshot("narrow-wrapped")
+    t.key("V")
+    try t.wait("Visual")
+    t.key("\u{10}")
+    try t.wait("[Normal]")
+    t.key("/")
+    try t.wait("[Insert]")
+    t.key("\u{1B}")
+    try t.wait("[Normal]")
+    t.key("\u{1B}")
+    try t.waitUntil("picker closed over visual selection") {
+      !t.line(2 + ((t.rows - 3) - 26) / 2).contains("Switch pull request") && t.line(-2).contains("Visual")
+    }
+    t.key("\u{1B}")
+    try t.wait("Normal · Diff")
+    t.key("q")
+    try t.finish()
+    print(
+      "Swift PTY: rich PR selection, modal Vim picker, tall Files, wrap and horizontal scrolling, source paging, comment focus and all comment previews passed; no forge writes.",
+    )
+  }
+
+  static func diffLayout(_ binary: URL, artifacts: URL) throws {
+    let t = try PTY(
+      binary: binary,
+      arguments: ["--demo", "--language", "en", "--theme", "mocha", "--files-view", "tree"],
+      rows: 40,
+      artifacts: artifacts,
+    )
+    defer { t.close() }
+    try t.wait("Ready")
+    t.key("\r")
+    try t.wait("Normal · Files")
+    try t.wait("+2 −1")
+    try t.wait("c2 +2 −1")
+    t.key("j")
+    try t.waitUntil("second file ready") { t.line(2).contains("Sources/Selection.swift") && t.line(-2).contains("Ready") }
+    t.key("\r")
+    try t.wait("Normal · Diff")
+    t.key("/files\\[index \\+ 1\\]\r")
+    try t.wait("1/2")
+    try t.wait("LEFT · 5")
+    t.key("\u{1B}")
+    try t.wait("Normal · Diff")
+    try t.screenshot("wide-mocha")
+    for (index, theme) in ["mocha", "latte", "frappe", "macchiato"].enumerated() {
+      if index > 0 {
+        t.key("T")
+        try t.wait(theme)
+      }
+      t.resize(columns: 104, rows: 40)
+      try t.waitUntil("unified deletion and addition") {
+        t.text.contains("5    -") && t.text.contains("6+") && t.line(-2).contains("Ready")
+      }
+      try expect(t.line(-2).contains("LEFT · 5"), "Resize changed the removed source cursor.")
+      try expect(
+        t.hasANSIToken("guard", color: theme == "latte" ? 2 : 10, bold: true),
+        "Changed keywords must use difftastic ANSI color and bold without underline.",
+      )
+      for (column, row) in [(0, 0), (0, 1), (2, 12), (t.sidebarWidth + 2, 12), (0, t.rows - 2)] {
+        try expect(t.hasDefaultBackground(column: column, row: row), "Ordinary surfaces must inherit the terminal background.")
+      }
+      try t.screenshot("unified-" + theme)
+      t.resize(columns: 176, rows: 40)
+      try t.waitUntil("wide source alignment") { !t.text.contains("5    -") && t.line(-2).contains("Ready") }
+      try expect(t.line(-2).contains("LEFT · 5"), "Expanding the viewport changed the source cursor.")
+      try t.screenshot("wide-" + theme)
+    }
+    t.resize(columns: 104, rows: 40)
+    try t.waitUntil("unified source") { t.text.contains("5    -") && t.line(-2).contains("Ready") }
+    t.key("c")
+    try t.wait("Write your review")
+    try t.screenshot("removed-line-review")
+    t.key("\u{1B}")
+    try t.wait("Normal · Diff")
+    t.key("Vj")
+    try t.wait("LEFT · 5–6")
+    t.key("c")
+    try t.wait("Write your review")
+    try t.screenshot("removed-range-review")
+    t.key("\u{1B}")
+    try t.wait("Normal · Diff")
+    t.resize(columns: 176, rows: 40)
+    try t.focusPane(2)
+    t.key("gg")
+    try t.waitUntil("root combined diff") {
+      t.line(2).contains(" · /") && t.text.contains("Sources/ReviewQueue.swift")
+        && t.text.contains("Sources/Selection.swift") && t.line(-2).contains("Ready")
+    }
+    try t.screenshot("root-all-files")
+    t.key("\r")
+    try t.waitUntil("collapsed root") {
+      !(t.rows / 2 ..< t.rows - 2).contains { String(t.line($0).prefix(t.sidebarWidth)).contains(".swift") }
+    }
+    try expect(
+      t.text.contains("Sources/ReviewQueue.swift") && t.text.contains("Sources/Selection.swift"),
+      "Collapsing the root lost the combined diff.",
+    )
+    t.key("l")
+    try t.waitUntil("expanded root") {
+      (t.rows / 2 ..< t.rows - 2).contains { String(t.line($0).prefix(t.sidebarWidth)).contains("ReviewQueue.swift") }
+    }
+    t.key("q")
+    try t.finish()
+    print(
+      "Swift PTY: difftastic JSON, directional ANSI highlighting across all four themes, unified deletions/additions, resize source identity, LEFT review entry and root all-files diff passed; no forge writes.",
+    )
+  }
+
   static func presentation(_ binary: URL, artifacts: URL) throws {
     let t = try PTY(
       binary: binary,
@@ -218,16 +478,13 @@ struct Smoke {
     )
     defer { t.close() }
     try t.wait("Ready")
-    try expect(t.sidebarWidth == 52, "Default sidebar width is not 52 columns.")
+    try expect(t.sidebarWidth >= 52, "PR selector did not reserve metadata space.")
     try t.wait("Approved")
-    try t.screenshot("overview-compact")
-    t.key("i")
+    try t.screenshot("overview-selection")
     try t.wait("Milestone")
     try t.wait("Requested reviewers")
     try expect(t.line(4).contains("@contributor"), "Rich PR row did not show its author on the second line.")
     try t.screenshot("overview-rich")
-    t.key("i")
-    try t.waitUntil("compact overview") { !t.text.contains("Milestone") }
     t.key("\r")
     try t.wait("Normal · Files")
     t.key("\r")
@@ -681,7 +938,7 @@ struct Smoke {
     t.key("?")
     try t.wait("Previous pane")
     t.key("/ctrl-f\r")
-    try t.wait("Scroll main pane down")
+    try t.wait("Page down in content")
     try t.snapshot("help")
     t.key("\u{1B}")
     try t.wait("Normal · Help")
@@ -732,10 +989,7 @@ struct Smoke {
     }
     let t = try PTY(
       binary: binary,
-      arguments: ["--repo", "example/reviews", "--language", "en"] + (CommandLine.arguments.contains("--rich") ? [
-        "--detail-level",
-        "rich",
-      ] : []),
+      arguments: ["--repo", "example/reviews", "--language", "en"],
       columns: columns,
       rows: rows,
       environment: env,
@@ -916,7 +1170,7 @@ struct Smoke {
     try t.wait("Previous pane")
     try t.snapshot("help")
     t.key("/ctrl-f\r")
-    try t.wait("Scroll main pane down")
+    try t.wait("Page down in content")
     t.key("\u{1B}")
     try t.wait("Normal · Help")
     t.key("\u{1B}")
@@ -938,10 +1192,7 @@ struct Smoke {
     let before = try repositoryRequests()
     let warm = try PTY(
       binary: binary,
-      arguments: ["--repo", "example/reviews", "--language", "en"] + (CommandLine.arguments.contains("--rich") ? [
-        "--detail-level",
-        "rich",
-      ] : []),
+      arguments: ["--repo", "example/reviews", "--language", "en"],
       environment: env,
       artifacts: artifacts.appendingPathComponent("warm"),
     )
@@ -1510,7 +1761,7 @@ struct Smoke {
       String(t.line(row).dropFirst(sidebarWidth + 1).prefix(contentWidth))
     }
     guard let paragraph = (0 ..< max(0, t.rows - 3)).first(where: {
-      content($0).hasPrefix("A large paragraph with")
+      content($0).trimmingCharacters(in: .whitespaces).hasPrefix("A large paragraph with")
     }) else { return }
     let displayed = (paragraph ..< min(paragraph + 3, t.rows - 3)).map(content)
       .joined(separator: " ").split(whereSeparator: \.isWhitespace).joined(separator: " ")

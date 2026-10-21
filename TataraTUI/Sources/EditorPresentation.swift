@@ -31,7 +31,15 @@ extension WorkspacePresentation {
   }
 
   func button(_ id: String, title: String, rect: Rect, into result: inout TerminalScreen) {
-    let primary = ["filter-apply", "review-add", "review-preview", "review-submit", "review-latest"].contains(id)
+    let primary = [
+      "filter-apply",
+      "review-add",
+      "review-preview",
+      "review-submit",
+      "review-latest",
+      "comment-preview",
+      "comment-confirm",
+    ].contains(id)
     result.operations.append(.button(rect, Button(
       " " + title + " ",
       id: ControlID(id),

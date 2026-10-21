@@ -20,25 +20,20 @@ struct PresentationTests {
     #expect(WorkspaceGeometry(size: .init(width: 80, height: 40), preferredSidebarWidth: 64).files.width == 80)
   }
 
-  @Test func `rich metadata keeps two row items within the visible page`() async throws {
+  @Test func `item selection always reserves three metadata rows`() throws {
     var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
-    state.tab = .diff
     state.itemsHeight = 13
-    let store = TestStore(initialState: state) { WorkspaceFeature() }
-    await store.send(.commandPressed(.toggleDetails)) { $0.preferences.detailLevel = .rich }
-    #expect(store.state.itemsPage == 6)
-    #expect(store.state.itemRowHeight == 2)
-    await store.send(.commandPressed(.toggleDetails)) { $0.preferences.detailLevel = .compact }
-    #expect(store.state.itemsPage == 13)
+    #expect(state.itemsPage == 4)
+    #expect(state.itemRowHeight == 3)
   }
 
-  @Test func `metadata preferences reject invalid density and accept rich mode`() throws {
+  @Test func `wrap preferences are explicit and validate configuration`() throws {
     let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".toml")
     defer { try? FileManager.default.removeItem(at: url) }
-    try "detail_level = \"rich\"\nsidebar_width = 64\n".write(to: url, atomically: true, encoding: .utf8)
+    try "wrap = false\nsidebar_width = 64\n".write(to: url, atomically: true, encoding: .utf8)
     let preferences = try Configuration.load(path: url.path)
-    #expect(preferences.detailLevel == .rich && preferences.sidebarWidth == 64)
-    try "detail_level = \"extra\"\n".write(to: url, atomically: true, encoding: .utf8)
+    #expect(!preferences.wrap && preferences.sidebarWidth == 64)
+    try "wrap = \"extra\"\n".replacingOccurrences(of: "\\", with: "").write(to: url, atomically: true, encoding: .utf8)
     #expect(throws: TataraError.self) { try Configuration.load(path: url.path) }
   }
 
@@ -103,8 +98,11 @@ struct PresentationTests {
     let content = view.geometry.content
     expectNoDifference(frame.buffer[.init(x: content.x, y: content.y)].style.foreground, palette.lavender)
     expectNoDifference(frame.buffer[.init(x: 0, y: 1)].style.foreground, palette.overlay0)
-    expectNoDifference(frame.buffer[.init(x: content.x + 2, y: content.y + 6)].style.background, palette.base)
-    expectNoDifference(frame.buffer[.init(x: content.x + 1, y: content.y + 2)].style.background, palette.base)
+    expectNoDifference(frame.buffer[.init(x: content.x + 2, y: content.y + 6)].style.background, .reset)
+    expectNoDifference(frame.buffer[.init(x: content.x + 1, y: content.y + 2)].style.background, .reset)
+    for position in [Position(x: 0, y: 0), Position(x: 0, y: 1), Position(x: 2, y: 10), Position(x: 0, y: view.size.height - 2)] {
+      expectNoDifference(frame.buffer[position].style.background, .reset)
+    }
     expectNoDifference(frame.buffer[.init(x: content.x + 8, y: content.y + 2)].style.background, palette.activeSearch)
     expectNoDifference(frame.buffer[.init(x: content.x + 18, y: content.y + 2)].style.background, palette.search)
     expectNoDifference(palette.ansi(5), palette.pink)
@@ -136,7 +134,7 @@ struct PresentationTests {
       .init(left: nil, right: .init(number: 1, spans: [.init(text: "context-before")])),
       .init(left: nil, right: .init(number: 2, spans: [.init(text: "selected-source")])),
       .init(left: nil, right: .init(number: 3, spans: [.init(text: "context-after")])),
-    ], revision: state.detail?.revision), 114, .right)
+    ], revision: state.detail?.revision), 114)
     state.review = .init(item: item, expectedHead: "head", expectedMergeBase: "base")
     state.review?.selectedFile = file
     state.review?.isEditingInline = true
@@ -173,6 +171,57 @@ struct PresentationTests {
     #expect(cell.style.modifiers.contains(.underlined))
   }
 
+  @Test(arguments: TataraCore.Theme.allCases)
+  func `difftastic JSON categories use directional ANSI colors and upstream token emphasis`(_ theme: TataraCore
+    .Theme) async throws
+  {
+    var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"), preferences: .init(theme: theme))
+    state.pane = .content
+    state.tab = .diff
+    func buffer(_ line: Line) -> Buffer {
+      var frame = Frame(buffer: Buffer(area: Rect(x: 0, y: 0, width: 80, height: 1)))
+      frame.render(Text([line]))
+      return frame.buffer
+    }
+    let removed: Color = theme == .latte ? .red : .lightRed
+    let added: Color = theme == .latte ? .green : .lightGreen
+    for category in ["keyword", "type", "delimiter", "string", "comment", "normal", "tree_sitter_error", "future_category"] {
+      let json = """
+      {"language":"Swift","status":"changed","aligned_lines":[[0,0]],"chunks":[[{"lhs":{"line_number":0,"changes":[{"start":0,"end":3,"content":"old","highlight":"\(category)"}]},"rhs":{"line_number":0,"changes":[{"start":0,"end":3,"content":"new","highlight":"\(category)"}]}}]]}
+      """
+      let diff = try ReviewDiff.decode(Data(json.utf8), before: "old value", after: "new value", path: "A.swift")
+      state.document = try await DocumentRenderer.prepareDiff(diff, 80)
+      let view = presentation(state), palette = Palette(theme)
+      let oldCells = buffer(view.highlightedLine(state.document.displayLines[0], row: 0, selected: false))
+      let newCells = buffer(view.highlightedLine(state.document.displayLines[1], row: 1, selected: false))
+      let x = state.document.diffPrefixWidth
+      expectNoDifference(oldCells[.init(x: x, y: 0)].style.foreground, removed)
+      expectNoDifference(newCells[.init(x: x, y: 0)].style.foreground, added)
+      expectNoDifference(oldCells[.init(x: x - 2, y: 0)].style.foreground, removed)
+      expectNoDifference(newCells[.init(x: x - 2, y: 0)].style.foreground, added)
+      #expect(newCells[.init(x: x - 2, y: 0)].style.modifiers.contains(.bold))
+      #expect(newCells[.init(x: x, y: 0)].style.modifiers.contains(.bold) == ["keyword", "type", "delimiter"].contains(category))
+      #expect(newCells[.init(x: x, y: 0)].style.modifiers.contains(.italic) == (category == "comment"))
+      #expect(!newCells[.init(x: x, y: 0)].style.modifiers.contains(.underlined))
+      expectNoDifference(newCells[.init(x: x, y: 0)].style.background, .reset)
+      expectNoDifference(newCells[.init(x: x + 4, y: 0)].style.foreground, .reset)
+      let plain = buffer(presentation(state, noColor: true).highlightedLine(
+        state.document.displayLines[1],
+        row: 1,
+        selected: false,
+      ))
+      expectNoDifference(plain[.init(x: x, y: 0)].style.foreground, .reset)
+      expectNoDifference(plain[.init(x: x, y: 0)].style.modifiers, [])
+      let matches = try await DocumentRenderer.search(state.document, "new")
+      state.searches[.content] = .init()
+      state.searches[.content]?.result = matches
+      let searched = buffer(presentation(state).highlightedLine(state.document.displayLines[1], row: 1, selected: true))
+      expectNoDifference(searched[.init(x: x, y: 0)].style.background, palette.activeSearch)
+      expectNoDifference(searched[.init(x: x, y: 0)].style.foreground, palette.text)
+      state.searches[.content] = .init()
+    }
+  }
+
   @Test(arguments: [16, 40])
   func `sidebar selection retains context above and below in both lists`(height: Int) throws {
     let repository = try RepositoryID("owner/repo")
@@ -192,16 +241,22 @@ struct PresentationTests {
     state.selectedFilePath = files[10].path
     for pane in [WorkspaceFeature.Pane.items, .files] {
       state.pane = pane
-      let geometry = WorkspaceGeometry(size: .init(width: 160, height: height))
-      state.itemsScroll = ScrollMetrics.selectionOffset(selected: 10, total: 25, page: geometry.items.height - 3)
+      state.isSelectingItems = pane == .items
+      let geometry = WorkspaceGeometry(size: .init(width: 160, height: height), isSelectingItems: state.isSelectingItems)
+      state.itemsScroll = ScrollMetrics.selectionOffset(
+        selected: 10,
+        total: 25,
+        page: max(1, (geometry.items.height - 3) / state.itemRowHeight),
+      )
       state.filesScroll = ScrollMetrics.selectionOffset(selected: 10, total: 25, page: geometry.files.height - 3)
       let view = presentation(state, size: .init(width: 160, height: height))
       var frame = Frame(buffer: Buffer(area: Rect(size: view.size)))
       frame.render(view.screen())
       let rect = pane == .items ? view.geometry.items : view.geometry.files
-      let page = rect.height - 3
+      let page = pane == .items ? max(1, (rect.height - 3) / state.itemRowHeight) : rect.height - 3
       let margin = min(2, (page - 1) / 2)
-      let rows = (rect.y + 2 ..< rect.bottom - 1).map { String(frame.buffer.lines()[$0].prefix(rect.width)) }
+      let rows = stride(from: rect.y + 2, to: rect.bottom - 1, by: pane == .items ? state.itemRowHeight : 1)
+        .map { String(frame.buffer.lines()[$0].prefix(rect.width)) }
       let selected = try #require(rows.firstIndex { $0.contains(pane == .items ? "PR-10" : "File10.swift") })
       #expect(selected >= margin)
       #expect(rows.count - selected - 1 >= margin)
@@ -216,5 +271,79 @@ struct PresentationTests {
         )))
       }
     }
+  }
+
+  @Test(arguments: [104, 176])
+  func `file rows show status and exact counts with compact indentation and readable names`(_ columns: Int) throws {
+    let repository = try RepositoryID("owner/repo")
+    let item = try ForgeItem(
+      id: .init(repository: repository, number: 1),
+      kind: .pullRequest,
+      title: "File changes",
+      author: "reviewer",
+      url: #require(URL(string: "https://github.com/owner/repo/pull/1")),
+    )
+    let files: [ChangedFile] = [
+      .init(path: "Sources/Feature/AddedFile.swift", status: "added", additions: 120),
+      .init(path: "Sources/Feature/DeletedFile.swift", status: "removed", deletions: 45),
+      .init(
+        path: "Sources/Feature/LongRenamedController.swift",
+        previousPath: "Previous.swift",
+        status: "renamed",
+        additions: 7,
+        deletions: 3,
+      ),
+      .init(path: "Sources/Feature/ModifiedFile.swift", additions: 12, deletions: 3),
+      .init(path: "Sources/Feature/Zero.swift", status: "renamed"),
+    ]
+    var state = WorkspaceFeature.State(repository: repository)
+    state.items = [item]
+    state.selectedItemID = item.id
+    let detail = ItemDetail(item: item, files: files, comments: [
+      .init(id: 1, author: "reviewer", body: "PR discussion"),
+      .init(id: 2, author: "reviewer", body: "Current line", anchor: .init(path: files[0].path, line: 1, side: .right)),
+      .init(
+        id: 3,
+        author: "reviewer",
+        body: "Outdated line",
+        anchor: .init(path: files[0].path, line: nil, side: .right, originalLine: 2),
+      ),
+      .init(
+        id: 4,
+        author: "reviewer",
+        body: "File comment",
+        anchor: .init(path: files[0].path, line: nil, side: nil, subjectType: "file"),
+      ),
+    ])
+    state.detail = try JSONDecoder().decode(ItemDetail.self, from: JSONEncoder().encode(detail))
+    #expect(state.detail?.commentCount(at: files[0].path) == 3)
+    #expect(state.detail?.commentCount(at: files[1].path) == 0)
+    state.selectedFilePath = files[0].path
+    state.pane = .files
+    let view = presentation(state, size: .init(width: columns, height: 40))
+    var screen = TerminalScreen()
+    view.files(into: &screen)
+    var frame = Frame(buffer: Buffer(area: Rect(size: view.size)))
+    frame.render(screen)
+    let content = frame.buffer.lines().map { String($0.prefix(view.geometry.files.width)) }
+    for (symbol, suffix) in [("A", "c3 +120"), ("D", "−45"), ("R", "+7 −3"), ("M", "+12 −3")] {
+      let row = try #require(content.firstIndex { $0.contains(suffix) })
+      // Root and two folder levels consume three indentation columns before the status badge.
+      #expect(frame.buffer[.init(x: view.geometry.files.x + 5, y: row)].symbol == symbol)
+      #expect(content[row].contains(".swift"))
+      #expect(content[row].trimmingCharacters(in: .whitespaces).hasSuffix(suffix + "│"))
+    }
+    #expect(!content.joined().contains("+0"))
+    #expect(!content.joined().contains("−0"))
+    #expect(!content.joined().contains("c0"))
+    #expect(content.contains { $0.contains("Zero.swift") })
+    var footer = TerminalScreen()
+    view.footer(into: &footer)
+    frame.render(footer)
+    let status = frame.buffer.lines()[view.size.height - 2]
+    #expect(status.contains("c3 +120"))
+    #expect(!status.contains("−0"))
+    #expect(view.compactFileName("日本語の長いファイル名.swift", width: 16).hasSuffix(".swift"))
+    #expect(TerminalWidth.of(view.compactFileName("日本語の長いファイル名.swift", width: 16)) <= 16)
   }
 }

@@ -70,16 +70,25 @@ struct TerminalScreen: Widget {
 struct WorkspaceGeometry {
   let size: Size
   var preferredSidebarWidth = Preferences.defaultSidebarWidth
+  var isSelectingItems = false
   var body: Rect {
     Rect(x: 0, y: 1, width: size.width, height: max(1, size.height - 3))
   }
 
   var sidebarWidth: Int {
-    min(max(24, preferredSidebarWidth), max(24, size.width - 60))
+    min(
+      max(24, isSelectingItems ? max(preferredSidebarWidth, size.width * 2 / 5) : preferredSidebarWidth),
+      max(24, size.width - 60),
+    )
   }
 
   var items: Rect {
-    size.width >= 100 ? Rect(x: 0, y: 1, width: sidebarWidth, height: body.height / 2) : body
+    size.width >= 100 ? Rect(
+      x: 0,
+      y: 1,
+      width: sidebarWidth,
+      height: isSelectingItems ? body.height : min(8, max(5, body.height / 4)),
+    ) : body
   }
 
   var files: Rect {

@@ -33,6 +33,13 @@ struct ReviewWorkflowTests {
   @Test func `tree keeps directories distinct from files and filters with ancestors`() {
     let tree = FileTree(paths: ["a", "a/b.swift", "Sources/File10.swift", "Sources/File2.swift", "README.md"])
     #expect(Set(tree.rows.map(\.id)).count == tree.rows.count)
+    #expect(tree.rows.first?.id == "directory:/")
+    #expect(tree.rows.first?.parent == nil)
+    #expect(tree.rows.first { $0.path == "README.md" }?.parent == "directory:/")
+    #expect(tree.rows.first { $0.path == "Sources" }?.parent == "directory:/")
+    #expect(tree.visible(collapsed: ["/"]).map(\.path) == ["/"])
+    #expect(tree.visible(collapsed: ["/"], matching: []).isEmpty)
+    #expect(FileTree(paths: []).rows.isEmpty)
     #expect(tree.rows.filter { !$0.isDirectory }.map(\.path) == [
       "a/b.swift",
       "Sources/File2.swift",
@@ -42,9 +49,11 @@ struct ReviewWorkflowTests {
     ])
     #expect(!tree.visible(collapsed: ["Sources"]).contains { $0.path == "Sources/File2.swift" })
     #expect(tree.visible(collapsed: ["Sources"], matching: ["Sources/File2.swift"]).map(\.path) == [
+      "/",
       "Sources",
       "Sources/File2.swift",
     ])
+    #expect(tree.visible(collapsed: ["/"], matching: ["README.md"]).map(\.path) == ["/", "README.md"])
   }
 
   @Test func `configuration selects a flat file list and rejects unknown layouts`() throws {
@@ -81,7 +90,14 @@ struct ReviewWorkflowTests {
     #expect(diff.rows[0].left?.number == 1)
     #expect(diff.rows[2].left == nil)
     #expect(diff.rows[2].right?.number == 3)
-    #expect(diff.rows[0].right?.spans.contains(.init(text: "3", role: .added)) == true)
+    #expect(diff.rows[0].right?.spans.contains(.init(text: "3", role: .added, highlight: "normal")) == true)
+    #expect(diff.rows[2].right?.spans.first?.highlight == "keyword")
+    let future = try ReviewDiff.decode(
+      Data(json.replacingOccurrences(of: "keyword", with: "future_category").utf8),
+      before: "let a = 1\nlet b = 2\n", after: "let a = 3\nlet b = 2\nlet c = 4\n", path: "File.swift",
+    )
+    let restored = try JSONDecoder().decode(ReviewDiff.self, from: JSONEncoder().encode(future))
+    #expect(restored.rows[2].right?.spans.first?.highlight == "future_category")
     let invalid = json.replacingOccurrences(of: "\"start\":8", with: "\"start\":99")
     #expect(throws: TataraError.self) { try ReviewDiff.decode(
       Data(invalid.utf8),

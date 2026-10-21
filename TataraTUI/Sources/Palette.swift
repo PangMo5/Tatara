@@ -5,8 +5,11 @@ import TataraCore
 import TermLoom
 
 /// Catppuccin palette and ANSI values, verified against catppuccin/palette.
-/// Alpha roles are blended against the actual opaque terminal background.
+/// Highlight roles are blended against the theme base; ordinary surfaces inherit the terminal background.
 struct Palette {
+  let background: Color = .reset
+  private let lightBackground: Bool
+  private let noColor: Bool
   let rosewater: Color
   let flamingo: Color
   let pink: Color
@@ -52,6 +55,8 @@ struct Palette {
   }
 
   init(_ theme: TataraCore.Theme, noColor: Bool = false) {
+    lightBackground = theme == .latte
+    self.noColor = noColor
     let values: [UInt32]
     let ansi: [UInt32]
     switch theme {
@@ -294,7 +299,16 @@ struct Palette {
   }
 
   func foreground(_ span: DiffSpan) -> Color {
-    switch span.role {
+    if noColor {
+      return .reset
+    }
+    if span.isChanged {
+      return span.role == .removed ? (lightBackground ? .red : .lightRed) : (lightBackground ? .green : .lightGreen)
+    }
+    if span.side != nil, span.role == .metadata || span.role == nil && span.color == nil {
+      return .reset
+    }
+    return switch span.role {
     case .metadata: overlay2
     case .filePath: pink
     case .hunkHeader: peach

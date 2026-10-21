@@ -120,6 +120,21 @@ final class PTY: TerminalDelegate {
 
   func focusPane(_ pane: Int) throws {
     try waitUntil("keyboard pane status") { self.keyboardPane != nil }
+    let selecting = line(2).prefix(sidebarWidth).contains("Pull requests") || line(2).prefix(sidebarWidth).contains("Issues")
+    if pane == 1, !selecting {
+      key("\u{1B}")
+      try wait("Normal · Pull requests")
+      return
+    }
+    if pane == 2, selecting {
+      if keyboardPane == 3 {
+        key("\t")
+        try waitUntil("selection pane") { self.keyboardPane == 1 }
+      }
+      key("\r")
+      try wait("Normal · Files")
+      return
+    }
     for _ in 0 ..< 3 {
       guard keyboardPane != pane else { return }
       let previous = keyboardPane
@@ -399,8 +414,8 @@ final class PTY: TerminalDelegate {
   }
 
   func activeBorder(_ pane: Int, color: UInt32 = 0xB4BEFE) -> Bool {
-    let body = rows - 3
-    let position = pane == 1 ? (0, 1) : pane == 2 ? (0, 1 + body / 2) : (sidebarWidth, 1)
+    let files = (0 ..< rows).first { line($0).prefix(sidebarWidth).contains("Files ·") }.map { $0 - 1 } ?? 1
+    let position = pane == 1 ? (0, 1) : pane == 2 ? (0, files) : (sidebarWidth, 1)
     return terminal.getCharData(col: position.0, row: position.1)?.attribute.fg == .trueColor(
       red: UInt8(truncatingIfNeeded: color >> 16),
       green: UInt8(truncatingIfNeeded: color >> 8),
@@ -421,6 +436,25 @@ final class PTY: TerminalDelegate {
       }
     }
     return false
+  }
+
+  func hasANSIToken(_ token: String, color: UInt8, bold: Bool) -> Bool {
+    for row in 0 ..< rows {
+      let text = line(row)
+      guard let range = text.range(of: token) else { continue }
+      let column = text.distance(from: text.startIndex, to: range.lowerBound)
+      guard let cell = terminal.getCharData(col: column, row: row) else { continue }
+      if cell.attribute.fg == .ansi256(code: color), cell.attribute.style.contains(.bold) == bold,
+         !cell.attribute.style.contains(.underline)
+      {
+        return true
+      }
+    }
+    return false
+  }
+
+  func hasDefaultBackground(column: Int, row: Int) -> Bool {
+    terminal.getCharData(col: column, row: row)?.attribute.bg == .defaultColor
   }
 
   func cursorLine() -> Int? {
@@ -470,7 +504,16 @@ final class PTY: TerminalDelegate {
           blue: Double(source.blue) / 65535,
           alpha: 1,
         )
-      case .ansi256: throw SmokeError("Terminal previews require true-color output.")
+      case let .ansi256(code):
+        let colors = SwiftTerm.Color.defaultInstalledColors
+        guard colors.indices.contains(Int(code)) else { throw SmokeError("Unexpected extended ANSI palette index.") }
+        let value = colors[Int(code)]
+        return NSColor(
+          srgbRed: Double(value.red) / 65535,
+          green: Double(value.green) / 65535,
+          blue: Double(value.blue) / 65535,
+          alpha: 1,
+        )
       }
     }
     NSGraphicsContext.saveGraphicsState()

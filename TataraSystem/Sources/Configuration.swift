@@ -20,7 +20,7 @@ public enum Configuration {
     var keys: [String: [String]]?
     var filesView: FilesView?
     var sidebarWidth: Int?
-    var detailLevel: DetailLevel?
+    var wrap: Bool?
     private struct Key: CodingKey {
       var stringValue: String
       var intValue: Int? {
@@ -39,13 +39,13 @@ public enum Configuration {
     private enum CodingKeys: String, CodingKey { case theme, language, keys
       case filesView = "files_view"
       case sidebarWidth = "sidebar_width"
-      case detailLevel = "detail_level"
+      case wrap
     }
 
     init(from decoder: any Decoder) throws {
       let all = try decoder.container(keyedBy: Key.self)
       let unknown = all.allKeys.map(\.stringValue)
-        .filter { !["theme", "language", "keys", "files_view", "sidebar_width", "detail_level"].contains($0) }
+        .filter { !["theme", "language", "keys", "files_view", "sidebar_width", "wrap"].contains($0) }
       guard unknown.isEmpty else { throw TataraError(
         .configuration,
         detail: "Unknown configuration keys: \(unknown.sorted().joined(separator: ", "))",
@@ -55,7 +55,7 @@ public enum Configuration {
       language = try container.decodeIfPresent(Language.self, forKey: .language)
       keys = try container.decodeIfPresent([String: [String]].self, forKey: .keys)
       filesView = try container.decodeIfPresent(FilesView.self, forKey: .filesView)
-      detailLevel = try container.decodeIfPresent(DetailLevel.self, forKey: .detailLevel)
+      wrap = try container.decodeIfPresent(Bool.self, forKey: .wrap)
       sidebarWidth = try container.decodeIfPresent(Int.self, forKey: .sidebarWidth)
       if let sidebarWidth, sidebarWidth < 24 {
         throw TataraError(.configuration, detail: "sidebar_width must be at least 24 columns.")
@@ -85,7 +85,7 @@ public enum Configuration {
       preferences.keymap = try Keymap(overrides: value.keys ?? [:])
       preferences.filesView = value.filesView ?? preferences.filesView
       preferences.sidebarWidth = value.sidebarWidth ?? preferences.sidebarWidth
-      preferences.detailLevel = value.detailLevel ?? preferences.detailLevel
+      preferences.wrap = value.wrap ?? preferences.wrap
       return preferences
     } catch { throw TataraError(.configuration, detail: String(describing: error)) }
   }

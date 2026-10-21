@@ -204,12 +204,34 @@ public struct DiscussionComment: Identifiable, Equatable, Codable, Sendable {
   public var body: String
   public var context: String?
   public var anchor: DiscussionAnchor?
-  public init(id: Int, author: String, body: String, context: String? = nil, anchor: DiscussionAnchor? = nil) {
+  public var nodeID: String?
+  public var url: URL?
+  public var updatedAt: String?
+  public var replyToID: Int?
+  public var key: String {
+    (anchor == nil ? "issue:" : "review:") + String(id)
+  }
+
+  public init(
+    id: Int,
+    author: String,
+    body: String,
+    context: String? = nil,
+    anchor: DiscussionAnchor? = nil,
+    nodeID: String? = nil,
+    url: URL? = nil,
+    updatedAt: String? = nil,
+    replyToID: Int? = nil,
+  ) {
     self.id = id
     self.author = author
     self.body = body
     self.context = context
     self.anchor = anchor
+    self.nodeID = nodeID
+    self.url = url
+    self.updatedAt = updatedAt
+    self.replyToID = replyToID
   }
 }
 
@@ -273,6 +295,8 @@ public struct ItemDetail: Equatable, Codable, Sendable {
   public let files: [ChangedFile]
   public let fileTree: FileTree
   private let fileIndices: [String: Int]
+  private let commentIndices: [String: Int]
+  private let fileCommentCounts: [String: Int]
   public let comments: [DiscussionComment]
   public let metadata: ForgeMetadata?
   public let estimatedByteCount: Int
@@ -289,6 +313,15 @@ public struct ItemDetail: Equatable, Codable, Sendable {
     fileTree = FileTree(paths: files.map(\.path))
     fileIndices = Dictionary(files.enumerated().map { ($0.element.path, $0.offset) }, uniquingKeysWith: { first, _ in first })
     self.comments = comments
+    commentIndices = Dictionary(
+      comments.enumerated().map { ($0.element.key, $0.offset) },
+      uniquingKeysWith: { first, _ in first },
+    )
+    fileCommentCounts = comments.reduce(into: [:]) { counts, comment in
+      if let path = comment.anchor?.path {
+        counts[path, default: 0] += 1
+      }
+    }
     self.metadata = metadata
     let itemBytes = [item.title, item.author, item.body, item.url.absoluteString].reduce(512) { $0 + $1.utf8.count }
       + item.labels.reduce(0) { $0 + $1.utf8.count + 32 }
@@ -304,11 +337,22 @@ public struct ItemDetail: Equatable, Codable, Sendable {
     } else {
       0
     }
-    estimatedByteCount = itemBytes + fileBytes + commentBytes + metadataBytes + (item.github?.estimatedByteCount ?? 0)
+    let commentIndexBytes = fileCommentCounts.keys.reduce(0) { $0 + $1.utf8.count + 64 }
+    estimatedByteCount = itemBytes + fileBytes + commentBytes + commentIndexBytes + metadataBytes
+      + (item.github?.estimatedByteCount ?? 0)
   }
 
   public func file(at path: String) -> ChangedFile? {
     fileIndices[path].map { files[$0] }
+  }
+
+  public func comment(for key: String) -> DiscussionComment? {
+    commentIndices[key].map { comments[$0] }
+  }
+
+  /// Published file comments, including replies and outdated anchors; excludes PR-level discussion.
+  public func commentCount(at path: String) -> Int {
+    fileCommentCounts[path, default: 0]
   }
 
   private enum CodingKeys: String, CodingKey { case item, revision, files, comments, metadata }
@@ -423,5 +467,127 @@ public struct TataraError: Error, Equatable, Sendable, CustomStringConvertible {
 
   public static func wrapping(_ error: any Error) -> Self {
     error as? Self ?? Self(.commandFailed, detail: String(describing: error))
+  }
+}
+
+public enum CommentOperation: String, Equatable, Sendable {
+  case reply, edit, delete, react, resolve, unresolve
+  public var titleKey: String {
+    switch self {
+    case .reply: "Reply"
+    case .edit: "Edit comment"
+    case .delete: "Delete comment"
+    case .react: "React to comment"
+    case .resolve: "Resolve thread"
+    case .unresolve: "Reopen thread"
+    }
+  }
+}
+
+public enum ReactionContent: String, CaseIterable, Codable, Sendable {
+  case thumbsUp = "THUMBS_UP", thumbsDown = "THUMBS_DOWN", laugh = "LAUGH", hooray = "HOORAY"
+  case confused = "CONFUSED", heart = "HEART", rocket = "ROCKET", eyes = "EYES"
+  public var symbol: String {
+    switch self {
+    case .thumbsUp: "+1"
+    case .thumbsDown: "-1"
+    case .laugh: "Laugh"
+    case .hooray: "Hooray"
+    case .confused: "Confused"
+    case .heart: "Heart"
+    case .rocket: "Rocket"
+    case .eyes: "Eyes"
+    }
+  }
+}
+
+public struct CommentReaction: Equatable, Sendable {
+  public var content: ReactionContent
+  public var count: Int
+  public var viewerHasReacted: Bool
+  public init(content: ReactionContent, count: Int, viewerHasReacted: Bool) {
+    self.content = content
+    self.count = count
+    self.viewerHasReacted = viewerHasReacted
+  }
+}
+
+public struct ReviewThread: Equatable, Sendable {
+  public var id: String
+  public var isResolved: Bool
+  public var canResolve: Bool
+  public var canUnresolve: Bool
+  public var canReply: Bool
+  public init(id: String, isResolved: Bool, canResolve: Bool, canUnresolve: Bool, canReply: Bool) {
+    self.id = id
+    self.isResolved = isResolved
+    self.canResolve = canResolve
+    self.canUnresolve = canUnresolve
+    self.canReply = canReply
+  }
+}
+
+public struct CommentContext: Equatable, Sendable {
+  public var viewer: String
+  public var comment: DiscussionComment
+  public var canReply: Bool
+  public var canEdit: Bool
+  public var canDelete: Bool
+  public var canReact: Bool
+  public var thread: ReviewThread?
+  public var reactions: [CommentReaction]
+  public init(
+    comment: DiscussionComment,
+    canReply: Bool,
+    canEdit: Bool,
+    canDelete: Bool,
+    canReact: Bool,
+    thread: ReviewThread? = nil,
+    reactions: [CommentReaction] = [],
+    viewer: String = "",
+  ) {
+    self.viewer = viewer
+    self.comment = comment
+    self.canReply = canReply
+    self.canEdit = canEdit
+    self.canDelete = canDelete
+    self.canReact = canReact
+    self.thread = thread
+    self.reactions = reactions
+  }
+
+  public func allows(_ operation: CommentOperation) -> Bool {
+    switch operation {
+    case .reply: canReply
+    case .edit: canEdit
+    case .delete: canDelete
+    case .react: canReact
+    case .resolve: thread?.canResolve == true && thread?.isResolved == false
+    case .unresolve: thread?.canUnresolve == true && thread?.isResolved == true
+    }
+  }
+}
+
+public struct CommentMutation: Equatable, Sendable {
+  public var item: ForgeItem
+  public var expectedHead: String?
+  public var context: CommentContext
+  public var operation: CommentOperation
+  public var body: String
+  public var reaction: ReactionContent
+  public init(
+    item: ForgeItem,
+    expectedHead: String?,
+    context: CommentContext,
+    operation: CommentOperation,
+    body: String = "",
+    reaction: ReactionContent = .thumbsUp,
+  ) {
+    self.item = item
+    self.expectedHead = expectedHead
+    self.context = context
+    self.operation = operation
+    self.body = body
+    self.reaction = reaction
   }
 }

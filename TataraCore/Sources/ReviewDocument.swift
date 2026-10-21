@@ -3,7 +3,7 @@
 
 import Foundation
 
-public struct SourceLocation: Hashable, Sendable {
+public struct SourceLocation: Hashable, Codable, Sendable {
   public let path: String
   public let line: Int
   public let side: InlineComment.Side
@@ -14,18 +14,42 @@ public struct SourceLocation: Hashable, Sendable {
   }
 }
 
+public struct DiffViewport: Equatable, Sendable {
+  public var width: Int
+  public var wrap: Bool
+  public var offset: Int
+  public init(width: Int, wrap: Bool = false, offset: Int = 0) {
+    self.width = width
+    self.wrap = wrap
+    self.offset = offset
+  }
+}
+
 public struct ReviewDocument: Equatable, Sendable {
   public let lines: [[DiffSpan]]
   public let displayLines: [[DiffSpan]]
   public let searchableLines: [String]
   public let diff: ReviewDiff?
+  /// Original alignment, retained when presentation expands changed pairs into separate rows.
+  public let sourceDiff: ReviewDiff?
   public let diffSideWidth: Int
   public let horizontalOffset: Int
-  public let visibleDiffSide: InlineComment.Side?
-  public let diffNumberWidth: Int
+  public let wrapsLines: Bool
+  public let maximumHorizontalOffset: Int
+  public let commentKeys: [String]
+  private let commentRows: [String: Int]
+  private let commentIndices: [String: Int]
+  private let wrappedRows: [SourceLocation: [Int]]
+  private let logicalLeftRows: [Int]
+  private let logicalRightRows: [Int]
+  private let logicalAllRows: [Int]
+  public let isUnifiedDiff: Bool
+  public let diffPrefixWidth: Int
   private let sourceRows: [SourceLocation: Int]
   private let leftRows: [Int]
   private let rightRows: [Int]
+  private let allSourceRows: [Int]
+  private let counterpartRows: [Int: Int]
 
   public init(lines: [[DiffSpan]] = []) {
     self.init(lines: lines, checkingCancellation: {})
@@ -35,33 +59,58 @@ public struct ReviewDocument: Equatable, Sendable {
     lines: [[DiffSpan]],
     displayLines: [[DiffSpan]]? = nil,
     diff: ReviewDiff? = nil,
+    sourceDiff: ReviewDiff? = nil,
     diffSideWidth: Int = 0,
-    diffNumberWidth: Int = 0,
-    visibleDiffSide: InlineComment.Side? = nil,
+    diffPrefixWidth: Int = 0,
+    isUnifiedDiff: Bool = false,
     horizontalOffset: Int = 0,
+    wrapsLines: Bool = false,
+    maximumHorizontalOffset: Int = 0,
     checkingCancellation: () throws -> Void,
   ) rethrows {
     self.lines = lines
     self.displayLines = displayLines ?? lines
     self.diff = diff
+    self.sourceDiff = sourceDiff
     self.diffSideWidth = diffSideWidth
-    self.diffNumberWidth = diffNumberWidth
-    self.visibleDiffSide = visibleDiffSide
+    self.diffPrefixWidth = diffPrefixWidth
+    self.isUnifiedDiff = isUnifiedDiff
     self.horizontalOffset = horizontalOffset
+    self.wrapsLines = wrapsLines
+    self.maximumHorizontalOffset = maximumHorizontalOffset
     precondition(self.displayLines.count == lines.count, "Display rows must preserve source row indices.")
     var indexLines: [String] = []
-    var left: [Int] = [], right: [Int] = []
+    var left: [Int] = [], right: [Int] = [], all: [Int] = []
     var sourceRows: [SourceLocation: Int] = [:]
+    var wrapped: [SourceLocation: [Int]] = [:]
+    var commentRows: [String: Int] = [:], commentKeys: [String] = []
+    var logicalLeft: [Int] = [], logicalRight: [Int] = [], logicalAll: [Int] = []
     indexLines.reserveCapacity(lines.count)
     for (index, line) in lines.enumerated() {
       if index % 128 == 0 {
         try checkingCancellation()
       }
       indexLines.append(line.map(\.text).joined())
+      if let key = line.first(where: { $0.commentKey != nil })?.commentKey, commentRows[key] == nil {
+        commentRows[key] = index
+        commentKeys.append(key)
+      }
       if let diff, diff.rows.indices.contains(index) {
         for side in InlineComment.Side.allCases {
           if let source = diff.rows[index].line(on: side) {
-            sourceRows[.init(path: diff.rows[index].path ?? diff.path, line: source.number, side: side)] = index
+            let location = SourceLocation(path: diff.rows[index].path ?? diff.path, line: source.number, side: side)
+            wrapped[location, default: []].append(index)
+            if sourceRows[location] == nil {
+              sourceRows[location] = index
+              if side == .left {
+                logicalLeft.append(index)
+              } else {
+                logicalRight.append(index)
+              }
+              if logicalAll.last != index {
+                logicalAll.append(index)
+              }
+            }
           }
         }
         if diff.rows[index].left != nil {
@@ -70,16 +119,70 @@ public struct ReviewDocument: Equatable, Sendable {
         if diff.rows[index].right != nil {
           right.append(index)
         }
+        if diff.rows[index].left != nil || diff.rows[index].right != nil {
+          all.append(index)
+        }
       }
     }
+    wrappedRows = wrapped
+    self.commentRows = commentRows
+    self.commentKeys = commentKeys
+    commentIndices = Dictionary(uniqueKeysWithValues: commentKeys.enumerated().map { ($0.element, $0.offset) })
+    logicalLeftRows = logicalLeft
+    logicalRightRows = logicalRight
+    logicalAllRows = logicalAll
     searchableLines = indexLines
     self.sourceRows = sourceRows
     leftRows = left
     rightRows = right
+    allSourceRows = all
+    var counterparts: [Int: Int] = [:]
+    if isUnifiedDiff, let sourceDiff {
+      for (index, row) in sourceDiff.rows.enumerated() {
+        if index % 128 == 0 {
+          try checkingCancellation()
+        }
+        guard let lhs = row.left, let rhs = row.right,
+              let left = sourceRows[.init(path: row.path ?? sourceDiff.path, line: lhs.number, side: .left)],
+              let right = sourceRows[.init(path: row.path ?? sourceDiff.path, line: rhs.number, side: .right)] else { continue }
+        counterparts[left] = right
+        counterparts[right] = left
+      }
+    }
+    counterpartRows = counterparts
   }
 
-  public func row(for location: SourceLocation) -> Int? {
-    sourceRows[location]
+  public func row(for location: SourceLocation, column: Int = 0) -> Int? {
+    guard column > 0, let candidates = wrappedRows[location], let diff else { return sourceRows[location] }
+    var lower = 0, upper = candidates.count
+    while lower < upper {
+      let middle = lower + (upper - lower) / 2
+      let row = diff.rows[candidates[middle]]
+      let offset = location.side == .left ? row.leftOffset : row.rightOffset
+      if offset <= column {
+        lower = middle + 1
+      } else {
+        upper = middle
+      }
+    }
+    return candidates[max(0, lower - 1)]
+  }
+
+  public func rows(for location: SourceLocation) -> [Int] {
+    wrappedRows[location] ?? []
+  }
+
+  public func commentIndex(for key: String) -> Int? {
+    commentIndices[key]
+  }
+
+  public func commentRow(for key: String) -> Int? {
+    commentRows[key]
+  }
+
+  public func commentKey(at row: Int) -> String? {
+    guard lines.indices.contains(row) else { return nil }
+    return lines[row].first(where: { $0.commentKey != nil })?.commentKey
   }
 
   public func location(at row: Int, side: InlineComment.Side) -> SourceLocation? {
@@ -87,9 +190,28 @@ public struct ReviewDocument: Equatable, Sendable {
     return .init(path: diff.rows[row].path ?? diff.path, line: line.number, side: side)
   }
 
+  public func sourceSide(at row: Int, preferred: InlineComment.Side) -> InlineComment.Side? {
+    guard let diff, diff.rows.indices.contains(row) else { return nil }
+    if diff.rows[row].line(on: preferred) != nil {
+      return preferred
+    }
+    let other: InlineComment.Side = preferred == .left ? .right : .left
+    return diff.rows[row].line(on: other) == nil ? nil : other
+  }
+
+  public func counterpartRow(at row: Int, side: InlineComment.Side) -> Int? {
+    guard let diff, diff.rows.indices.contains(row) else { return nil }
+    if diff.rows[row].line(on: side) != nil {
+      return row
+    }
+    return counterpartRows[row]
+  }
+
   /// Search immutable source-row indices instead of scanning the diff during input.
-  public func diffRow(at row: Int, side: InlineComment.Side, direction: Int = 0) -> Int? {
-    let indices = side == .left ? leftRows : rightRows
+  public func diffRow(at row: Int, side: InlineComment.Side?, direction: Int = 0, logical: Bool = false) -> Int? {
+    let indices = logical
+      ? side.map { $0 == .left ? logicalLeftRows : logicalRightRows } ?? logicalAllRows
+      : side.map { $0 == .left ? leftRows : rightRows } ?? allSourceRows
     guard !indices.isEmpty else { return nil }
     var lower = 0, upper = indices.count
     while lower < upper {

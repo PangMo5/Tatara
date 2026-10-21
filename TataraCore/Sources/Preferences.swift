@@ -40,14 +40,32 @@ public enum KeyCommand: String, Codable, CaseIterable, Sendable {
   case down, up, left, right, nextPane, previousPane, first, last, halfPageDown, halfPageUp
   case open, back, refresh, search, nextMatch, previousMatch, toggleKind, loadMore, review, comment, theme, help, quit
   case previousTab, nextTab, markReviewed, openBrowser
-  case contentHalfPageDown, contentHalfPageUp
+  case contentPageDown, contentPageUp
   case selectLines, filters
   case searchWordForward, searchWordBackward, searchPartialWordForward, searchPartialWordBackward
-  case cursorToTop, cursorToCenter, cursorToBottom, toggleDetails
+  case cursorToTop, cursorToCenter, cursorToBottom
+  case pickItem, toggleWrap, scrollLeft, scrollRight, scrollFarLeft, scrollFarRight, scrollStart, visualDown, visualUp
+  case focusComments, nextComment, previousComment, editComment, deleteComment, reactComment, resolveComment, copyComment
 
   public var defaultKeys: [String] {
     switch self {
-    case .toggleDetails: ["i"]
+    case .pickItem: ["ctrl-p"]
+    case .toggleWrap: ["w"]
+    case .scrollLeft: ["zh"]
+    case .scrollRight: ["zl"]
+    case .scrollFarLeft: ["zH"]
+    case .scrollFarRight: ["zL"]
+    case .scrollStart: ["z0"]
+    case .visualDown: ["gj"]
+    case .visualUp: ["gk"]
+    case .focusComments: ["gc"]
+    case .nextComment: ["}"]
+    case .previousComment: ["{"]
+    case .editComment: ["e"]
+    case .deleteComment: ["D"]
+    case .reactComment: ["a"]
+    case .resolveComment: ["s"]
+    case .copyComment: ["y"]
     case .selectLines: ["V"]
     case .filters: ["f"]
     case .searchWordForward: ["*"]
@@ -67,8 +85,8 @@ public enum KeyCommand: String, Codable, CaseIterable, Sendable {
     case .last: ["G", "end"]
     case .halfPageDown: ["ctrl-d", "page-down"]
     case .halfPageUp: ["ctrl-u", "page-up"]
-    case .contentHalfPageDown: ["ctrl-f"]
-    case .contentHalfPageUp: ["ctrl-b"]
+    case .contentPageDown: ["ctrl-f"]
+    case .contentPageUp: ["ctrl-b"]
     case .open: ["enter"]
     case .back: ["esc"]
     case .refresh: ["r"]
@@ -124,7 +142,7 @@ public struct Keymap: Equatable, Sendable {
     }
     return [
       "gg",
-      "g*", "g#", "zt", "zz", "zb",
+      "g*", "g#", "zt", "zz", "zb", "zh", "zl", "zH", "zL", "z0", "gj", "gk", "gc", "ctrl-p",
       "space",
       "up",
       "down",
@@ -149,7 +167,23 @@ public struct Keymap: Equatable, Sendable {
 public extension KeyCommand {
   var titleKey: String {
     switch self {
-    case .toggleDetails: "Toggle compact / rich details"
+    case .pickItem: "Switch pull request"
+    case .toggleWrap: "Toggle line wrapping"
+    case .scrollLeft: "Scroll left"
+    case .scrollRight: "Scroll right"
+    case .scrollFarLeft: "Scroll half screen left"
+    case .scrollFarRight: "Scroll half screen right"
+    case .scrollStart: "Scroll to line start"
+    case .visualDown: "Next display line"
+    case .visualUp: "Previous display line"
+    case .focusComments: "Focus comments / source"
+    case .nextComment: "Next comment"
+    case .previousComment: "Previous comment"
+    case .editComment: "Edit comment"
+    case .deleteComment: "Delete comment"
+    case .reactComment: "React to comment"
+    case .resolveComment: "Resolve / reopen thread"
+    case .copyComment: "Copy comment"
     case .selectLines: "Select lines"
     case .filters: "Filters and presets"
     case .searchWordForward: "Search word forward"
@@ -169,8 +203,8 @@ public extension KeyCommand {
     case .last: "Last"
     case .halfPageDown: "Half page down"
     case .halfPageUp: "Half page up"
-    case .contentHalfPageDown: "Scroll main pane down"
-    case .contentHalfPageUp: "Scroll main pane up"
+    case .contentPageDown: "Page down in content"
+    case .contentPageUp: "Page up in content"
     case .open: "Open"
     case .back: "Back"
     case .refresh: "Refresh"
@@ -192,15 +226,13 @@ public extension KeyCommand {
   }
 }
 
-public enum DetailLevel: String, Codable, CaseIterable, Sendable { case compact, rich }
-
 public struct Preferences: Equatable, Sendable {
   public static let defaultSidebarWidth = 52
   public var theme: Theme
   public var language: Language
   public var keymap: Keymap
   public var filesView: FilesView
-  public var detailLevel: DetailLevel
+  public var wrap: Bool
   public var sidebarWidth: Int
   public init(
     theme: Theme = .mocha,
@@ -208,14 +240,14 @@ public struct Preferences: Equatable, Sendable {
     keymap: Keymap = .standard,
     filesView: FilesView = .tree,
     sidebarWidth: Int = Self.defaultSidebarWidth,
-    detailLevel: DetailLevel = .compact,
+    wrap: Bool = true,
   ) {
     self.theme = theme
     self.language = language
     self.keymap = keymap
     self.filesView = filesView
     self.sidebarWidth = sidebarWidth
-    self.detailLevel = detailLevel
+    self.wrap = wrap
   }
 }
 

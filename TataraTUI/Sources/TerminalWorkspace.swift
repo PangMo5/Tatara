@@ -26,7 +26,7 @@ struct TataraCommand: AsyncParsableCommand {
   @Option(help: "Path to config.toml.") var config: String?
   @Option(help: "Files pane layout: tree or list.") var filesView: String?
   @Option(help: "Preferred PR and Files pane width in columns (minimum 24).") var sidebarWidth: Int?
-  @Option(help: "Metadata density: compact or rich (toggle with i).") var detailLevel: String?
+  @Option(help: "Wrap diff lines: on or off (toggle with w).") var wrap: String?
   @Flag(help: "Explore synthetic review data without a GitHub account.") var demo = false
 
   @Flag(help: "Enable color even when NO_COLOR is set.") var forceColor = false
@@ -111,12 +111,9 @@ final class TerminalWorkspace: TerminalApplication {
     do {
       try await NavigationTrace.shared.start()
       var preferences = try await Configuration.loadAsync(path: options.config)
-      if let value = options.detailLevel {
-        guard let level = DetailLevel(rawValue: value) else { throw TataraError(
-          .configuration,
-          detail: "detail-level must be compact or rich.",
-        ) }
-        preferences.detailLevel = level
+      if let value = options.wrap {
+        guard value == "on" || value == "off" else { throw TataraError(.configuration, detail: "wrap must be on or off.") }
+        preferences.wrap = value == "on"
       }
       if let width = options.sidebarWidth {
         guard width >= 24 else { throw TataraError(.configuration, detail: "sidebar-width must be at least 24 columns.") }
@@ -155,14 +152,18 @@ final class TerminalWorkspace: TerminalApplication {
       let diff = Difftastic(forge: forge, cache: cache).client
       let presets = try await FilterPresetStore.open()
       try Task.checkCancellation()
-      let workspace = Store(initialState: WorkspaceFeature.State(
-        repository: repository, preferences: preferences,
+      var initialState = WorkspaceFeature.State(
+        repository: repository,
+        preferences: preferences,
         strings: LocalizedStrings.values[preferences.language.rawValue] ?? [:],
-      )) { WorkspaceFeature() } withDependencies: {
+      )
+      initialState.isSelectingItems = true
+      let workspace = Store(initialState: initialState) { WorkspaceFeature() } withDependencies: {
         $0[ForgeClient.self] = forge
         $0[DiffClient.self] = diff
         $0[DocumentClient.self] = DocumentRenderer.client
         $0[FilterPresetClient.self] = presets.client
+        $0[ClipboardClient.self] = .init(copy: { text in _ = try await CommandRunner.live.checked("pbcopy", [], input: text) })
       }
       store = workspace
       updateViewport()
@@ -175,7 +176,11 @@ final class TerminalWorkspace: TerminalApplication {
   }
 
   var geometry: WorkspaceGeometry {
-    .init(size: size, preferredSidebarWidth: store?.preferences.sidebarWidth ?? Preferences.defaultSidebarWidth)
+    .init(
+      size: size,
+      preferredSidebarWidth: store?.preferences.sidebarWidth ?? Preferences.defaultSidebarWidth,
+      isSelectingItems: store?.isSelectingItems ?? true,
+    )
   }
 
   func updateViewport() {
@@ -207,11 +212,16 @@ final class TerminalWorkspace: TerminalApplication {
     guard let store else {
       return event == .key(KeyEvent(.character("q"))) ? .quit : .ignore
     }
-    if store.filterEditor != nil || store.review != nil {
+    if store.filterEditor != nil || store.review != nil || store.commentEditor != nil {
       return handleEditor(event)
     }
     if case let .mouse(mouse) = event {
       handleMouse(mouse)
+      return .redraw
+    }
+    if case let .paste(text) = event, let picker = store.picker {
+      guard picker.isEditing else { return .ignore }
+      store.send(.pickerQueryChanged(picker.query + TerminalText.sanitize(text).replacingOccurrences(of: "\n", with: " ")))
       return .redraw
     }
     if case let .paste(text) = event, store.isSearching {
@@ -222,19 +232,25 @@ final class TerminalWorkspace: TerminalApplication {
     }
     guard case let .key(press) = event else { return .ignore }
     let key = Self.keyName(press)
-    if !store.isSearching, !store.showsHelp {
+    if !store.isSearching, !store.showsHelp, store.picker == nil {
       if store.preferences.keymap.command(for: key) == .quit {
         return .quit
       }
       if store.preferences.keymap.command(for: key) == .openBrowser,
-         let url = store.selectedItem?.url, url.scheme == "https", url.host == store.repository.host
+         let url = store.focusedCommentKey == nil ? store.selectedItem?.url : store.focusedCommentKey
+         .flatMap({ store.detail?.comment(for: $0)?.url }),
+         url.scheme == "https", url.host == store.repository.host
       {
         Task { do { try await Self.open(url) } catch { self.failure = String(describing: error) } }
         return .ignore
       }
     }
+    let wasSelecting = store.isSelectingItems
     let start = ProcessInfo.processInfo.systemUptime
     store.send(.keyPressed(key))
+    if wasSelecting != store.isSelectingItems {
+      updateViewport()
+    }
     if NavigationTrace.destination != nil {
       let elapsed = ProcessInfo.processInfo.systemUptime - start
       Task { await NavigationTrace.shared.record(start: start, elapsed: elapsed, frameStart: .seconds(start)) }

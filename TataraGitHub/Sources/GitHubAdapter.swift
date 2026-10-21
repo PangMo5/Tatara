@@ -27,6 +27,8 @@ public struct GitHubAdapter: Sendable {
       detail: detail,
       content: content,
       submit: submit,
+      commentContext: commentContext,
+      mutateComment: mutateComment,
     )
   }
 
@@ -553,6 +555,10 @@ private struct CompareDTO: Decodable {
 
 private struct CommentDTO: Decodable {
   var id: Int
+  var node_id: String?
+  var html_url: URL?
+  var updated_at: String?
+  var in_reply_to_id: Int?
   var user: UserDTO?
   var body: String
   var path: String?
@@ -579,6 +585,7 @@ private struct CommentDTO: Decodable {
           subjectType: subject_type,
         )
       },
+      nodeID: node_id, url: html_url, updatedAt: updated_at, replyToID: in_reply_to_id,
     )
   }
 }
@@ -616,3 +623,278 @@ private struct ReviewPayload: Encodable {
 }
 
 private struct CommentPayload: Encodable { var body: String }
+
+private struct CommentGraphQL<Value: Decodable>: Decodable {
+  struct Failure: Decodable { var message: String }
+  var data: Value?
+  var errors: [Failure]?
+}
+
+private struct CommentNodePayload: Decodable {
+  struct Parent: Decodable {
+    struct Repository: Decodable { var nameWithOwner: String }
+    var number: Int
+    var locked: Bool
+    var viewerCanUpdate: Bool
+    var repository: Repository
+  }
+
+  struct Node: Decodable {
+    struct Ref: Decodable { var id: String }
+    struct Group: Decodable {
+      struct Users: Decodable { var totalCount: Int }
+      var content: ReactionContent
+      var viewerHasReacted: Bool
+      var users: Users
+    }
+
+    var id: String
+    var body: String
+    var updatedAt: String
+    var url: URL
+    var viewerCanUpdate: Bool
+    var viewerDidAuthor: Bool
+    var viewerCanDelete: Bool
+    var viewerCanReact: Bool
+    var parent: Parent
+    var replyTo: Ref?
+    var reactionGroups: [Group]
+  }
+
+  var node: Node?
+  var viewer: UserDTO
+}
+
+private struct ThreadPayload: Decodable {
+  struct PageInfo: Decodable { var hasNextPage: Bool
+    var endCursor: String?
+  }
+
+  struct Thread: Decodable {
+    struct Comments: Decodable { struct Node: Decodable { var id: String }
+      var nodes: [Node]
+    }
+
+    var id: String
+    var isResolved: Bool
+    var viewerCanResolve: Bool
+    var viewerCanUnresolve: Bool
+    var viewerCanReply: Bool
+    var comments: Comments
+  }
+
+  struct Connection: Decodable { var nodes: [Thread]
+    var pageInfo: PageInfo
+  }
+
+  struct Pull: Decodable { var reviewThreads: Connection }
+  struct Repository: Decodable { var pullRequest: Pull? }
+  var repository: Repository?
+}
+
+extension GitHubAdapter {
+  @concurrent
+  public func commentContext(_ item: ForgeItem, _ target: DiscussionComment) async throws -> CommentContext {
+    let repository = item.id.repository
+    let category = target.anchor == nil ? "issues" : "pulls"
+    let response: CommentDTO = try await get(repository, "\(category)/comments/\(target.id)")
+    var comment = response.model
+    guard comment.key == target.key, let nodeID = comment.nodeID else {
+      throw TataraError(.invalidResponse, detail: "GitHub did not return the selected comment identity.")
+    }
+    let common = "id body updatedAt url viewerCanUpdate viewerDidAuthor viewerCanDelete viewerCanReact reactionGroups { content viewerHasReacted users { totalCount } }"
+    let query = """
+    query($id: ID!) {
+      viewer { login }
+      node(id: $id) {
+        ... on IssueComment { \(common) parent: issue { number locked viewerCanUpdate repository { nameWithOwner } } }
+        ... on PullRequestReviewComment { \(common) replyTo { id } parent: pullRequest { number locked viewerCanUpdate repository { nameWithOwner } } }
+      }
+    }
+    """
+    let payload: CommentNodePayload = try await commentQuery(repository, query, variables: ["id": nodeID])
+    guard let node = payload.node, node.id == nodeID, node.parent.number == item.id.number,
+          node.parent.repository.nameWithOwner.lowercased() == repository.slug.lowercased(),
+          node.url.scheme == "https", node.url.host == repository.host
+    else {
+      throw TataraError(.invalidResponse, detail: "Comment ownership does not match the selected repository and item.")
+    }
+    comment.body = node.body
+    comment.updatedAt = node.updatedAt
+    comment.url = node.url
+    let thread = target.anchor == nil ? nil : try await commentThread(item, root: node.replyTo?.id ?? node.id)
+    return .init(
+      comment: comment,
+      canReply: thread?.canReply ?? (!node.parent.locked || node.parent.viewerCanUpdate),
+      canEdit: node.viewerDidAuthor && node.viewerCanUpdate,
+      canDelete: node.viewerDidAuthor && node.viewerCanDelete,
+      canReact: node.viewerCanReact,
+      thread: thread,
+      reactions: node.reactionGroups.map { .init(
+        content: $0.content,
+        count: $0.users.totalCount,
+        viewerHasReacted: $0.viewerHasReacted,
+      ) },
+      viewer: payload.viewer.login,
+    )
+  }
+
+  @concurrent
+  private func commentThread(_ item: ForgeItem, root: String) async throws -> ReviewThread {
+    let repository = item.id.repository
+    let query = """
+    query($owner: String!, $name: String!, $after: String) {
+      repository(owner: $owner, name: $name) {
+        pullRequest(number: \(item.id.number)) {
+          reviewThreads(first: 100, after: $after) {
+            nodes { id isResolved viewerCanResolve viewerCanUnresolve viewerCanReply comments(first: 1) { nodes { id } } }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+      }
+    }
+    """
+    var cursor: String?, seen = Set<String>()
+    for _ in 0 ..< 100 {
+      try Task.checkCancellation()
+      var variables = ["owner": repository.owner, "name": repository.name]
+      variables["after"] = cursor
+      let payload: ThreadPayload = try await commentQuery(repository, query, variables: variables)
+      guard let page = payload.repository?.pullRequest?.reviewThreads else { throw TataraError(
+        .invalidResponse,
+        detail: "Missing review threads.",
+      ) }
+      if let thread = page.nodes.first(where: { $0.comments.nodes.first?.id == root }) {
+        return .init(
+          id: thread.id,
+          isResolved: thread.isResolved,
+          canResolve: thread.viewerCanResolve,
+          canUnresolve: thread.viewerCanUnresolve,
+          canReply: thread.viewerCanReply,
+        )
+      }
+      guard page.pageInfo.hasNextPage else { throw TataraError(
+        .invalidResponse,
+        detail: "The selected comment no longer belongs to a review thread.",
+      ) }
+      guard let next = page.pageInfo.endCursor, seen.insert(next).inserted else { throw TataraError(
+        .incompleteResponse,
+        detail: "Invalid review thread pagination.",
+      ) }
+      cursor = next
+    }
+    throw TataraError(.incompleteResponse, detail: "Review thread lookup exceeds 10,000 threads.")
+  }
+
+  @concurrent
+  public func mutateComment(_ mutation: CommentMutation) async throws {
+    let repository = mutation.item.id.repository
+    let current = try await commentContext(mutation.item, mutation.context.comment)
+    guard current.viewer == mutation.context.viewer else { throw TataraError(
+      .authentication,
+      detail: "The active GitHub account changed. Reopen the comment before submitting.",
+    ) }
+    guard current.comment.body == mutation.context.comment.body,
+          current.comment.updatedAt == mutation.context.comment.updatedAt
+    else {
+      throw TataraError(.invalidResponse, detail: "The comment changed after the preview. Reopen it before submitting.")
+    }
+    guard current.allows(mutation.operation) else { throw TataraError(
+      .unavailable,
+      detail: "This comment action is no longer permitted.",
+    ) }
+    if mutation.item.kind == .pullRequest {
+      let pull: PullRequestDTO = try await get(repository, "pulls/\(mutation.item.id.number)")
+      guard let expected = mutation.expectedHead, pull.head.sha == expected else { throw TataraError(.revisionChanged) }
+    }
+    try Task.checkCancellation()
+    let comment = current.comment
+    let category = comment.anchor == nil ? "issues" : "pulls"
+    var endpoint = "\(category)/comments/\(comment.id)"
+    var method = "POST"
+    var payload: [String: String] = [:]
+    switch mutation.operation {
+    case .reply, .edit:
+      guard !mutation.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw TataraError(.emptyReview) }
+      payload["body"] = mutation.body
+      if mutation.operation == .edit {
+        method = "PATCH"
+      } else if comment.anchor == nil {
+        endpoint = "issues/\(mutation.item.id.number)/comments"
+      } else {
+        endpoint = "pulls/\(mutation.item.id.number)/comments/\(comment.replyToID ?? comment.id)/replies"
+      }
+    case .delete: method = "DELETE"
+    case .react:
+      guard let node = comment.nodeID else { throw TataraError(.invalidResponse, detail: "Missing comment node ID.") }
+      let wasSelected = mutation.context.reactions.first { $0.content == mutation.reaction }?.viewerHasReacted ?? false
+      let isSelected = current.reactions.first { $0.content == mutation.reaction }?.viewerHasReacted ?? false
+      guard wasSelected == isSelected else { throw TataraError(
+        .invalidResponse,
+        detail: "The reaction changed after the preview. Reopen the comment.",
+      ) }
+      let operation = isSelected ? "removeReaction" : "addReaction"
+      let query = "mutation($id: ID!, $content: ReactionContent!) { \(operation)(input: {subjectId: $id, content: $content}) { subject { id } } }"
+      try await cache.invalidate(Self.metadataNamespace(repository))
+      let response: [String: MutationAcknowledgement] = try await commentQuery(
+        repository,
+        query,
+        variables: ["id": node, "content": mutation.reaction.rawValue],
+      )
+      guard response[operation]?.subject?.id == node else { throw TataraError(
+        .invalidResponse,
+        detail: "GitHub did not acknowledge the reaction target. Refresh before attempting another write.",
+      ) }
+      return
+    case .resolve, .unresolve:
+      guard let thread = current.thread, thread.id == mutation.context.thread?.id else { throw TataraError(
+        .invalidResponse,
+        detail: "The review thread changed after the preview.",
+      ) }
+      let operation = mutation.operation == .resolve ? "resolveReviewThread" : "unresolveReviewThread"
+      let query = "mutation($id: ID!) { \(operation)(input: {threadId: $id}) { thread { id } } }"
+      try await cache.invalidate(Self.metadataNamespace(repository))
+      let response: [String: MutationAcknowledgement] = try await commentQuery(repository, query, variables: ["id": thread.id])
+      guard response[operation]?.thread?.id == thread.id else { throw TataraError(
+        .invalidResponse,
+        detail: "GitHub did not acknowledge the review thread. Refresh before attempting another write.",
+      ) }
+      return
+    }
+    try await cache.invalidate(Self.metadataNamespace(repository))
+    let data = try JSONEncoder().encode(payload)
+    _ = try await runner.checked("gh", ["api", "--hostname", repository.host, "--method", method,
+                                        "repos/\(repository.slug)/\(endpoint)", "--input", "-"], input: String(
+        decoding: data,
+        as: UTF8.self,
+      ))
+  }
+
+  @concurrent
+  private func commentQuery<Value: Decodable>(
+    _ repository: RepositoryID,
+    _ query: String,
+    variables: [String: String],
+  ) async throws -> Value {
+    let input = try JSONSerialization.data(withJSONObject: ["query": query, "variables": variables])
+    let output = try await runner.checked(
+      "gh",
+      ["api", "--hostname", repository.host, "graphql", "--input", "-"],
+      input: String(decoding: input, as: UTF8.self),
+    )
+    let response = try decode(CommentGraphQL<Value>.self, output.output)
+    guard response.errors?.isEmpty != false, let value = response.data else {
+      throw TataraError(
+        .invalidResponse,
+        detail: response.errors?.map(\.message).joined(separator: "; ") ?? "Missing GitHub GraphQL response.",
+      )
+    }
+    return value
+  }
+}
+
+private struct MutationAcknowledgement: Decodable {
+  struct Node: Decodable { var id: String }
+  var subject: Node?
+  var thread: Node?
+}

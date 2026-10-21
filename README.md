@@ -61,27 +61,29 @@ corresponding-source reference. See [release setup](docs/RELEASING.md).
 
 ## Review workflow
 
-- `j/k` or arrows move the selection or diff cursor. `Tab` and `Shift-Tab`
-  cycle keyboard pane focus. `Enter` opens a PR into Files and a file into Diff.
-  The active pane has a Lavender border.
-- PR and file lists keep up to two neighboring entries visible above and below
-  the selection. The viewport stays in place until the selection crosses either
-  margin, including when reversing direction. Short panes use smaller margins.
-- `i` toggles compact/rich information. Compact PR rows show state, CI (`CI`),
-  review decision (`R`), and comment count (`c`); rich rows add author, update date,
-  and labels. `✓`/`+` means passed/approved, `!` means failed/changes requested,
-  and `?` means review required. The Overview spells out each status. Missing
-  metadata is not treated as a success or zero.
-- Rich Overview adds assignees, requested reviewers/teams, milestone, timestamps,
-  and revision identity. Both modes show branches and change totals when available.
-  Use `--detail-level rich` or configure the default below. GitHub metadata is
-  refreshed with the existing `r` action; Projects and derived checklist progress
-  are not currently fetched. See [the field mapping](docs/PROVIDER_INFORMATION_2026-09-10.md).
+- Start by selecting a PR in a dedicated screen. Every row includes its author,
+  update time and branches; the adjacent Overview shows assignees, reviewers,
+  labels, milestone, CI/review state and change totals. There is no density toggle.
+- `Enter` opens the review workspace: a short PR summary sits above a tall Files
+  tree. `Ctrl-p` opens a quick picker in Normal mode: `j/k`, `gg/G`,
+  `Ctrl-d/Ctrl-u` and `Ctrl-f/Ctrl-b` move through its rows. `/` or `i` enters
+  Insert mode to filter titles, numbers or authors. `Enter` opens the selection
+  from either mode. `Esc` leaves Insert mode first, then closes the picker.
+  Arrow keys and `Ctrl-j/Ctrl-k` or `Ctrl-n/Ctrl-p` also work while typing.
+- `Tab` and `Shift-Tab` cycle the two panes on the active screen. `Esc` returns
+  from the review workspace to PR selection after clearing any active interaction.
+  Clicking the PR summary also opens the picker. The active pane has a Lavender border.
+- PR and file lists retain neighboring entries above and below the selection.
+  Missing GitHub metadata is not treated as a success or zero. `r` refreshes it.
 - Files use a directory tree by default. `Enter` folds/unfolds directories;
   `h` collapses or selects the parent, and `l` expands or enters a child.
   Focusing a directory shows the combined diff of its changed descendants.
 - `[` / `]` switch Overview, Diff, Discussion and Checks.
-- `gg/G` jump to first/last; `Ctrl-d/Ctrl-u` move half a page.
+- `gg/G` jump to first/last; `Ctrl-d/Ctrl-u` move half a page. `j/k` move source
+  lines while `gj/gk` move displayed lines when a source line wraps.
+- Diff lines wrap by default. `w` toggles wrap; with wrap off, use `zh/zl` to scroll
+  horizontally, `zH/zL` for half a screen and `z0` for the start. Horizontal wheel
+  input also works. Additions/deletions with only one source side use the full width.
 - `/` in PRs submits a GitHub search query on `Enter`, including qualifiers such
   as `is:open label:bug author:@me`. In Files it searches changed-file contents
   with a regular expression, preserving matching files and their parent folders.
@@ -95,7 +97,8 @@ corresponding-source reference. See [release setup](docs/RELEASING.md).
   line, or the word at the current search hit. `n` follows the search direction;
   `N` reverses it. `zt` / `zz` / `zb` place the current line toward the top,
   center, or bottom of the viewport, clamped at document boundaries.
-- `Ctrl-f/Ctrl-b` scroll the main pane by half a page while keeping sidebar focus.
+- `Ctrl-f/Ctrl-b` page the content with a two-line overlap, even from Files. The
+  Diff cursor moves with the viewport while Files retains keyboard focus.
 - Scrollbars show the visible range in each pane and help. Click or drag a track
   to scroll without changing keyboard focus, item selection or the Diff cursor.
 - Use the mouse wheel or trackpad over a pane to scroll it without moving
@@ -112,6 +115,16 @@ corresponding-source reference. See [release setup](docs/RELEASING.md).
   Submit; no review is posted just by pressing `c` or `r`.
 - `c` from a file list also supports manual source coordinates. Issues support
   ordinary comments.
+- `gc` focuses published comments or returns to source. `{` / `}` select the
+  previous/next comment; clicking a comment focuses it too. `c` replies, `e` edits
+  your comment, `D` deletes it, `a` manages reactions, and `s` resolves or reopens
+  its review thread. `y` copies the body and `o` opens the comment permalink.
+  Each write needs a preview and confirmation, then fresh account, permission,
+  comment-version and PR-head validation. A write is never retried automatically.
+- Code-review comments occupy the LEFT or RIGHT column matching their source,
+  with directional borders; narrow layouts retain explicit side labels. Markdown
+  prose supports styled headings, nested quotes, task lists, tables, links/images,
+  code fences, reference links and thematic rules. Diff source remains literal.
 - `f` opens remote filters, a repository label picker, and saved presets. Use GitHub qualifiers such as
   `is:open author:@me`, `review-requested:@me`, `label:bug`, `draft:false` or
   `is:merged`. Built-in presets cover common queues; named custom presets are
@@ -133,14 +146,15 @@ theme = "mocha" # latte, frappe, macchiato, mocha
 language = "ko" # en, ko, ja, zh-Hans, zh-Hant
 files_view = "tree" # tree or list
 sidebar_width = 52 # preferred PR/Files width in columns; minimum 24
-detail_level = "compact" # compact or rich; i toggles for the current session
+wrap = true # w toggles for the current session; --wrap on/off overrides it
 
 [keys]
 quit = ["Q"]
 ```
 
-`--theme`, `--language`, `--files-view`, `--sidebar-width`, `--detail-level` and `--config` override the defaults.
-PR and Files share the configured width. Narrow windows reduce it to leave at
+`--theme`, `--language`, `--files-view`, `--sidebar-width`, `--wrap` and `--config` override the defaults.
+The review sidebar uses the configured width; the PR selection screen gives the
+list additional room for metadata. Narrow windows reduce it to leave at
 least 60 columns for content; windows below 100 columns show one pane at a time.
 Conflicting bindings
 are errors. `--no-color`, `--ascii` and `--accessible` are provided by Tatara.
@@ -166,6 +180,30 @@ validate source anchors against GitHub's patch. Tatara enables `DFT_UNSTABLE=yes
 for its child process; JSON schema mismatches are visible errors. Formats without
 source alignment, including binary and syntactically unchanged results, do not
 invent cursor anchors. The adapter is validated against difftastic 0.69/0.70.
+
+Ordinary surfaces inherit the terminal background, including its configured
+transparency and blur. Catppuccin colors style text, borders and interaction
+highlights; background opacity remains a terminal setting.
+
+Diff highlighting follows difftastic's JSON token categories: removed/added tokens
+use terminal ANSI red/green (bright on dark themes), with bold keywords, types and
+delimiters, and italic comments. Unchanged source uses the terminal foreground.
+Tatara adds no syntax accent colors, blanket underlines or diff background fills.
+JSON does not expose unchanged syntax categories or distinguish novel words from
+whole tokens, so those native-only details are not inferred. Narrow Diff panes
+show removed and added lines together, preserving source and review coordinates.
+
+The Files tree starts with `/`. Select it to read every changed file in one diff,
+including files at the repository root. Enter toggles expansion; `h`/`l` navigate
+the hierarchy. Combined rows retain each file's own search and review coordinates.
+
+Files show `A` (added), `M` (modified), `D` (deleted), `R` (renamed) or `C` (copied),
+with GitHub's exact `+added −deleted` line counts; zero values are hidden. A `cN`
+badge counts published file comments, including replies and outdated comments.
+PR-level discussion and local drafts are excluded. Tree indentation uses one column
+per level. Long names retain their beginning and extension; the Diff header keeps
+the full selected path. The footer explains the selected file status, or shows
+difftastic's detected language and structural change status while reading a diff.
 
 ## Development
 

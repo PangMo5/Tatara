@@ -30,11 +30,59 @@ the term “merge request.” Unsupported operations must remain explicit.
    at merge base; additions/deletions use an empty opposite side.
 4. `difft --display json --strip-cr off` supplies aligned source rows and changed
    token byte ranges. Tatara validates those ranges against the exact snapshots,
-   preserves zero-based-to-one-based source mapping, and renders changed tokens
-   with semantic Catppuccin colors. ANSI text is not reparsed into coordinates.
+   preserves zero-based-to-one-based source mapping, and retains the `highlight`
+   category on each changed token. Removed/added tokens use the terminal's ANSI
+   red/green, bright on dark themes and normal on Latte. Keywords, types and
+   delimiters are bold; comments are italic. Changed gutters are bold directional
+   colors and unchanged gutters dim the terminal foreground. Search and selection
+   remain independent interaction overlays. Unknown categories retain their name
+   and directional color. JSON omits unchanged syntax and collapses native novel
+   words into token categories, so word-specific underlines are not guessed.
+   ANSI text is not reparsed into coordinates.
 5. Structural results are cached by repository, immutable revisions, paths and
-   engine version. Presentation width and selected side have separate prepared
-   caches. Remote filenames never become local filesystem paths.
+   engine version. Presentation width, wrap and horizontal offset have separate prepared caches; changing the
+   active source side does not rerender the document. Remote filenames never
+   become local filesystem paths.
+
+Diff panes below 100 columns and diffs with a single source side use unified presentation: each changed run contains
+its old rows followed by its new rows, with shared context shown once. The original
+alignment remains immutable in `sourceDiff`; the presented `diff` retains exact
+path, side and line identities for every row. Wrapped rows retain full immutable
+source lines with separate display-column offsets; logical and physical cursor
+indices are prepared separately. Search runs against each source identity once,
+then maps the match onto wrapped rows. Both layouts build source lookups on
+the worker. Normal cursor movement visits both sides in unified order; a visual
+range stays on its original side so it remains a valid source range. Resizing
+restores the viewport and cursor through source identities, never row numbers.
+Comment annotations carry focus keys and source-side placement independently of review anchors;
+unified projection places each comment below its old or new source row. Search
+and comment text remain distinct from reviewable source.
+
+PR selection and review are distinct screens. The selector always shows full
+metadata; the review sidebar contains a short current-PR summary and a tall Files
+tree. The quick picker filters loaded items on a cancellable worker, preserves
+the current PR until acceptance, and owns its own query generation.
+
+Comment actions load a fresh REST comment and GraphQL permissions/reactions.
+Review-thread lookup is paginated and matches the root comment's node ID. The
+comment editor owns its immutable item/head and preview. Confirmation consumes
+the preview once; the adapter rechecks account, body/version, permissions and head
+before one REST/GraphQL mutation. Failures do not trigger retries. Successful writes
+refresh detail while preserving the selected file/directory and source cursor.
+
+The Files tree uses `/` as a synthetic root, separate from repository-relative
+file paths. Selecting it uses the existing combined-diff pipeline for all changed
+files. Empty trees have no root; search results keep it as an ancestor, and
+clearing a search expands the root when needed to reveal the selected file.
+
+File status badges and insertion/deletion totals come from `ChangedFile` metadata,
+not from counting difftastic's changed tokens. Zero line-count values are hidden. File comment counts include all published
+comments with that exact path, including replies, file-level and outdated anchors,
+and exclude PR-level discussion and local drafts. Counts are indexed when the
+immutable detail is constructed, including after cache decoding. Per-row lookup is indexed and tree
+indentation is one column per depth, capped to preserve filename space. Diff
+language and structural status come from JSON and remain distinct from forge file
+status: a modified file may have no structural changes.
 
 The PR list already contains the overview body, so it appears before the detail
 requests complete. Selection starts cancellable reads immediately, with no settling

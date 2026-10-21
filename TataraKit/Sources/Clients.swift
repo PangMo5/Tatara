@@ -14,6 +14,8 @@ public struct ForgeClient: Sendable {
   public var detail: @Sendable (ForgeItem) async throws -> ItemDetail
   public var content: @Sendable (RepositoryID, String, String) async throws -> Data
   public var submit: @Sendable (ReviewSubmission) async throws -> Void
+  public var commentContext: @Sendable (ForgeItem, DiscussionComment) async throws -> CommentContext
+  public var mutateComment: @Sendable (CommentMutation) async throws -> Void
 }
 
 @DependencyClient
@@ -89,7 +91,7 @@ public struct DocumentClient: Sendable {
   public var prepareComment: @Sendable (_ markdown: String, _ width: Int) async throws -> ReviewDocument
   public var search: @Sendable (ReviewDocument, String) async throws -> SearchMatches
   public var revealMatch: @Sendable (ReviewDocument, SearchMatches, Int, Int) async throws -> ReviewDocument
-  public var prepareDiff: @Sendable (ReviewDiff, Int, InlineComment.Side) async throws -> ReviewDocument
+  public var prepareDiff: @Sendable (ReviewDiff, DiffViewport) async throws -> ReviewDocument
 }
 
 extension DocumentClient: TestDependencyKey {
@@ -97,3 +99,12 @@ extension DocumentClient: TestDependencyKey {
     Self()
   }
 }
+
+@DependencyClient
+public struct ClipboardClient: Sendable {
+  public var copy: @Sendable (String) async throws -> Void
+}
+
+extension ClipboardClient: TestDependencyKey { public static var testValue: Self {
+  Self()
+} }

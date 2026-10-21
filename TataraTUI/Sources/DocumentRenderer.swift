@@ -18,83 +18,256 @@ enum DocumentRenderer {
   private static let cache = PreparedDocumentCache()
 
   @concurrent
-  static func prepareDiff(_ diff: ReviewDiff, _ width: Int, _ side: InlineComment.Side) async throws -> ReviewDocument {
-    try await prepareDiff(diff, width, side, offset: 0)
+  static func prepareDiff(_ diff: ReviewDiff, _ width: Int) async throws -> ReviewDocument {
+    try await prepareDiff(diff, DiffViewport(width: width))
   }
 
   @concurrent
-  private static func prepareDiff(
-    _ diff: ReviewDiff,
-    _ width: Int,
-    _ side: InlineComment.Side,
-    offset: Int,
-  ) async throws -> ReviewDocument {
+  static func prepareDiff(_ diff: ReviewDiff, _ viewport: DiffViewport) async throws -> ReviewDocument {
     try Task.checkCancellation()
-    let both = width >= 100
-    let key = diff.cacheIdentity.map { "structured:\(width):\(offset):\(both ? "both" : side.rawValue):" + $0 }
+    let width = viewport.width
+    let hasLeft = diff.rows.contains { $0.left != nil }, hasRight = diff.rows.contains { $0.right != nil }
+    let both = width >= 100 && (hasLeft == hasRight)
+    var offset = viewport.wrap ? 0 : max(0, viewport.offset)
+    let key = diff.cacheIdentity.map { "structured-v2:\(width):\(viewport.wrap):\(offset):" + $0 }
     if let key, let cached = await cache.value(for: key) {
-      try Task.checkCancellation()
       return cached
     }
+    let rows = both ? diff.rows : try unifiedRows(diff.rows, path: diff.path)
     let sideWidth = both ? max(1, (width - 3) / 2) : width
-    let largest = diff.rows.reduce(1) { max($0, $1.left?.number ?? 0, $1.right?.number ?? 0) }
+    let largest = rows.reduce(1) { max($0, $1.left?.number ?? 0, $1.right?.number ?? 0) }
     let gutter = max(3, String(largest).count)
-    let bodyWidth = max(1, sideWidth - gutter - 2)
+    let prefixWidth = both ? gutter + 3 : gutter * 2 + 4
+    let bodyWidth = max(1, sideWidth - prefixWidth)
     var glyphWidths: [Character: Int] = [:]
-    func project(_ line: ReviewDiffLine?, side: InlineComment.Side) -> [DiffSpan] {
-      guard let line else { return [.init(text: String(repeating: " ", count: sideWidth), side: side)] }
-      let projection = clipped(line.spans, width: bodyWidth, offset: offset, widths: &glyphWidths)
-      var spans = projection.spans
-      let cells = projection.columns
-      spans = spans.map { .init(text: $0.text, color: $0.color, bold: $0.bold, side: side, role: $0.role) }
-      let number = String(line.number)
-      let prefix = " " + String(repeating: " ", count: gutter - number.count) + number + " "
-      var result: [DiffSpan] = [.init(text: prefix, side: side, role: .metadata)]
-      result.append(contentsOf: spans)
-      result.append(.init(text: String(repeating: " ", count: max(0, bodyWidth - cells)), side: side))
+    var maximumWidth = 0, estimatedCost = 0
+    if !viewport.wrap {
+      for row in rows {
+        try Task.checkCancellation()
+        for line in [row.left, row.right].compactMap(\.self) {
+          let columns = line.spans.reduce(0) { $0 + TerminalWidth.of(TerminalText.sanitize($1.text).replacingOccurrences(
+            of: "\t",
+            with: "    ",
+          )) }
+          maximumWidth = max(maximumWidth, columns)
+        }
+      }
+      offset = min(offset, max(0, maximumWidth - bodyWidth))
+    }
+    typealias Segment = (spans: [DiffSpan], columns: Int, offset: Int)
+    func segments(_ line: ReviewDiffLine?) throws -> [Segment] {
+      guard let line else { return [] }
+      if !viewport.wrap {
+        let value = clipped(line.spans, width: bodyWidth, offset: offset, widths: &glyphWidths)
+        return [(value.spans, value.columns, offset)]
+      }
+      var result: [Segment] = [], spans: [DiffSpan] = []
+      var columns = 0, consumed = 0
+      for span in line.spans {
+        var part = span
+        part.text = ""
+        for (index, character) in span.text.enumerated() {
+          if index % 1024 == 0 {
+            try Task.checkCancellation()
+          }
+          let clean = character == "\t" ? "    " : TerminalText.sanitize(String(character))
+          for glyph in clean where glyph != "\n" {
+            let cells = glyphWidths[glyph] ?? TerminalWidth.of(glyph)
+            if glyphWidths.count < 256 {
+              glyphWidths[glyph] = cells
+            }
+            if columns > 0, columns + cells > bodyWidth {
+              if !part.text.isEmpty {
+                spans.append(part)
+                part.text = ""
+              }
+              result.append((spans, columns, consumed))
+              consumed += columns
+              columns = 0
+              spans = []
+            }
+            part.text.append(glyph)
+            columns += cells
+          }
+        }
+        if !part.text.isEmpty {
+          spans.append(part)
+        }
+      }
+      if !spans.isEmpty || result.isEmpty {
+        result.append((spans, columns, consumed))
+      }
+      maximumWidth = max(maximumWidth, consumed + columns)
       return result
     }
-    var lines: [[DiffSpan]] = [], displayed: [[DiffSpan]] = []
-    var estimatedCost = 0
-    for (index, row) in diff.rows.enumerated() {
+    func number(_ line: ReviewDiffLine?, continuation: Bool = false) -> String {
+      let value = continuation ? "" : line.map { String($0.number) } ?? ""
+      return String(repeating: " ", count: gutter - value.count) + value
+    }
+    func project(
+      _ line: ReviewDiffLine?,
+      segment: Segment?,
+      side: InlineComment.Side,
+      row: ReviewDiffRow,
+      continuation: Bool,
+    ) -> [DiffSpan] {
+      guard let line, let segment else { return [.init(text: String(repeating: " ", count: sideWidth), side: side)] }
+      let changed = line.spans.contains(where: \.isChanged) || row.left == nil || row.right == nil
+      let marker = changed ? (side == .left ? "-" : "+") : " "
+      let prefix = both ? " " + number(line, continuation: continuation) + marker + " "
+        : " " + number(row.left, continuation: continuation) + " " + number(row.right, continuation: continuation) + marker + " "
+      var result: [DiffSpan] = [.init(
+        text: prefix,
+        bold: changed,
+        side: side,
+        role: changed ? (side == .left ? .removed : .added) : .metadata,
+      )]
+      result += segment.spans.map { span in var span = span
+        span.side = side
+        return span
+      }
+      result.append(.init(text: String(repeating: " ", count: max(0, bodyWidth - segment.columns)), side: side))
+      return result
+    }
+    var lines: [[DiffSpan]] = [], displayed: [[DiffSpan]] = [], projectedRows: [ReviewDiffRow] = []
+    for (index, row) in rows.enumerated() {
       if index % 128 == 0 {
         try Task.checkCancellation()
         await Task.yield()
       }
       if row.left == nil, row.right == nil {
         let annotation = row.annotation ?? [.init(text: "…", role: .hunkHeader)]
-        lines.append(annotation)
-        displayed.append(clipped(annotation, width: width, widths: &glyphWidths).spans)
+        let side = annotation.first(where: { $0.commentSide != nil })?.commentSide
+        let indentation = both && side == .right ? sideWidth + 3 : 0
+        let room = both && side != nil ? sideWidth : width
+        let padding: [DiffSpan] = indentation == 0 ? [] : [.init(
+          text: String(repeating: " ", count: indentation),
+          role: .commentGap,
+        )]
+        lines.append(padding + annotation)
+        displayed.append(padding + clipped(annotation, width: room, widths: &glyphWidths).spans)
+        projectedRows.append(row)
         estimatedCost += annotation.reduce(192) { $0 + $1.text.utf8.count * 2 }
         continue
       }
-      let source = (row.left?.spans ?? []) + [.init(text: "  ")] + (row.right?.spans ?? [])
-      estimatedCost += 256 + width * 2 + source.reduce(0) { $0 + $1.text.utf8.count * 2 + 48 }
-      lines.append(source)
-      displayed.append(both ? project(row.left, side: .left) + [.init(text: " │ ", role: .metadata)] + project(
-        row.right,
-        side: .right,
-      )
-        : project(row.line(on: side), side: side))
+      let left = try segments(row.left), right = try segments(row.right)
+      for part in 0 ..< max(left.count, right.count) {
+        let lhs = left.indices.contains(part) ? left[part] : nil
+        let rhs = right.indices.contains(part) ? right[part] : nil
+        let projected = ReviewDiffRow(
+          left: lhs == nil ? nil : row.left,
+          right: rhs == nil ? nil : row.right,
+          path: row.path,
+          leftOffset: lhs?.offset ?? 0,
+          rightOffset: rhs?.offset ?? 0,
+        )
+        projectedRows.append(projected)
+        lines.append(viewport.wrap ? (lhs?.spans ?? []) + [.init(text: "  ")] + (rhs?.spans ?? [])
+          : (row.left?.spans ?? []) + [.init(text: "  ")] + (row.right?.spans ?? []))
+        if both {
+          displayed.append(project(row.left, segment: lhs, side: .left, row: row, continuation: part > 0)
+            + [.init(text: " │ ", role: .metadata)] + project(
+              row.right,
+              segment: rhs,
+              side: .right,
+              row: row,
+              continuation: part > 0,
+            ))
+        } else {
+          let side: InlineComment.Side = row.right == nil ? .left : .right
+          displayed.append(project(
+            row.line(on: side),
+            segment: side == .left ? lhs : rhs,
+            side: side,
+            row: row,
+            continuation: part > 0,
+          ))
+        }
+        estimatedCost += 384 + width * 4
+      }
+      estimatedCost += (row.left?.spans ?? []).reduce(0) { $0 + $1.text.utf8.count + 64 }
+        + (row.right?.spans ?? []).reduce(0) { $0 + $1.text.utf8.count + 64 }
     }
     if lines.isEmpty {
-      let message = "\(diff.path) · \(diff.language) · \(diff.status)"
-      lines = [[.init(text: message)]]
+      lines = [[.init(text: "\(diff.path) · \(diff.language) · \(diff.status)")]]
       displayed = lines
     }
+    let projected = ReviewDiff(
+      path: diff.path,
+      language: diff.language,
+      status: diff.status,
+      rows: projectedRows,
+      revision: diff.revision,
+      previousPath: diff.previousPath,
+      cacheIdentity: diff.cacheIdentity,
+    )
     let result = try ReviewDocument(
       lines: lines,
       displayLines: displayed,
-      diff: diff,
+      diff: projected,
+      sourceDiff: diff,
       diffSideWidth: sideWidth,
-      diffNumberWidth: gutter,
-      visibleDiffSide: both ? nil : side,
+      diffPrefixWidth: prefixWidth,
+      isUnifiedDiff: !both,
       horizontalOffset: offset,
+      wrapsLines: viewport.wrap,
+      maximumHorizontalOffset: max(0, maximumWidth - bodyWidth),
       checkingCancellation: Task.checkCancellation,
     )
     if let key {
       await cache.insert(result, for: key, cost: estimatedCost)
     }
+    return result
+  }
+
+  /// Keep every source identity once: old rows, new rows, then shared context.
+  /// Annotation boundaries retain their placement and never become source rows.
+  private static func unifiedRows(_ rows: [ReviewDiffRow], path: String) throws -> [ReviewDiffRow] {
+    var result: [ReviewDiffRow] = [], old: [ReviewDiffRow] = [], new: [ReviewDiffRow] = []
+    var lastOld: SourceLocation?, lastNew: SourceLocation?
+    func flush() {
+      result.append(contentsOf: old)
+      result.append(contentsOf: new)
+      old.removeAll(keepingCapacity: true)
+      new.removeAll(keepingCapacity: true)
+      lastOld = nil
+      lastNew = nil
+    }
+    for (index, row) in rows.enumerated() {
+      if index % 128 == 0 {
+        try Task.checkCancellation()
+      }
+      if row.left == nil, row.right == nil, let location = row.annotationLocation {
+        if location == lastOld {
+          old.append(row)
+          continue
+        }
+        if location == lastNew {
+          new.append(row)
+          continue
+        }
+      }
+      let shared = if let left = row.left, let right = row.right {
+        !left.spans.contains(where: \.isChanged) && !right.spans.contains(where: \.isChanged)
+          && left.spans.map(\.text).joined() == right.spans.map(\.text).joined()
+      } else {
+        false
+      }
+      if shared || (row.left == nil && row.right == nil) {
+        flush()
+        result.append(row)
+      } else {
+        if let left = row.left {
+          old.append(.init(left: left, right: nil, path: row.path))
+          lastOld = .init(path: row.path ?? path, line: left.number, side: .left)
+        }
+        if let right = row.right {
+          new.append(.init(left: nil, right: right, path: row.path))
+          lastNew = .init(path: row.path ?? path, line: right.number, side: .right)
+        }
+      }
+    }
+    flush()
     return result
   }
 
@@ -194,7 +367,9 @@ enum DocumentRenderer {
           sourceColumns += cells
           if columns + cells > width {
             if !prefix.isEmpty {
-              result.append(.init(text: prefix, color: span.color, bold: span.bold, role: span.role))
+              var clipped = span
+              clipped.text = prefix
+              result.append(clipped)
             }
             return (result, columns)
           }
@@ -203,7 +378,9 @@ enum DocumentRenderer {
         }
       }
       if !prefix.isEmpty {
-        result.append(.init(text: prefix, color: span.color, bold: span.bold, role: span.role))
+        var clipped = span
+        clipped.text = prefix
+        result.append(clipped)
       }
     }
     return (result, columns)
@@ -213,59 +390,114 @@ enum DocumentRenderer {
   static func search(_ document: ReviewDocument, _ query: String) async throws -> SearchMatches {
     guard !query.isEmpty else { return [] }
     let pattern = try SearchPattern(query)
-    var matches: [Int] = [], sides: [InlineComment.Side?] = [], ranges: [Range<Int>?] = [], sourceRanges: [Range<Int>?] = []
+    var foundMatches: [(row: Int, side: InlineComment.Side?, range: Range<Int>?, source: Range<Int>?)] = []
     var highlights: [Int: [Range<Int>]] = [:]
+    var visited = Set<SourceLocation>()
     for (index, line) in document.searchableLines.enumerated() {
       if index % 128 == 0 {
         try Task.checkCancellation()
         await Task.yield()
       }
-      func append(_ range: Range<Int>?, side: InlineComment.Side?, source: Range<Int>? = nil) throws {
-        guard matches.count < 100_000 else { throw TataraError(
-          .invalidResponse,
-          detail: "Search exceeds 100,000 matches; narrow the expression.",
-        ) }
-        matches.append(index)
-        sides.append(side)
-        ranges.append(range)
-        sourceRanges.append(source)
-        if let range {
-          highlights[index, default: []].append(range)
-        }
-      }
       if let diff = document.diff, diff.rows.indices.contains(index),
          diff.rows[index].left != nil || diff.rows[index].right != nil
       {
-        for side in InlineComment.Side.allCases where document.visibleDiffSide == nil || document.visibleDiffSide == side {
-          guard let source = diff.rows[index].line(on: side) else { continue }
-          let text = source.spans.map(\.text).joined()
-          let found = try pattern.ranges(in: text)
-          var start = 0
-          for span in document.displayLines[index] {
-            if span.side == side {
-              break
-            }
-            start += span.text.utf16.count
+        for side in InlineComment.Side.allCases {
+          if document.isUnifiedDiff, side == .left, diff.rows[index].right != nil {
+            continue
           }
-          start += document.diffNumberWidth + 2
-          let columns = max(1, document.diffSideWidth - document.diffNumberWidth - 2)
-          for range in found {
-            try append(
-              projectMatch(range, source: text, start: start, columns: columns, offset: document.horizontalOffset),
-              side: side,
-              source: range,
+          guard let source = diff.rows[index].line(on: side) else { continue }
+          let location = SourceLocation(path: diff.rows[index].path ?? diff.path, line: source.number, side: side)
+          guard visited.insert(location).inserted else { continue }
+          let text = source.spans.map(\.text).joined()
+          let glyphs = try sourceGlyphs(text)
+          let sourceRows = document.rows(for: location)
+          var projections: [Int: (start: Int, sourceStart: Int, columnStart: Int)] = [:]
+          for row in sourceRows {
+            let offset = side == .left ? diff.rows[row].leftOffset : diff.rows[row].rightOffset
+            let first = lowerBound(glyphs) { $0.column >= offset }
+            var start = 0
+            for span in document.displayLines[row] {
+              if span.side == side {
+                break
+              }
+              start += span.text.utf16.count
+            }
+            projections[row] = (
+              start + document.diffPrefixWidth,
+              first < glyphs.count ? glyphs[first].displayOffset : 0,
+              first < glyphs.count ? glyphs[first].column : offset,
             )
+          }
+          let columns = max(1, document.diffSideWidth - document.diffPrefixWidth)
+          for range in try pattern.ranges(in: text) {
+            if foundMatches.count % 256 == 0 {
+              try Task.checkCancellation()
+            }
+            let first = lowerBound(glyphs) { $0.sourceEnd > range.lowerBound }
+            let column = first < glyphs.count ? glyphs[first].column : (glyphs.last.map { $0.column + $0.columns } ?? 0)
+            let matchRow = document.row(for: location, column: column) ?? index
+            var portions: [Int: Range<Int>] = [:]
+            if range.isEmpty {
+              if let projection = projections[matchRow], column >= projection.columnStart,
+                 column < projection.columnStart + columns
+              {
+                let start = projection
+                  .start +
+                  (first < glyphs.count ? glyphs[first].displayOffset - projection
+                    .sourceStart : (glyphs.last.map { $0.displayOffset + $0.displayLength } ?? 0) - projection.sourceStart)
+                portions[matchRow] = start ..< start + 1
+              }
+            } else {
+              var glyphIndex = first
+              while glyphIndex < glyphs.count, glyphs[glyphIndex].sourceStart < range.upperBound {
+                let glyph = glyphs[glyphIndex]
+                glyphIndex += 1
+                let row = document.row(for: location, column: glyph.column) ?? index
+                guard let projection = projections[row], glyph.column >= projection.columnStart,
+                      glyph.column + glyph.columns <= projection.columnStart + columns else { continue }
+                let start = projection.start + glyph.displayOffset - projection.sourceStart
+                let end = start + glyph.displayLength
+                portions[row] = portions[row].map { min($0.lowerBound, start) ..< max($0.upperBound, end) } ?? start ..< end
+              }
+            }
+            for (row, portion) in portions {
+              highlights[row, default: []].append(portion)
+            }
+            foundMatches.append((matchRow, side, portions[matchRow], range))
+            guard foundMatches.count <= 100_000 else { throw TataraError(
+              .invalidResponse,
+              detail: "Search exceeds 100,000 matches; narrow the expression.",
+            ) }
           }
         }
       } else {
         for range in try pattern.ranges(in: line) {
-          try append(range, side: nil)
+          foundMatches.append((index, nil, range, nil))
+          highlights[index, default: []].append(range)
+          guard foundMatches.count <= 100_000 else { throw TataraError(
+            .invalidResponse,
+            detail: "Search exceeds 100,000 matches; narrow the expression.",
+          ) }
         }
       }
     }
-    let result = SearchMatches(lines: matches, highlights: highlights, sides: sides, ranges: ranges, sourceRanges: sourceRanges)
+    foundMatches.sort { lhs, rhs in
+      if lhs.row != rhs.row {
+        return lhs.row < rhs.row
+      }
+      if lhs.side != rhs.side {
+        return lhs.side == .left
+      }
+      return (lhs.source?.lowerBound ?? lhs.range?.lowerBound ?? 0) < (rhs.source?.lowerBound ?? rhs.range?.lowerBound ?? 0)
+    }
     try Task.checkCancellation()
-    return result
+    return .init(
+      lines: foundMatches.map(\.row),
+      highlights: highlights,
+      sides: foundMatches.map(\.side),
+      ranges: foundMatches.map(\.range),
+      sourceRanges: foundMatches.map(\.source),
+    )
   }
 
   @concurrent
@@ -275,7 +507,8 @@ enum DocumentRenderer {
     _ index: Int,
     _ width: Int,
   ) async throws -> ReviewDocument {
-    guard let diff = document.diff, matches.lines.indices.contains(index), matches.sides.indices.contains(index),
+    guard !document.wrapsLines, let diff = document.diff, matches.lines.indices.contains(index),
+          matches.sides.indices.contains(index),
           let side = matches.sides[index], matches.sourceRanges.indices.contains(index), let range = matches.sourceRanges[index],
           diff.rows.indices.contains(matches.lines[index]),
           let source = diff.rows[matches.lines[index]].line(on: side) else { return document }
@@ -283,40 +516,61 @@ enum DocumentRenderer {
     let prefix = String(decoding: text.utf16.prefix(range.lowerBound), as: UTF16.self)
     let column = TerminalWidth.of(TerminalText.sanitize(prefix).replacingOccurrences(of: "\t", with: "    "))
     try Task.checkCancellation()
-    let bodyWidth = max(1, document.diffSideWidth - document.diffNumberWidth - 2)
-    return try await prepareDiff(diff, width, side, offset: max(0, column - bodyWidth / 3))
+    let bodyWidth = max(1, document.diffSideWidth - document.diffPrefixWidth)
+    return try await prepareDiff(document.sourceDiff ?? diff, DiffViewport(width: width, offset: max(0, column - bodyWidth / 3)))
   }
 
-  /// Translate source offsets through control sanitization and tab expansion without searching gutters.
-  private static func projectMatch(_ range: Range<Int>, source: String, start: Int, columns: Int, offset: Int) -> Range<Int>? {
-    var sourceOffset = 0, displayOffset = start, column = 0, sourceColumn = 0
-    var lower: Int?, upper: Int?
-    for character in source {
+  private struct SourceGlyph {
+    var sourceStart: Int
+    var sourceEnd: Int
+    var column: Int
+    var columns: Int
+    var displayOffset: Int
+    var displayLength: Int
+  }
+
+  private static func sourceGlyphs(_ source: String) throws -> [SourceGlyph] {
+    var result: [SourceGlyph] = [], sourceOffset = 0, displayOffset = 0, column = 0
+    var widths: [Character: Int] = [:]
+    for (index, character) in source.enumerated() {
+      if index % 1024 == 0 {
+        try Task.checkCancellation()
+      }
       let length = character.utf16.count
       let clean = character == "\t" ? "    " : TerminalText.sanitize(String(character))
-      let intersects = range.isEmpty ? range.lowerBound == sourceOffset : range.overlaps(sourceOffset ..< sourceOffset + length)
       for glyph in clean {
-        let width = TerminalWidth.of(glyph)
-        defer { sourceColumn += width }
-        if sourceColumn < offset {
-          continue
+        let width = widths[glyph] ?? TerminalWidth.of(glyph)
+        if widths.count < 256 {
+          widths[glyph] = width
         }
-        if column + width > columns {
-          return lower.flatMap { lower in upper.map { lower ..< $0 } }
-        }
-        if intersects {
-          lower = lower ?? displayOffset
-          upper = displayOffset + glyph.utf16.count
-        }
+        let displayLength = glyph.utf16.count
+        result.append(.init(
+          sourceStart: sourceOffset,
+          sourceEnd: sourceOffset + length,
+          column: column,
+          columns: width,
+          displayOffset: displayOffset,
+          displayLength: displayLength,
+        ))
         column += width
-        displayOffset += glyph.utf16.count
+        displayOffset += displayLength
       }
       sourceOffset += length
     }
-    if range.isEmpty, range.lowerBound == sourceOffset, column < columns {
-      return displayOffset ..< displayOffset + 1
+    return result
+  }
+
+  private static func lowerBound(_ values: [SourceGlyph], predicate: (SourceGlyph) -> Bool) -> Int {
+    var lower = 0, upper = values.count
+    while lower < upper {
+      let middle = lower + (upper - lower) / 2
+      if predicate(values[middle]) {
+        upper = middle
+      } else {
+        lower = middle + 1
+      }
     }
-    return lower.flatMap { lower in upper.map { lower ..< $0 } }
+    return lower
   }
 }
 

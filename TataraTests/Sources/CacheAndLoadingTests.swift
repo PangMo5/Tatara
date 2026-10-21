@@ -62,7 +62,7 @@ struct CacheAndLoadingTests {
     let diff = ReviewDiff(path: "Source.swift", language: "Swift", status: "changed", rows: [
       .init(left: nil, right: .init(number: 7, spans: [.init(text: source, color: 2)])),
     ])
-    let document = try await DocumentRenderer.prepareDiff(diff, 160, .right)
+    let document = try await DocumentRenderer.prepareDiff(diff, 160)
     #expect(document.lines[0].map(\.text).joined().hasSuffix("needle"))
     #expect(document.searchableLines[0].contains("needle"))
     let rendered = document.displayLines[0].map(\.text).joined()
@@ -80,7 +80,7 @@ struct CacheAndLoadingTests {
         right: .init(number: 3, spans: [.init(text: "ab한", color: 1), .init(text: "😀tail", color: 1, bold: true)]),
       ),
     ])
-    let document = try await DocumentRenderer.prepareDiff(diff, 11, .right)
+    let document = try await DocumentRenderer.prepareDiff(diff, 16)
     #expect(document.displayLines[0].filter { $0.color == 1 } == [
       .init(text: "ab한", color: 1, side: .right),
       .init(text: "😀", color: 1, bold: true, side: .right),

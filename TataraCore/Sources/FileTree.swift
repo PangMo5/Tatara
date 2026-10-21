@@ -13,7 +13,8 @@ public struct FileTreeRow: Equatable, Sendable, Identifiable {
   public let id: String
 
   public var parent: String? {
-    guard let slash = path.lastIndex(of: "/") else { return nil }
+    guard path != FileTree.rootPath else { return nil }
+    guard let slash = path.lastIndex(of: "/") else { return "directory:" + FileTree.rootPath }
     return "directory:" + path[..<slash]
   }
 
@@ -27,6 +28,7 @@ public struct FileTreeRow: Equatable, Sendable, Identifiable {
 }
 
 public struct FileTree: Equatable, Sendable {
+  public static let rootPath = "/"
   public let rows: [FileTreeRow]
   public init(paths: [String]) {
     var children: [String: [FileTreeRow]] = [:]
@@ -38,12 +40,12 @@ public struct FileTree: Equatable, Sendable {
         let current = parent.isEmpty ? name : parent + "/" + name
         let directory = depth < parts.count - 1
         if !directory || directories.insert(current).inserted {
-          children[parent, default: []].append(.init(path: current, name: name, depth: depth, isDirectory: directory))
+          children[parent, default: []].append(.init(path: current, name: name, depth: depth + 1, isDirectory: directory))
         }
         parent = current
       }
     }
-    var ordered: [FileTreeRow] = []
+    var ordered: [FileTreeRow] = paths.isEmpty ? [] : [.init(path: Self.rootPath, name: "/", depth: 0, isDirectory: true)]
     func append(_ parent: String) {
       for row in (children[parent] ?? []).sorted(by: {
         $0.isDirectory == $1.isDirectory ? $0.name.localizedStandardCompare($1.name) == .orderedAscending : $0.isDirectory
@@ -64,6 +66,9 @@ public struct FileTree: Equatable, Sendable {
     }
     var included = paths ?? []
     if let paths {
+      if !paths.isEmpty {
+        included.insert(Self.rootPath)
+      }
       for path in paths {
         var parent = (path as NSString).deletingLastPathComponent
         while !parent.isEmpty, parent != "." {

@@ -78,7 +78,7 @@ public actor Difftastic {
     if let cached = renders[key] {
       return cached.document
     }
-    if let data = try await cache.read("diff-v4", key, nil) {
+    if let data = try await cache.read("diff-v7", key, nil) {
       let document = try await Self.decodeCached(data)
       retain(document, for: key, bytes: data.count)
       return document
@@ -96,7 +96,7 @@ public actor Difftastic {
     let (document, data) = try await Self.prepare(request, key: key, before: before, after: after, runner: runner)
     try Task.checkCancellation()
     retain(document, for: key, bytes: data.count)
-    try await cache.write("diff-v4", key, data)
+    try await cache.write("diff-v7", key, data)
     return document
   }
 

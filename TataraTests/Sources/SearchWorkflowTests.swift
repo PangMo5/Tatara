@@ -9,6 +9,109 @@ import TataraCore
 import TataraKit
 import Testing
 
+private func unifiedFixture() -> ReviewDiff {
+  .init(path: "Example.swift", language: "Swift", status: "changed", rows: [
+    .init(
+      left: .init(number: 1, spans: [.init(text: "struct Example {")]),
+      right: .init(number: 1, spans: [.init(text: "struct Example {")]),
+    ),
+    .init(
+      left: .init(number: 2, spans: [.init(text: "  let oldValue = 1", role: .removed, highlight: "keyword")]),
+      right: .init(number: 2, spans: [.init(text: "  var newValue = 2", role: .added, highlight: "keyword")]),
+    ),
+    .init(left: .init(number: 3, spans: [.init(text: "  obsolete()", role: .removed)]), right: nil),
+    .init(left: .init(number: 4, spans: [.init(text: "}")]), right: .init(number: 3, spans: [.init(text: "}")])),
+  ], revision: .init(mergeBase: "base", head: "head"))
+}
+
+@MainActor
+struct UnifiedDiffTests {
+  private func state() async throws -> WorkspaceFeature.State {
+    let repository = try RepositoryID("owner/repo")
+    let item = ForgeItem(
+      id: .init(repository: repository, number: 1),
+      kind: .pullRequest,
+      title: "Unified review",
+      author: "reviewer",
+      url: URL(string: "https://github.com/owner/repo/pull/1")!,
+    )
+    var state = WorkspaceFeature.State(repository: repository)
+    state.items = [item]
+    state.selectedItemID = item.id
+    state.selectedFilePath = "Example.swift"
+    state.detail = .init(item: item, revision: unifiedFixture().revision, files: [
+      .init(
+        path: "Example.swift",
+        patch: "@@ -1,4 +1,3 @@\n struct Example {\n-  let oldValue = 1\n-  obsolete()\n+  var newValue = 2\n }",
+      ),
+    ])
+    state.pane = .content
+    state.tab = .diff
+    state.contentWidth = 80
+    state.contentHeight = 4
+    state.document = try await DocumentRenderer.prepareDiff(unifiedFixture(), 80)
+    return state
+  }
+
+  @Test func `unified movement visits removed and added rows and reviews the selected source side`() async throws {
+    let initialState = try await state()
+    let store = TestStore(initialState: initialState) { WorkspaceFeature() }
+    await store.send(.commandPressed(.down)) { $0.diffCursor = 1
+      $0.diffSide = .left
+    }
+    await store.send(.commandPressed(.down)) { $0.diffCursor = 2 }
+    await store.send(.commandPressed(.down)) { $0.diffCursor = 3
+      $0.diffSide = .right
+    }
+    await store.send(.commandPressed(.up)) { $0.diffCursor = 2
+      $0.diffSide = .left
+    }
+    store.exhaustivity = .off
+    await store.send(.commandPressed(.comment))
+    #expect(store.state.review?.inlineSide == .left)
+    #expect(store.state.review?.inlineLine == "3")
+    #expect(store.state.review?.selectedFile?.path == "Example.swift")
+    #expect(store.state.review?.inlineAnchorLocked == true)
+    await store.finish()
+  }
+
+  @Test func `unified side switching keeps both sides visible without requesting another diff`() async throws {
+    var state = try await state()
+    state.diffCursor = 1
+    state.diffSide = .left
+    let store = TestStore(initialState: state) { WorkspaceFeature() }
+    await store.send(.commandPressed(.right)) { $0.diffSide = .right
+      $0.diffCursor = 3
+    }
+    #expect(store.state.document == state.document)
+    await store.finish()
+  }
+
+  @Test func `resizing preserves a removed line cursor and viewport through both layouts`() async throws {
+    var state = try await state()
+    state.contentWidth = 120
+    state.document = try await DocumentRenderer.prepareDiff(unifiedFixture(), 120)
+    state.diffCursor = 2
+    state.diffSide = .left
+    state.scroll = 2
+    let location = SourceLocation(path: "Example.swift", line: 3, side: .left)
+    let store = TestStore(initialState: state) { WorkspaceFeature() } withDependencies: {
+      $0[DocumentClient.self] = DocumentRenderer.client
+      $0[DiffClient.self].render = { _ in unifiedFixture() }
+    }
+    store.exhaustivity = .off
+    for width in [80, 140, 60] {
+      await store.send(.viewportChanged(width: width, height: 2))
+      await store.receive(\.contentResponse)
+      await store.finish()
+      let document = store.state.document
+      #expect(document.location(at: store.state.diffCursor, side: store.state.diffSide) == location)
+      #expect(document.location(at: store.state.scroll, side: .left) == location)
+      #expect(document.isUnifiedDiff == (width < 100))
+    }
+  }
+}
+
 @MainActor
 struct SearchWorkflowTests {
   private func state() throws -> WorkspaceFeature.State {
@@ -125,19 +228,26 @@ struct SearchWorkflowTests {
     #expect(!store.state.isSearchingFiles)
   }
 
-  @Test func `folder diff keeps file anchors and attaches current comments without assigning outdated ones to lines`(
+  @Test(arguments: ["Sources", "/"])
+  func `folder diff keeps file anchors and attaches current comments without assigning outdated ones to lines`(
+    directory: String,
   ) async throws {
     var state = try state()
     let detail = try #require(state.detail)
-    state.detail = .init(item: detail.item, revision: detail.revision, files: detail.files, comments: [
-      .init(id: 1, author: "reviewer", body: "Current comment", anchor: .init(path: "Sources/B.swift", line: 1, side: .right)),
-      .init(
-        id: 2,
-        author: "reviewer",
-        body: "Old comment",
-        anchor: .init(path: "Sources/A.swift", line: nil, side: .left, originalLine: 1),
-      ),
-    ])
+    state.detail = .init(
+      item: detail.item,
+      revision: detail.revision,
+      files: detail.files + [.init(path: "Root.swift")],
+      comments: [
+        .init(id: 1, author: "reviewer", body: "Current comment", anchor: .init(path: "Sources/B.swift", line: 1, side: .right)),
+        .init(
+          id: 2,
+          author: "reviewer",
+          body: "Old comment",
+          anchor: .init(path: "Sources/A.swift", line: nil, side: .left, originalLine: 1),
+        ),
+      ],
+    )
     state.pane = .files
     let renderedPaths = Mutex<[String]>([])
     let store = TestStore(initialState: state) { WorkspaceFeature() } withDependencies: {
@@ -150,11 +260,17 @@ struct SearchWorkflowTests {
       $0[DocumentClient.self] = DocumentRenderer.client
     }
     store.exhaustivity = .off
-    await store.send(.fileRowSelected("directory:Sources"))
+    await store.send(.fileRowSelected("directory:" + directory))
     await store.receive(\.contentResponse)
     await store.finish()
-    expectNoDifference(renderedPaths.withLock { $0 }, ["Sources/A.swift", "Sources/B.swift"])
-    expectNoDifference(store.state.selectedDirectoryPath, "Sources")
+    expectNoDifference(
+      renderedPaths.withLock { $0 },
+      directory == "/" ? ["Sources/A.swift", "Sources/B.swift", "Elsewhere/C.swift", "Root.swift"] : [
+        "Sources/A.swift",
+        "Sources/B.swift",
+      ],
+    )
+    expectNoDifference(store.state.selectedDirectoryPath, directory)
     #expect(store.state.selectedFilePath == nil)
     let document = store.state.document
     let location = SourceLocation(path: "Sources/B.swift", line: 1, side: .right)
@@ -193,7 +309,7 @@ struct SearchWorkflowTests {
     let diff = ReviewDiff(path: "Sources/A.swift", language: "Swift", status: "changed", rows: (1 ... 6).map { line in
       .init(left: nil, right: .init(number: line, spans: [.init(text: line == 2 || line == 5 ? "hit hit" : "other")]))
     }, revision: state.detail?.revision)
-    state.document = try await DocumentRenderer.prepareDiff(diff, 80, .right)
+    state.document = try await DocumentRenderer.prepareDiff(diff, 80)
     state.searches[.content] = .init()
     state.searches[.content]?.query = "hit"
     let matches = try await DocumentRenderer.search(state.document, "hit")
@@ -245,19 +361,20 @@ struct SearchWorkflowTests {
   }
 
   @Test(arguments: WorkspaceFeature.Pane.allCases)
-  func `only Tab and Shift Tab change keyboard pane focus`(_ pane: WorkspaceFeature.Pane) async throws {
+  func `pane cycles stay within the active screen`(_ pane: WorkspaceFeature.Pane) async throws {
     var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
     state.pane = pane
+    state.isSelectingItems = pane == .items
     let store = TestStore(initialState: state) { WorkspaceFeature() }
     store.exhaustivity = .off
-    for key in ["h", "l", "1", "2", "3", "enter", "esc"] {
+    for key in ["h", "l", "1", "2", "3", "enter"] {
       await store.send(.keyPressed(key))
     }
     await store.finish()
     expectNoDifference(store.state.pane, pane)
     await store.send(.keyPressed("tab"))
     await store.receive(\.commandPressed)
-    expectNoDifference(store.state.pane.rawValue, (pane.rawValue + 1) % 3)
+    expectNoDifference(store.state.pane, pane == .content ? .files : .content)
     await store.send(.keyPressed("shift-tab"))
     await store.receive(\.commandPressed)
     expectNoDifference(store.state.pane, pane)
@@ -265,12 +382,99 @@ struct SearchWorkflowTests {
 }
 
 struct SearchProjectionTests {
+  @Test func `unified comments stay directly below their actual old or new source row`() async throws {
+    let old = SourceLocation(path: "A.swift", line: 1, side: .left)
+    let new = SourceLocation(path: "A.swift", line: 1, side: .right)
+    let source = ReviewDiff(path: "A.swift", language: "Swift", status: "changed", rows: [
+      .init(
+        left: .init(number: 1, spans: [.init(text: "old", role: .removed)]),
+        right: .init(number: 1, spans: [.init(text: "new", role: .added)]),
+      ),
+      .init(left: nil, right: nil, annotation: [.init(text: "Left comment", role: .comment)], annotationLocation: old),
+      .init(left: nil, right: nil, annotation: [.init(text: "Left body", role: .commentBody)], annotationLocation: old),
+      .init(left: nil, right: nil, annotation: [.init(text: "Right comment", role: .comment)], annotationLocation: new),
+    ])
+    let document = try await DocumentRenderer.prepareDiff(source, 80)
+    #expect(document.row(for: old) == 0)
+    #expect(document.row(for: new) == 3)
+    #expect(document.displayLines[1].map(\.text).joined() == "Left comment")
+    #expect(document.displayLines[2].map(\.text).joined() == "Left body")
+    #expect(document.displayLines[4].map(\.text).joined() == "Right comment")
+    #expect(document.location(at: 1, side: .left) == nil)
+    #expect(document.counterpartRow(at: 0, side: .right) == 3)
+  }
+
+  @Test(arguments: [40, 80, 99, 100, 140])
+  func `every layout preserves deleted added and shared source identities`(_ width: Int) async throws {
+    let source = unifiedFixture()
+    let document = try await DocumentRenderer.prepareDiff(source, width)
+    let text = document.displayLines.map { $0.map(\.text).joined() }.joined(separator: "\n")
+    #expect(text.contains("oldValue") && text.contains("newValue") && text.contains("obsolete()"))
+    for (side, count) in [(InlineComment.Side.left, 4), (.right, 3)] {
+      for line in 1 ... count {
+        let location = SourceLocation(path: source.path, line: line, side: side)
+        let row = try #require(document.row(for: location))
+        #expect(document.location(at: row, side: side) == location)
+      }
+    }
+    let old = try await DocumentRenderer.search(document, "oldValue|obsolete")
+    #expect(old.lines.count == 2 && old.sides.allSatisfy { $0 == .left })
+    for (index, row) in old.lines.enumerated() {
+      let range = try #require(old.ranges[index])
+      let shown = document.displayLines[row].map(\.text).joined() as NSString
+      #expect(["oldValue", "obsolete"].contains(shown.substring(with: NSRange(range))))
+    }
+    if width < 100 {
+      #expect(document.diff?.rows.count == 5)
+      #expect(try await DocumentRenderer.search(document, "struct").lines.count == 1)
+      #expect(document.displayLines[1].map(\.text).joined().contains("-"))
+      #expect(document.displayLines[3].map(\.text).joined().contains("+"))
+    }
+  }
+
+  @Test func `unified annotation rows do not acquire anchors and retain combined file provenance`() async throws {
+    let a = unifiedFixture()
+    var rows = a.rows.map { ReviewDiffRow(left: $0.left, right: $0.right, path: "A.swift") }
+    rows.append(.init(left: nil, right: nil, path: "A.swift", annotation: [.init(text: "Review note", role: .commentBody)]))
+    rows += a.rows.map { ReviewDiffRow(left: $0.left, right: $0.right, path: "B.swift") }
+    let document = try await DocumentRenderer.prepareDiff(
+      .init(path: "Sources", language: "Swift", status: "changed", rows: rows),
+      80,
+    )
+    let note = try #require(document.displayLines.firstIndex { $0.map(\.text).joined() == "Review note" })
+    #expect(document.location(at: note, side: .left) == nil)
+    #expect(document.location(at: note, side: .right) == nil)
+    #expect(document.row(for: .init(path: "A.swift", line: 3, side: .left)) == 2)
+    #expect(document.row(for: .init(path: "B.swift", line: 3, side: .left)) == 8)
+  }
+
+  @Test func `unified long line search projection keeps removed rows and original alignment`() async throws {
+    let diff = ReviewDiff(path: "A.swift", language: "Swift", status: "changed", rows: [
+      .init(
+        left: .init(number: 7, spans: [.init(text: String(repeating: "한글 ", count: 100) + "oldNeedle", role: .removed)]),
+        right: .init(number: 8, spans: [.init(text: "newValue", role: .added)]),
+      ),
+    ])
+    let document = try await DocumentRenderer.prepareDiff(diff, 80)
+    let matches = try await DocumentRenderer.search(document, "oldNeedle")
+    #expect(matches.ranges == [nil])
+    #expect(matches.sides == [.left])
+    let shown = try await DocumentRenderer.revealMatch(document, matches, 0, 80)
+    #expect(shown.displayLines[0].map(\.text).joined().contains("oldNeedle"))
+    #expect(shown.sourceDiff == diff)
+    #expect(shown.diff?.rows.map { $0.left?.number } == document.diff?.rows.map { $0.left?.number })
+    #expect(shown.diff?.rows.map { $0.right?.number } == document.diff?.rows.map { $0.right?.number })
+    let wide = try await DocumentRenderer.prepareDiff(#require(shown.sourceDiff), 140)
+    #expect(wide.diff?.rows.count == 1)
+    #expect(wide.diff?.rows.first?.left?.number == 7 && wide.diff?.rows.first?.right?.number == 8)
+  }
+
   @Test func `regex search is case sensitive and preserves Unicode offsets without matching line numbers`() async throws {
     let source = "\t한글 Hit hit1 hit22"
     let diff = ReviewDiff(path: "A.swift", language: "Swift", status: "changed", rows: [
       .init(left: nil, right: .init(number: 22, spans: [.init(text: source)])),
     ])
-    let document = try await DocumentRenderer.prepareDiff(diff, 80, .right)
+    let document = try await DocumentRenderer.prepareDiff(diff, 80)
     let matches = try await DocumentRenderer.search(document, "hit[0-9]+")
     expectNoDifference(matches.lines, [0, 0])
     expectNoDifference(matches.sourceRanges, [8 ..< 12, 13 ..< 18])
@@ -289,7 +493,7 @@ struct SearchProjectionTests {
     let diff = ReviewDiff(path: "A.swift", language: "Swift", status: "changed", rows: [
       .init(left: nil, right: .init(number: 7, spans: [.init(text: source)])),
     ])
-    let document = try await DocumentRenderer.prepareDiff(diff, 80, .right)
+    let document = try await DocumentRenderer.prepareDiff(diff, 80)
     let matches = try await DocumentRenderer.search(document, "needle")
     expectNoDifference(matches.ranges, [nil])
     let revealed = try await DocumentRenderer.revealMatch(document, matches, 0, 80)
@@ -297,7 +501,8 @@ struct SearchProjectionTests {
     let visible = try await DocumentRenderer.search(revealed, "needle")
     #expect(visible.ranges[0] != nil)
     expectNoDifference(revealed.location(at: 0, side: .right), .init(path: "A.swift", line: 7, side: .right))
-    expectNoDifference(revealed.diff, document.diff)
+    expectNoDifference(revealed.sourceDiff, document.sourceDiff)
+    expectNoDifference(revealed.diff?.rows.first?.right, document.diff?.rows.first?.right)
   }
 
   @Test func `labels toggle quoted qualifiers without changing quoted body searches`() {
@@ -337,7 +542,7 @@ extension SearchWorkflowTests {
       path: "Sources/A.swift", language: "Swift", status: "changed",
       rows: texts.enumerated().map { .init(left: nil, right: .init(number: $0.offset + 1, spans: [.init(text: $0.element)])) },
       revision: state.detail?.revision,
-    ), 80, .right)
+    ), 80)
     let word = try #require(try await SearchPattern.word(in: [.init(text: "token")], column: 0, whole: true))
     let matches = try await DocumentRenderer.search(state.document, word.pattern)
     let store = TestStore(initialState: state) { WorkspaceFeature() } withDependencies: {
@@ -391,7 +596,6 @@ extension SearchWorkflowTests {
     await store.receive(\.commandPressed)
     await store.send(.keyPressed("z")) { $0.pendingPrefix = "z" }
     await store.send(.keyPressed("esc")) { $0.pendingPrefix = nil }
-    await store.receive(\.commandPressed)
     expectNoDifference(store.state.pane, .items)
     let overrides = try Keymap(overrides: ["searchWordBackward": ["g#"], "searchPartialWordBackward": ["#"]])
     expectNoDifference(overrides.command(for: "g#"), .searchWordBackward)
@@ -408,7 +612,7 @@ extension SearchWorkflowTests {
       path: "Sources/A.swift", language: "Swift", status: "changed",
       rows: (1 ... 60).map { .init(left: nil, right: .init(number: $0, spans: [.init(text: "source")])) },
       revision: state.detail?.revision,
-    ), 80, .right)
+    ), 80)
     let store = TestStore(initialState: state) { WorkspaceFeature() }
     await store.send(.commandPressed(.cursorToTop)) { $0.scroll = 30 }
     await store.send(.commandPressed(.cursorToCenter)) { $0.scroll = 25 }

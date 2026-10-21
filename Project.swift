@@ -60,7 +60,7 @@ let project = Project(
       bundleId: "dev.PangMo5.Tatara.Tests", deploymentTargets: platforms,
       // Exercise the stateless renderer without linking the executable entry point.
       sources: ["TataraTests/Sources/**", "TataraTUI/Sources/DocumentRenderer.swift", "TataraTUI/Sources/Palette.swift",
-                "TataraTUI/Sources/CommentRenderer.swift",
+                "TataraTUI/Sources/CommentRenderer.swift", "TataraTUI/Sources/CommentPresentation.swift",
                 "TataraTUI/Sources/WorkspacePresentation.swift", "TataraTUI/Sources/EditorPresentation.swift",
                 "TataraTUI/Sources/TerminalScreen.swift", "TataraTUI/Sources/Localization.swift",
                 "TataraTUI/Sources/Generated/LocalizedStrings.swift"],

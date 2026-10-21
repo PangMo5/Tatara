@@ -297,10 +297,10 @@ struct WorkspaceInteractionTests {
     state.contentHeight = 20
     let store = TestStore(initialState: state) { WorkspaceFeature() }
     await store.send(.keyPressed("ctrl-f"))
-    await store.receive(\.commandPressed) { $0.scroll = 10 }
+    await store.receive(\.commandPressed) { $0.scroll = 18 }
     await store.send(.keyPressed("ctrl-b"))
     await store.receive(\.commandPressed) { $0.scroll = 0 }
-    await store.send(.commandPressed(.contentHalfPageUp))
+    await store.send(.commandPressed(.contentPageUp))
     #expect(store.state.pane == pane)
     #expect(store.state.selectedItemID == item.id)
   }
@@ -308,15 +308,15 @@ struct WorkspaceInteractionTests {
   @Test func `help search matches localized labels and actual bindings`() async throws {
     var state = try WorkspaceFeature.State(
       repository: RepositoryID("owner/repo"),
-      strings: ["Scroll main pane down": "메인 패널 아래로"],
+      strings: ["Page down in content": "메인 패널 아래로"],
     )
     state.pane = .files
     state.showsHelp = true
     state.searches[.help] = .init()
     state.searches[.help]?.query = "메인"
-    #expect(state.visibleHelp == [.contentHalfPageDown])
+    #expect(state.visibleHelp == [.contentPageDown])
     state.searches[.help]?.query = "ctrl-f"
-    #expect(state.visibleHelp == [.contentHalfPageDown])
+    #expect(state.visibleHelp == [.contentPageDown])
     let store = TestStore(initialState: state) { WorkspaceFeature() }
     await store.send(.keyPressed("esc")) { $0.searches[.help] = .init() }
     #expect(store.state.showsHelp)
@@ -455,7 +455,7 @@ struct WorkspaceInteractionTests {
     state.searches[.files] = .init()
     state.searches[.files]?.query = "One"
     state.fileMatches = ["Sources/One.swift": [1]]
-    #expect(state.visibleFileRows.map(\.path) == ["Sources", "Sources/One.swift"])
+    #expect(state.visibleFileRows.map(\.path) == ["/", "Sources", "Sources/One.swift"])
     state.preferences.filesView = .list
     #expect(state.visibleFileRows.map(\.path) == ["Sources/One.swift"])
     state.searches[.files] = nil

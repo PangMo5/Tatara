@@ -1,0 +1,212 @@
+// SPDX-FileCopyrightText: 2026 PangMo5 and contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+
+import ComposableArchitecture
+import Foundation
+import TataraCore
+
+@Reducer
+public struct CommentFeature {
+  @ObservableState
+  public struct State: Equatable {
+    public var item: ForgeItem
+    public var expectedHead: String?
+    public var target: DiscussionComment
+    public var context: CommentContext?
+    public var operation: CommentOperation
+    public var body: String
+    public var reaction = ReactionContent.thumbsUp
+    public var isLoading = true
+    public var isPreparing = false
+    public var isConfirming = false
+    public var isSubmitting = false
+    public var hasSubmittedPreview = false
+    public var preview: ReviewDocument?
+    public var previewScroll = 0
+    public var generation = 0
+    public var error: TataraError?
+    public var strings: [String: String]
+
+    public init(
+      item: ForgeItem,
+      expectedHead: String?,
+      target: DiscussionComment,
+      operation: CommentOperation = .reply,
+      strings: [String: String] = [:],
+    ) {
+      self.item = item
+      self.expectedHead = expectedHead
+      self.target = target
+      self.operation = operation
+      body = operation == .edit ? target.body : ""
+      self.strings = strings
+    }
+
+    public var mutation: CommentMutation? {
+      guard let context, context.allows(operation) else { return nil }
+      let submittedBody = operation == .reply && target.anchor == nil ? "@\(context.comment.author)\n\n" + body : body
+      return .init(
+        item: item,
+        expectedHead: expectedHead,
+        context: context,
+        operation: operation,
+        body: submittedBody,
+        reaction: reaction,
+      )
+    }
+
+    public func text(_ key: String) -> String {
+      strings[key] ?? key
+    }
+  }
+
+  public enum Action: Sendable {
+    case appeared
+    case contextResponse(Result<CommentContext, TataraError>)
+    case operationSelected(CommentOperation)
+    case bodyChanged(String)
+    case reactionSelected(ReactionContent)
+    case previewPressed(width: Int)
+    case previewResponse(generation: Int, Result<ReviewDocument, TataraError>)
+    case previewScrolled(Int)
+    case editPressed
+    case confirmPressed
+    case submissionResponse(Result<Void, TataraError>)
+    case close
+    case delegate(Delegate)
+    public enum Delegate: Sendable { case changed, dismissed }
+  }
+
+  @Dependency(ForgeClient.self) var forge
+  @Dependency(DocumentClient.self) var documents
+  enum CancelID { case context, preview, submission }
+  public init() {}
+
+  public var body: some ReducerOf<Self> {
+    Reduce { state, action in
+      switch action {
+      case .appeared:
+        let item = state.item, target = state.target
+        return .run { [forge] send in
+          do { try await send(.contextResponse(.success(forge.commentContext(item, target)))) }
+          catch is CancellationError {} catch { await send(.contextResponse(.failure(.wrapping(error)))) }
+        }.cancellable(id: CancelID.context)
+      case let .contextResponse(result):
+        state.isLoading = false
+        switch result {
+        case let .success(context):
+          if state.operation == .edit, state.body == state.target.body {
+            state.body = context.comment.body
+          }
+          state.context = context
+          state.target = context.comment
+          if state.operation == .resolve, context.thread?.isResolved == true {
+            state.operation = .unresolve
+          }
+          if !context.allows(state.operation) {
+            state.error = .init(.unavailable)
+          }
+        case let .failure(error): state.error = error
+        }
+        return .none
+      case let .operationSelected(operation):
+        guard !state.isSubmitting, state.context?.allows(operation) == true else { return .none }
+        state.operation = operation
+        state.body = operation == .edit ? state.target.body : ""
+        state.isConfirming = false
+        state.preview = nil
+        state.isPreparing = false
+        state.error = nil
+        state.generation += 1
+        return .cancel(id: CancelID.preview)
+      case let .bodyChanged(value):
+        guard !state.isSubmitting else { return .none }
+        state.body = value
+        state.isConfirming = false
+        state.isPreparing = false
+        state.generation += 1
+        return .cancel(id: CancelID.preview)
+      case let .reactionSelected(value):
+        guard !state.isSubmitting else { return .none }
+        state.reaction = value
+        state.isConfirming = false
+        state.isPreparing = false
+        state.generation += 1
+        return .cancel(id: CancelID.preview)
+      case let .previewPressed(width):
+        guard !state.isSubmitting, !state.isLoading, let mutation = state.mutation else { return .none }
+        if mutation.operation == .reply || mutation.operation == .edit,
+           mutation.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || state.body
+           .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+          state.error = .init(.emptyReview)
+          return .none
+        }
+        state.generation += 1
+        let generation = state.generation
+        state.isPreparing = true
+        state.error = nil
+        let body: String
+        if mutation.operation == .reply || mutation.operation == .edit {
+          body = mutation.body
+        } else if mutation.operation == .react {
+          let remove = mutation.context.reactions.first { $0.content == mutation.reaction }?.viewerHasReacted == true
+          body = state.text(remove ? "Remove reaction" : "Add reaction") + ": " + state
+            .text(mutation.reaction.symbol) + "\n\n" + mutation.context.comment.body
+        } else {
+          body = mutation.context.comment.body
+        }
+        return .run { [documents] send in
+          do { try await send(.previewResponse(
+            generation: generation,
+            .success(documents.prepareComment(body, max(1, width))),
+          )) } catch is CancellationError {} catch { await send(.previewResponse(
+            generation: generation,
+            .failure(.wrapping(error)),
+          )) }
+        }.cancellable(id: CancelID.preview, cancelInFlight: true)
+      case let .previewResponse(generation, result):
+        guard generation == state.generation else { return .none }
+        state.isPreparing = false
+        switch result {
+        case let .success(document): state.preview = document
+          state.previewScroll = 0
+          state.isConfirming = true
+          state.hasSubmittedPreview = false
+        case let .failure(error): state.error = error
+        }
+        return .none
+      case let .previewScrolled(delta):
+        state.previewScroll = max(0, min(max(0, (state.preview?.lines.count ?? 0) - 1), state.previewScroll + delta))
+        return .none
+      case .editPressed:
+        guard !state.isSubmitting else { return .none }
+        state.isConfirming = false
+        return .none
+      case .confirmPressed:
+        guard state.isConfirming, !state.hasSubmittedPreview, !state.isSubmitting, !state.isPreparing, state.preview != nil,
+              let mutation = state.mutation else { return .none }
+        state.isSubmitting = true
+        state.hasSubmittedPreview = true
+        state.error = nil
+        return .run { [forge] send in
+          do { try await forge.mutateComment(mutation)
+            await send(.submissionResponse(.success(())))
+          } catch { await send(.submissionResponse(.failure(.wrapping(error)))) }
+        }.cancellable(id: CancelID.submission)
+      case let .submissionResponse(result):
+        state.isSubmitting = false
+        switch result {
+        case .success: return .send(.delegate(.changed))
+        case let .failure(error): state.error = error
+          state.isConfirming = false
+        }
+        return .none
+      case .close:
+        guard !state.isSubmitting else { return .none }
+        return .send(.delegate(.dismissed))
+      case .delegate: return .none
+      }
+    }
+  }
+}

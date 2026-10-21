@@ -17,11 +17,26 @@ public struct ReviewDiffRow: Equatable, Codable, Sendable {
   public let right: ReviewDiffLine?
   public let path: String?
   public let annotation: [DiffSpan]?
-  public init(left: ReviewDiffLine?, right: ReviewDiffLine?, path: String? = nil, annotation: [DiffSpan]? = nil) {
+  /// Placement of a comment, distinct from a source row or a reviewable anchor.
+  public let annotationLocation: SourceLocation?
+  public let leftOffset: Int
+  public let rightOffset: Int
+  public init(
+    left: ReviewDiffLine?,
+    right: ReviewDiffLine?,
+    path: String? = nil,
+    annotation: [DiffSpan]? = nil,
+    annotationLocation: SourceLocation? = nil,
+    leftOffset: Int = 0,
+    rightOffset: Int = 0,
+  ) {
     self.left = left
     self.right = right
     self.path = path
     self.annotation = annotation
+    self.annotationLocation = annotationLocation
+    self.leftOffset = leftOffset
+    self.rightOffset = rightOffset
   }
 
   public func line(on side: InlineComment.Side) -> ReviewDiffLine? {
@@ -130,7 +145,12 @@ public struct ReviewDiff: Equatable, Codable, Sendable {
         if offset < change.start {
           spans.append(.init(text: String(decoding: bytes[offset ..< change.start], as: UTF8.self)))
         }
-        spans.append(.init(text: change.content, bold: change.highlight == "keyword", role: color == 1 ? .removed : .added))
+        spans.append(.init(
+          text: change.content,
+          bold: ["keyword", "type", "delimiter"].contains(change.highlight),
+          role: color == 1 ? .removed : .added,
+          highlight: change.highlight,
+        ))
         offset = change.end
       }
       if offset < bytes.count {

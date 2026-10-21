@@ -9,6 +9,25 @@ import TermLoomTextArea
 extension TerminalWorkspace {
   func handleMouse(_ event: MouseEvent) {
     guard let store else { return }
+    if let picker = store.picker {
+      let rect = geometry.popup
+      if event.kind == .down(.left), rect.contains(event.position), event.position.y >= rect.y + 5,
+         event.position.y < rect.bottom - 3
+      {
+        let count = max(1, rect.height - 8), start = max(0, picker.selection - count + 1)
+        store.send(.pickerRowActivated(start + event.position.y - rect.y - 5))
+        updateViewport()
+      }
+      return
+    }
+    if !store.isSelectingItems, geometry.items.contains(event.position), event.kind == .down(.left) {
+      store.send(.commandPressed(.pickItem))
+      return
+    }
+    if event.kind == .scrollLeft || event.kind == .scrollRight {
+      store.send(.horizontalScrolled(event.kind == .scrollLeft ? -6 : 6))
+      return
+    }
     let scope: WorkspaceFeature.SearchScope
     let rect: Rect
     if store.showsHelp {
@@ -30,6 +49,19 @@ extension TerminalWorkspace {
       rect = geometry.content
     }
     guard rect.contains(event.position) else { return }
+    if scope == .content, event.kind == .down(.left), event.position.y == rect.y + 1 {
+      let localization = Localization(language: store.preferences.language)
+      var x = rect.x + 1
+      for tab in WorkspaceFeature.ContentTab.allCases {
+        let width = TerminalWidth.of(localization(WorkspacePresentation.tabTitle(tab))) + 3
+        if event.position.x >= x, event.position.x < x + width {
+          store.send(.tabSelected(tab))
+          return
+        }
+        x += width
+      }
+      return
+    }
     if event.kind == .scrollUp || event.kind == .scrollDown {
       store.send(.wheelScrolled(scope, delta: event.kind == .scrollUp ? -3 : 3))
       return
@@ -65,7 +97,9 @@ extension TerminalWorkspace {
         store.send(.fileRowActivated(store.visibleFileRows[row].id))
       }
     case .content:
-      let side: InlineComment.Side = rect.width - 2 < 100 ? store.diffSide : event.position.x - rect.x - 1 < store.document
+      let side: InlineComment.Side = store.document.isUnifiedDiff
+        ? store.document.sourceSide(at: row, preferred: store.diffSide) ?? store.diffSide : event.position.x - rect.x - 1 < store
+        .document
         .diffSideWidth ? .left : .right
       store.send(.diffCursorSelected(row: row, side: side))
     case .help: break
@@ -75,7 +109,9 @@ extension TerminalWorkspace {
   func handleEditor(_ event: TerminalEvent) -> ApplicationUpdate {
     guard let store else { return .ignore }
     if case let .key(key) = event, key.key == .escape {
-      if store.filterEditor != nil {
+      if store.commentEditor != nil {
+        store.send(.commentEditor(.close))
+      } else if store.filterEditor != nil {
         store.send(.filterEditor(.close))
       } else {
         store.send(.reviewDismissed)
@@ -91,6 +127,26 @@ extension TerminalWorkspace {
     }
     if case let .action(action) = event {
       let id = action.rawValue
+      if store.commentEditor != nil {
+        if id == "comment-preview" {
+          store.send(.commentEditor(.previewPressed(width: geometry.popup.width - 4)))
+        } else if id == "comment-confirm" {
+          store.send(.commentEditor(.confirmPressed))
+        } else if id == "comment-back" {
+          store.send(.commentEditor(.editPressed))
+        } else if id == "comment-close" {
+          store.send(.commentEditor(.close))
+        } else if id.hasPrefix("comment-op:"), let operation = CommentOperation(rawValue: String(id.dropFirst(11))) {
+          store.send(.commentEditor(.operationSelected(operation)))
+          editors["comment-body"] = nil
+          editorTexts["comment-body"] = nil
+        } else if id.hasPrefix("reaction:"),
+                  let reaction = ReactionContent(rawValue: String(id.dropFirst(9)))
+        {
+          store.send(.commentEditor(.reactionSelected(reaction)))
+        }
+        return .redraw
+      }
       if store.filterEditor != nil {
         switch id {
         case "labels-prev": store.send(.filterEditor(.labelsScrolled(-1)))
@@ -192,6 +248,19 @@ extension TerminalWorkspace {
         return .redraw
       }
     }
+    if let comment = store.commentEditor, comment.isConfirming {
+      if case let .key(key) = event, key.modifiers.contains(.control), key.key == .character("f") || key.key == .character("b") {
+        store.send(.commentEditor(.previewScrolled(key.key == .character("f") ? max(1, geometry.popup.height - 11) : -max(
+          1,
+          geometry.popup.height - 11,
+        ))))
+        return .redraw
+      }
+      if case let .mouse(mouse) = event, mouse.kind == .scrollDown || mouse.kind == .scrollUp {
+        store.send(.commentEditor(.previewScrolled(mouse.kind == .scrollDown ? 3 : -3)))
+        return .redraw
+      }
+    }
     guard let id = focusedControl?.rawValue else { return .ignore }
     let value: String? = switch id {
     case "filter-query": store.filterEditor?.query
@@ -200,6 +269,7 @@ extension TerminalWorkspace {
     case "inline-start": store.review?.inlineStartLine
     case "review-inline": store.review?.inlineBody
     case "review-body": store.review?.body
+    case "comment-body": store.commentEditor?.body
     default: nil
     }
     guard let value else { return .ignore }
@@ -218,7 +288,7 @@ extension TerminalWorkspace {
       }
     }.first }
     let updated: String
-    if id == "review-inline" || id == "review-body" {
+    if id == "review-inline" || id == "review-body" || id == "comment-body" {
       var editor = editorTexts[id] == value ? editors[id] ?? TextAreaState(text: value) : TextAreaState(text: value)
       let previousLines = editor.lines
       if let pointer, let rect {
@@ -276,6 +346,7 @@ extension TerminalWorkspace {
     case "inline-start": store.send(.review(.inlineStartLineChanged(updated)))
     case "review-inline": store.send(.review(.inlineBodyChanged(updated)))
     case "review-body": store.send(.review(.bodyChanged(updated)))
+    case "comment-body": store.send(.commentEditor(.bodyChanged(updated)))
     default: break
     }
     return .redraw

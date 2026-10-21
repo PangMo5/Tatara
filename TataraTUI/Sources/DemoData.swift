@@ -140,6 +140,23 @@ enum DemoData {
             .replacingOccurrences(of: "ReviewQueue", with: "Selection") : source).utf8)
       },
       submit: { _ in throw TataraError(.unavailable, detail: "Demo mode cannot publish reviews.") },
+      commentContext: { _, comment in .init(
+        comment: comment,
+        canReply: true,
+        canEdit: true,
+        canDelete: true,
+        canReact: true,
+        thread: comment
+          .anchor == nil ? nil : .init(
+            id: "demo-thread",
+            isResolved: false,
+            canResolve: true,
+            canUnresolve: true,
+            canReply: true,
+          ),
+        viewer: "demo",
+      ) },
+      mutateComment: { _ in throw TataraError(.unavailable, detail: "Demo mode cannot publish comment changes.") },
     )
   }
 }
