@@ -4,6 +4,16 @@ A terminal workspace for reading and reviewing pull requests, with
 [difftastic](https://github.com/Wilfred/difftastic) for structural diffs,
 Vim motions, and a pane-based review workflow.
 
+*Tatara* (たたら) is a traditional Japanese furnace
+used to smelt iron and steel. Tatara brings that idea to pull requests: a place to
+examine changes, work through feedback, and refine code before it is merged.
+
+> [!WARNING]
+> Tatara is pre-release software under active development. Features, key bindings,
+> and configuration may change, and you may encounter bugs. Use it with care, and
+> check the target repository and preview before posting comments or reviews to
+> GitHub.
+
 ![Tatara's Catppuccin Mocha workspace with a side-by-side difftastic review](docs/images/tatara.png)
 
 Synthetic demo rendered from actual PTY cells with Maple Mono NF KR 12pt and
