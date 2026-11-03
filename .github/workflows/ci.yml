@@ -11,16 +11,24 @@ concurrency:
   cancel-in-progress: true
 jobs:
   verify:
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 45
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
     steps:
-      - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v4
-      - uses: astral-sh/setup-uv@v10
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: jdx/mise-action@v5.2.6
+        with:
+          version: 2026.10.25
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: 0.13.7
       - name: Toolchain
-        run: swift --version
+        run: swift Scripts/Tatara.swift toolchain
+      - name: Secret scan
+        run: gitleaks git . --log-opts=--all --redact
       - name: Resolve and generate
         run: swift Scripts/Tatara.swift generate --locked
       - name: Formatting, localization and notices
@@ -31,6 +39,8 @@ jobs:
         run: swift Scripts/Tatara.swift build Release
       - name: PTY runtime
         run: swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara
+      - name: PR selection and quick picker
+        run: swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara --reading-workspace
       - name: Search, scrollbar and loading responsiveness
         run: swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara --workspace
       - name: Wheel axes and sidebar scroll margins
@@ -39,9 +49,11 @@ jobs:
         run: swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara --features
       - name: Multiline editor and complete review preview
         run: swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara --editors
+      - name: Source search and combined review
+        run: swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara --search-review
       - name: Large input and in-flight focus changes
         run: swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara --stress
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7.0.2
         if: always()
         with:
           name: validation

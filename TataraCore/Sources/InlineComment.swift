@@ -3,14 +3,12 @@
 
 import Foundation
 
+// MARK: - InlineComment
+
 public struct InlineComment: Equatable, Codable, Sendable {
-  public enum Side: String, Codable, CaseIterable, Sendable { case left = "LEFT", right = "RIGHT" }
-  public var path: String
-  public var line: Int
-  public var side: Side
-  public var body: String
-  public var startLine: Int?
-  public var startSide: Side?
+
+  // MARK: Lifecycle
+
   public init(path: String, line: Int, side: Side, body: String, startLine: Int? = nil) {
     self.path = path
     self.line = line
@@ -20,10 +18,27 @@ public struct InlineComment: Equatable, Codable, Sendable {
     startSide = startLine == nil ? nil : side
   }
 
+  // MARK: Public
+
+  public enum Side: String, Codable, CaseIterable, Sendable { case left = "LEFT", right = "RIGHT" }
+
+  public var path: String
+  public var line: Int
+  public var side: Side
+  public var body: String
+  public var startLine: Int?
+  public var startSide: Side?
+
+  // MARK: Internal
+
   enum CodingKeys: String, CodingKey { case path, line, side, body
-    case startLine = "start_line", startSide = "start_side"
+    case startLine = "start_line"
+    case startSide = "start_side"
   }
+
 }
+
+// MARK: - ReviewAnchor
 
 /// GitHub anchors are source coordinates from its patch, never difftastic screen coordinates.
 public enum ReviewAnchor {
@@ -37,16 +52,23 @@ public enum ReviewAnchor {
   }
 }
 
+// MARK: - ReviewAnchorIndex
+
 /// Build once with a changed-file snapshot; querying a review range is logarithmic.
 public struct ReviewAnchorIndex: Equatable, Sendable {
-  private let left: [ClosedRange<Int>]
-  private let right: [ClosedRange<Int>]
+
+  // MARK: Lifecycle
 
   public init(patch: String?) {
-    var old = 0, new = 0
+    var old = 0
+    var new = 0
     var active = false
-    var oldLower: Int?, oldUpper: Int?, newLower: Int?, newUpper: Int?
-    var left: [ClosedRange<Int>] = [], right: [ClosedRange<Int>] = []
+    var oldLower: Int?
+    var oldUpper: Int?
+    var newLower: Int?
+    var newUpper: Int?
+    var left = [ClosedRange<Int>]()
+    var right = [ClosedRange<Int>]()
     func finish() {
       if let oldLower, let oldUpper {
         left.append(oldLower ... oldUpper)
@@ -64,11 +86,17 @@ public struct ReviewAnchorIndex: Equatable, Sendable {
         newUpper = nil
         active = false
         let parts = row.split(separator: " ")
-        guard parts.count >= 4, parts[1].hasPrefix("-"), parts[2].hasPrefix("+"),
-              let beforeToken = parts[1].dropFirst().split(separator: ",").first,
-              let afterToken = parts[2].dropFirst().split(separator: ",").first,
-              let before = Int(beforeToken), let after = Int(afterToken),
-              before >= 0, after >= 0 else { continue }
+        guard
+          parts.count >= 4,
+          parts[1].hasPrefix("-"),
+          parts[2].hasPrefix("+"),
+          let beforeToken = parts[1].dropFirst().split(separator: ",").first,
+          let afterToken = parts[2].dropFirst().split(separator: ",").first,
+          let before = Int(beforeToken),
+          let after = Int(afterToken),
+          before >= 0,
+          after >= 0
+        else { continue }
         old = before
         new = after
         active = true
@@ -111,10 +139,13 @@ public struct ReviewAnchorIndex: Equatable, Sendable {
     self.right = indexed(right)
   }
 
+  // MARK: Public
+
   public func contains(range: ClosedRange<Int>, side: InlineComment.Side) -> Bool {
     guard range.lowerBound > 0 else { return false }
     let hunks = side == .left ? left : right
-    var lower = 0, upper = hunks.count
+    var lower = 0
+    var upper = hunks.count
     while lower < upper {
       let middle = lower + (upper - lower) / 2
       if hunks[middle].lowerBound <= range.lowerBound {
@@ -125,4 +156,10 @@ public struct ReviewAnchorIndex: Equatable, Sendable {
     }
     return lower > 0 && hunks[lower - 1].upperBound >= range.upperBound
   }
+
+  // MARK: Private
+
+  private let left: [ClosedRange<Int>]
+  private let right: [ClosedRange<Int>]
+
 }

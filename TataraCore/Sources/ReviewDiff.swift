@@ -3,24 +3,24 @@
 
 import Foundation
 
+// MARK: - ReviewDiffLine
+
 public struct ReviewDiffLine: Equatable, Codable, Sendable {
-  public let number: Int
-  public let spans: [DiffSpan]
   public init(number: Int, spans: [DiffSpan]) {
     self.number = number
     self.spans = spans
   }
+
+  public let number: Int
+  public let spans: [DiffSpan]
 }
 
+// MARK: - ReviewDiffRow
+
 public struct ReviewDiffRow: Equatable, Codable, Sendable {
-  public let left: ReviewDiffLine?
-  public let right: ReviewDiffLine?
-  public let path: String?
-  public let annotation: [DiffSpan]?
-  /// Placement of a comment, distinct from a source row or a reviewable anchor.
-  public let annotationLocation: SourceLocation?
-  public let leftOffset: Int
-  public let rightOffset: Int
+
+  // MARK: Lifecycle
+
   public init(
     left: ReviewDiffLine?,
     right: ReviewDiffLine?,
@@ -39,20 +39,28 @@ public struct ReviewDiffRow: Equatable, Codable, Sendable {
     self.rightOffset = rightOffset
   }
 
+  // MARK: Public
+
+  public let left: ReviewDiffLine?
+  public let right: ReviewDiffLine?
+  public let path: String?
+  public let annotation: [DiffSpan]?
+  /// Placement of a comment, distinct from a source row or a reviewable anchor.
+  public let annotationLocation: SourceLocation?
+  public let leftOffset: Int
+  public let rightOffset: Int
+
   public func line(on side: InlineComment.Side) -> ReviewDiffLine? {
     side == .left ? left : right
   }
+
 }
 
+// MARK: - ReviewDiff
+
 public struct ReviewDiff: Equatable, Codable, Sendable {
-  public let path: String
-  public let language: String
-  public let status: String
-  public let rows: [ReviewDiffRow]
-  public let revision: PullRequestRevision?
-  public let previousPath: String?
-  /// Names immutable forge revisions and diff-engine options; supplied by the live producer.
-  public let cacheIdentity: String?
+
+  // MARK: Lifecycle
 
   public init(
     path: String,
@@ -71,6 +79,17 @@ public struct ReviewDiff: Equatable, Codable, Sendable {
     self.previousPath = previousPath
     self.cacheIdentity = cacheIdentity
   }
+
+  // MARK: Public
+
+  public let path: String
+  public let language: String
+  public let status: String
+  public let rows: [ReviewDiffRow]
+  public let revision: PullRequestRevision?
+  public let previousPath: String?
+  /// Names immutable forge revisions and diff-engine options; supplied by the live producer.
+  public let cacheIdentity: String?
 
   /// Difftastic owns alignment and token changes. Coordinates are never recovered from ANSI columns.
   public static func decode(_ data: Data, before: String, after: String, path: String, context: Int = 3) throws -> Self {
@@ -100,7 +119,8 @@ public struct ReviewDiff: Equatable, Codable, Sendable {
       }
       return lines
     }
-    let left = sourceLines(before), right = sourceLines(after)
+    let left = sourceLines(before)
+    let right = sourceLines(after)
     if file.status == "unchanged" || file.language.lowercased().contains("binary") {
       return .init(path: path, language: file.language, status: file.status, rows: [])
     }
@@ -115,7 +135,8 @@ public struct ReviewDiff: Equatable, Codable, Sendable {
     guard file.status == "changed", let alignment = file.aligned_lines, let chunks = file.chunks else {
       throw TataraError(.invalidResponse, detail: "Unsupported difftastic JSON schema: missing source alignment.")
     }
-    var oldChanges: [Int: [Change]] = [:], newChanges: [Int: [Change]] = [:]
+    var oldChanges = [Int: [Change]]()
+    var newChanges = [Int: [Change]]()
     for chunk in chunks {
       for row in chunk {
         if let side = row.lhs {
@@ -134,11 +155,16 @@ public struct ReviewDiff: Equatable, Codable, Sendable {
         detail: "Invalid difftastic line number.",
       ) }
       guard number < source.count else { return nil }
-      let text = source[number], bytes = Array(text.utf8)
-      var spans: [DiffSpan] = [], offset = 0
+      let text = source[number]
+      let bytes = Array(text.utf8)
+      var spans = [DiffSpan]()
+      var offset = 0
       for change in (changes[number] ?? []).sorted(by: { $0.start < $1.start }) {
-        guard change.start >= offset, change.end >= change.start, change.end <= bytes.count,
-              String(bytes: bytes[change.start ..< change.end], encoding: .utf8) == change.content
+        guard
+          change.start >= offset,
+          change.end >= change.start,
+          change.end <= bytes.count,
+          String(bytes: bytes[change.start ..< change.end], encoding: .utf8) == change.content
         else {
           throw TataraError(.invalidResponse, detail: "Difftastic token coordinates do not match the immutable source.")
         }
@@ -158,9 +184,10 @@ public struct ReviewDiff: Equatable, Codable, Sendable {
       }
       return .init(number: number + 1, spans: spans)
     }
-    var aligned: [ReviewDiffRow] = []
+    var aligned = [ReviewDiffRow]()
     var changed = Set<Int>()
-    var previousLeft = -1, previousRight = -1
+    var previousLeft = -1
+    var previousRight = -1
     for pair in alignment {
       try Task.checkCancellation()
       guard pair.count == 2 else { throw TataraError(.invalidResponse, detail: "Invalid difftastic alignment pair.") }
@@ -185,8 +212,9 @@ public struct ReviewDiff: Equatable, Codable, Sendable {
         right: line(pair[1], source: right, changes: newChanges, color: 2),
       )
       guard row.left != nil || row.right != nil else { continue }
-      if pair[0].map({ oldChanges[$0] != nil }) == true || pair[1].map({ newChanges[$0] != nil }) == true || row
-        .left == nil || row.right == nil
+      if
+        pair[0].map({ oldChanges[$0] != nil }) == true || pair[1].map({ newChanges[$0] != nil }) == true || row
+          .left == nil || row.right == nil
       {
         changed.insert(aligned.count)
       }
@@ -198,7 +226,8 @@ public struct ReviewDiff: Equatable, Codable, Sendable {
         visible.insert(row)
       }
     }
-    var result: [ReviewDiffRow] = [], last = -2
+    var result = [ReviewDiffRow]()
+    var last = -2
     for index in visible.sorted() {
       if index > last + 1, !result.isEmpty {
         result.append(.init(left: nil, right: nil))
@@ -208,4 +237,5 @@ public struct ReviewDiff: Equatable, Codable, Sendable {
     }
     return .init(path: path, language: file.language, status: file.status, rows: result)
   }
+
 }

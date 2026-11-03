@@ -3,26 +3,38 @@
 
 import Foundation
 
+// MARK: - ForgeKind
+
 public enum ForgeKind: String, Codable, Sendable { case github }
 
+// MARK: - RepositoryID
+
 public struct RepositoryID: Hashable, Codable, Sendable, CustomStringConvertible {
-  public var forge: ForgeKind
-  public var host: String
-  public var owner: String
-  public var name: String
+
+  // MARK: Lifecycle
 
   public init(_ slug: String, host: String = "github.com", forge: ForgeKind = .github) throws {
     let parts = slug.split(separator: "/", omittingEmptySubsequences: false)
     let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
-    guard parts.count == 2,
-          parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && $0.unicodeScalars.allSatisfy(allowed.contains) }),
-          !host.isEmpty, host.unicodeScalars.allSatisfy(allowed.contains), !host.hasPrefix("-")
+    guard
+      parts.count == 2,
+      parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && $0.unicodeScalars.allSatisfy(allowed.contains) }),
+      !host.isEmpty,
+      host.unicodeScalars.allSatisfy(allowed.contains),
+      !host.hasPrefix("-")
     else { throw TataraError(.invalidRepository, detail: "Expected OWNER/REPO and a hostname.") }
     self.forge = forge
     self.host = host.lowercased()
     owner = String(parts[0])
     name = String(parts[1])
   }
+
+  // MARK: Public
+
+  public var forge: ForgeKind
+  public var host: String
+  public var owner: String
+  public var name: String
 
   public var slug: String {
     "\(owner)/\(name)"
@@ -31,31 +43,34 @@ public struct RepositoryID: Hashable, Codable, Sendable, CustomStringConvertible
   public var description: String {
     "\(host)/\(slug)"
   }
+
 }
 
+// MARK: - ItemKind
+
 public enum ItemKind: String, Codable, CaseIterable, Sendable { case pullRequest, issue }
+
+// MARK: - ItemState
+
 public enum ItemState: String, Codable, Sendable { case open, closed, merged }
 
+// MARK: - ItemID
+
 public struct ItemID: Hashable, Codable, Sendable {
-  public var repository: RepositoryID
-  public var number: Int
   public init(repository: RepositoryID, number: Int) {
     self.repository = repository
     self.number = number
   }
+
+  public var repository: RepositoryID
+  public var number: Int
 }
 
+// MARK: - ForgeItem
+
 public struct ForgeItem: Identifiable, Equatable, Codable, Sendable {
-  public var id: ItemID
-  public var kind: ItemKind
-  public var title: String
-  public var author: String
-  public var body: String
-  public var url: URL
-  public var state: ItemState
-  public var labels: [String]
-  public var isDraft: Bool
-  public var github: GitHubItemSummary?
+
+  // MARK: Lifecycle
 
   public init(
     id: ItemID,
@@ -80,36 +95,28 @@ public struct ForgeItem: Identifiable, Equatable, Codable, Sendable {
     self.isDraft = isDraft
     self.github = github
   }
+
+  // MARK: Public
+
+  public var id: ItemID
+  public var kind: ItemKind
+  public var title: String
+  public var author: String
+  public var body: String
+  public var url: URL
+  public var state: ItemState
+  public var labels: [String]
+  public var isDraft: Bool
+  public var github: GitHubItemSummary?
+
 }
+
+// MARK: - GitHubItemSummary
 
 /// Nullable GitHub fields retain absence; review decisions are never inferred from review counts.
 public struct GitHubItemSummary: Equatable, Codable, Sendable {
-  public enum ReviewDecision: String, Codable, Sendable {
-    case approved = "APPROVED", changesRequested = "CHANGES_REQUESTED", reviewRequired = "REVIEW_REQUIRED"
-  }
 
-  public enum ChecksState: String, Codable, Sendable {
-    case success = "SUCCESS", failure = "FAILURE", error = "ERROR", pending = "PENDING", expected = "EXPECTED"
-  }
-
-  public var createdAt: String?
-  public var updatedAt: String?
-  public var closedAt: String?
-  public var mergedAt: String?
-  public var assignees: [String]
-  public var milestone: String?
-  public var requestedReviewers: [String]
-  public var requestedTeams: [String]
-  public var commentCount: Int?
-  public var reviewDecision: ReviewDecision?
-  public var checksState: ChecksState?
-  public var headOID: String?
-  public var headBranch: String?
-  public var baseBranch: String?
-  public var additions: Int?
-  public var deletions: Int?
-  public var changedFiles: Int?
-  public var commits: Int?
+  // MARK: Lifecycle
 
   public init(
     createdAt: String? = nil,
@@ -151,6 +158,41 @@ public struct GitHubItemSummary: Equatable, Codable, Sendable {
     self.commits = commits
   }
 
+  // MARK: Public
+
+  public enum ReviewDecision: String, Codable, Sendable {
+    case approved = "APPROVED"
+    case changesRequested = "CHANGES_REQUESTED"
+    case reviewRequired = "REVIEW_REQUIRED"
+  }
+
+  public enum ChecksState: String, Codable, Sendable {
+    case success = "SUCCESS"
+    case failure = "FAILURE"
+    case error = "ERROR"
+    case pending = "PENDING"
+    case expected = "EXPECTED"
+  }
+
+  public var createdAt: String?
+  public var updatedAt: String?
+  public var closedAt: String?
+  public var mergedAt: String?
+  public var assignees: [String]
+  public var milestone: String?
+  public var requestedReviewers: [String]
+  public var requestedTeams: [String]
+  public var commentCount: Int?
+  public var reviewDecision: ReviewDecision?
+  public var checksState: ChecksState?
+  public var headOID: String?
+  public var headBranch: String?
+  public var baseBranch: String?
+  public var additions: Int?
+  public var deletions: Int?
+  public var changedFiles: Int?
+  public var commits: Int?
+
   public var reviewTitleKey: String {
     switch reviewDecision {
     case .approved: "Approved"
@@ -176,41 +218,40 @@ public struct GitHubItemSummary: Equatable, Codable, Sendable {
       [createdAt, updatedAt, closedAt, mergedAt, milestone, headOID, headBranch, baseBranch].compactMap(\.self))
       .reduce(512) { $0 + $1.utf8.count + 32 }
   }
+
 }
 
+// MARK: - ItemPage
+
 public struct ItemPage: Equatable, Codable, Sendable {
-  public var items: [ForgeItem]
-  public var nextPage: Int?
   public init(items: [ForgeItem], nextPage: Int? = nil) {
     self.items = items
     self.nextPage = nextPage
   }
+
+  public var items: [ForgeItem]
+  public var nextPage: Int?
 }
 
+// MARK: - ForgeCapabilities
+
 public struct ForgeCapabilities: Equatable, Sendable {
-  public var reviews: Bool
-  public var inlineComments: Bool
-  public var issues: Bool
   public init(reviews: Bool, inlineComments: Bool, issues: Bool) {
     self.reviews = reviews
     self.inlineComments = inlineComments
     self.issues = issues
   }
+
+  public var reviews: Bool
+  public var inlineComments: Bool
+  public var issues: Bool
 }
 
+// MARK: - DiscussionComment
+
 public struct DiscussionComment: Identifiable, Equatable, Codable, Sendable {
-  public var id: Int
-  public var author: String
-  public var body: String
-  public var context: String?
-  public var anchor: DiscussionAnchor?
-  public var nodeID: String?
-  public var url: URL?
-  public var updatedAt: String?
-  public var replyToID: Int?
-  public var key: String {
-    (anchor == nil ? "issue:" : "review:") + String(id)
-  }
+
+  // MARK: Lifecycle
 
   public init(
     id: Int,
@@ -233,17 +274,32 @@ public struct DiscussionComment: Identifiable, Equatable, Codable, Sendable {
     self.updatedAt = updatedAt
     self.replyToID = replyToID
   }
+
+  // MARK: Public
+
+  public var id: Int
+  public var author: String
+  public var body: String
+  public var context: String?
+  public var anchor: DiscussionAnchor?
+  public var nodeID: String?
+  public var url: URL?
+  public var updatedAt: String?
+  public var replyToID: Int?
+
+  public var key: String {
+    (anchor == nil ? "issue:" : "review:") + String(id)
+  }
+
 }
+
+// MARK: - DiscussionAnchor
 
 /// GitHub's current diff coordinates are distinct from the original, potentially outdated line.
 public struct DiscussionAnchor: Equatable, Codable, Sendable {
-  public var path: String
-  public var line: Int?
-  public var startLine: Int?
-  public var side: InlineComment.Side?
-  public var subjectType: String?
-  public var originalLine: Int?
-  public var commitID: String?
+
+  // MARK: Lifecycle
+
   public init(
     path: String,
     line: Int?,
@@ -261,19 +317,29 @@ public struct DiscussionAnchor: Equatable, Codable, Sendable {
     self.originalLine = originalLine
     self.commitID = commitID
   }
+
+  // MARK: Public
+
+  public var path: String
+  public var line: Int?
+  public var startLine: Int?
+  public var side: InlineComment.Side?
+  public var subjectType: String?
+  public var originalLine: Int?
+  public var commitID: String?
+
 }
+
+// MARK: - ForgeMetadata
 
 /// GitHub semantics remain typed; a future GitLab adapter adds its own case.
 public enum ForgeMetadata: Equatable, Codable, Sendable {
   case github(GitHubMetadata)
 }
 
+// MARK: - GitHubMetadata
+
 public struct GitHubMetadata: Equatable, Codable, Sendable {
-  public var baseBranch: String
-  public var headBranch: String
-  public var mergeableState: String
-  public var checks: [String]
-  public var reviews: [String]
   public init(
     baseBranch: String,
     headBranch: String,
@@ -287,19 +353,20 @@ public struct GitHubMetadata: Equatable, Codable, Sendable {
     self.checks = checks
     self.reviews = reviews
   }
+
+  public var baseBranch: String
+  public var headBranch: String
+  public var mergeableState: String
+  public var checks: [String]
+  public var reviews: [String]
 }
 
+// MARK: - ItemDetail
+
 public struct ItemDetail: Equatable, Codable, Sendable {
-  public let item: ForgeItem
-  public let revision: PullRequestRevision?
-  public let files: [ChangedFile]
-  public let fileTree: FileTree
-  private let fileIndices: [String: Int]
-  private let commentIndices: [String: Int]
-  private let fileCommentCounts: [String: Int]
-  public let comments: [DiscussionComment]
-  public let metadata: ForgeMetadata?
-  public let estimatedByteCount: Int
+
+  // MARK: Lifecycle
+
   public init(
     item: ForgeItem,
     revision: PullRequestRevision? = nil,
@@ -331,16 +398,38 @@ public struct ItemDetail: Equatable, Codable, Sendable {
     let commentBytes = comments.reduce(0) { $0 + $1.body.utf8.count + $1.author.utf8.count
       + ($1.context?.utf8.count ?? 0) + 128
     }
-    let metadataBytes: Int = if case let .github(value) = metadata {
-      (value.checks + value.reviews + [value.baseBranch, value.headBranch, value.mergeableState])
-        .reduce(0) { $0 + $1.utf8.count + 32 }
-    } else {
-      0
-    }
+    let metadataBytes: Int =
+      if case .github(let value) = metadata {
+        (value.checks + value.reviews + [value.baseBranch, value.headBranch, value.mergeableState])
+          .reduce(0) { $0 + $1.utf8.count + 32 }
+      } else {
+        0
+      }
     let commentIndexBytes = fileCommentCounts.keys.reduce(0) { $0 + $1.utf8.count + 64 }
     estimatedByteCount = itemBytes + fileBytes + commentBytes + commentIndexBytes + metadataBytes
       + (item.github?.estimatedByteCount ?? 0)
   }
+
+  public init(from decoder: any Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    try self.init(
+      item: values.decode(ForgeItem.self, forKey: .item),
+      revision: values.decodeIfPresent(PullRequestRevision.self, forKey: .revision),
+      files: values.decode([ChangedFile].self, forKey: .files),
+      comments: values.decode([DiscussionComment].self, forKey: .comments),
+      metadata: values.decodeIfPresent(ForgeMetadata.self, forKey: .metadata),
+    )
+  }
+
+  // MARK: Public
+
+  public let item: ForgeItem
+  public let revision: PullRequestRevision?
+  public let files: [ChangedFile]
+  public let fileTree: FileTree
+  public let comments: [DiscussionComment]
+  public let metadata: ForgeMetadata?
+  public let estimatedByteCount: Int
 
   public func file(at path: String) -> ChangedFile? {
     fileIndices[path].map { files[$0] }
@@ -355,39 +444,33 @@ public struct ItemDetail: Equatable, Codable, Sendable {
     fileCommentCounts[path, default: 0]
   }
 
+  // MARK: Private
+
   private enum CodingKeys: String, CodingKey { case item, revision, files, comments, metadata }
-  public init(from decoder: any Decoder) throws {
-    let values = try decoder.container(keyedBy: CodingKeys.self)
-    try self.init(
-      item: values.decode(ForgeItem.self, forKey: .item),
-      revision: values.decodeIfPresent(PullRequestRevision.self, forKey: .revision),
-      files: values.decode([ChangedFile].self, forKey: .files),
-      comments: values.decode([DiscussionComment].self, forKey: .comments),
-      metadata: values.decodeIfPresent(ForgeMetadata.self, forKey: .metadata),
-    )
-  }
+
+  private let fileIndices: [String: Int]
+  private let commentIndices: [String: Int]
+  private let fileCommentCounts: [String: Int]
+
 }
 
+// MARK: - PullRequestRevision
+
 public struct PullRequestRevision: Hashable, Codable, Sendable {
-  public var mergeBase: String
-  public var head: String
   public init(mergeBase: String, head: String) {
     self.mergeBase = mergeBase
     self.head = head
   }
+
+  public var mergeBase: String
+  public var head: String
 }
 
+// MARK: - ChangedFile
+
 public struct ChangedFile: Identifiable, Equatable, Codable, Sendable {
-  public var path: String
-  public var previousPath: String?
-  public var status: String
-  public var additions: Int
-  public var deletions: Int
-  public let patch: String?
-  public let anchors: ReviewAnchorIndex
-  public var id: String {
-    path
-  }
+
+  // MARK: Lifecycle
 
   public init(
     path: String,
@@ -406,7 +489,6 @@ public struct ChangedFile: Identifiable, Equatable, Codable, Sendable {
     anchors = ReviewAnchorIndex(patch: patch)
   }
 
-  private enum CodingKeys: String, CodingKey { case path, previousPath, status, additions, deletions, patch }
   public init(from decoder: any Decoder) throws {
     let values = try decoder.container(keyedBy: CodingKeys.self)
     try self.init(
@@ -418,19 +500,41 @@ public struct ChangedFile: Identifiable, Equatable, Codable, Sendable {
       patch: values.decodeIfPresent(String.self, forKey: .patch),
     )
   }
+
+  // MARK: Public
+
+  public var path: String
+  public var previousPath: String?
+  public var status: String
+  public var additions: Int
+  public var deletions: Int
+  public let patch: String?
+  public let anchors: ReviewAnchorIndex
+
+  public var id: String {
+    path
+  }
+
+  // MARK: Private
+
+  private enum CodingKeys: String, CodingKey { case path, previousPath, status, additions, deletions, patch }
+
 }
+
+// MARK: - ReviewEvent
 
 public enum ReviewEvent: String, CaseIterable, Codable, Sendable {
-  case comment = "COMMENT", approve = "APPROVE", requestChanges = "REQUEST_CHANGES"
+  case comment = "COMMENT"
+  case approve = "APPROVE"
+  case requestChanges = "REQUEST_CHANGES"
 }
 
+// MARK: - ReviewSubmission
+
 public struct ReviewSubmission: Equatable, Sendable {
-  public var item: ForgeItem
-  public var expectedHead: String?
-  public var event: ReviewEvent
-  public var body: String
-  public var comments: [InlineComment]
-  public var expectedMergeBase: String?
+
+  // MARK: Lifecycle
+
   public init(
     item: ForgeItem,
     expectedHead: String?,
@@ -446,20 +550,47 @@ public struct ReviewSubmission: Equatable, Sendable {
     self.comments = comments
     self.expectedMergeBase = expectedMergeBase
   }
+
+  // MARK: Public
+
+  public var item: ForgeItem
+  public var expectedHead: String?
+  public var event: ReviewEvent
+  public var body: String
+  public var comments: [InlineComment]
+  public var expectedMergeBase: String?
+
 }
 
-public struct TataraError: Error, Equatable, Sendable, CustomStringConvertible {
-  public enum Code: String, Sendable {
-    case invalidRepository, configuration, authentication, commandFailed, timedOut, incompleteResponse
-    case revisionChanged, unavailable, invalidResponse, emptyReview, invalidLine
-  }
+// MARK: - TataraError
 
-  public var code: Code
-  public var detail: String
+public struct TataraError: Error, Equatable, Sendable, CustomStringConvertible {
+
+  // MARK: Lifecycle
+
   public init(_ code: Code, detail: String = "") {
     self.code = code
     self.detail = detail
   }
+
+  // MARK: Public
+
+  public enum Code: String, Sendable {
+    case invalidRepository
+    case configuration
+    case authentication
+    case commandFailed
+    case timedOut
+    case incompleteResponse
+    case revisionChanged
+    case unavailable
+    case invalidResponse
+    case emptyReview
+    case invalidLine
+  }
+
+  public var code: Code
+  public var detail: String
 
   public var description: String {
     "\(code.rawValue): \(detail)"
@@ -468,10 +599,19 @@ public struct TataraError: Error, Equatable, Sendable, CustomStringConvertible {
   public static func wrapping(_ error: any Error) -> Self {
     error as? Self ?? Self(.commandFailed, detail: String(describing: error))
   }
+
 }
 
+// MARK: - CommentOperation
+
 public enum CommentOperation: String, Equatable, Sendable {
-  case reply, edit, delete, react, resolve, unresolve
+  case reply
+  case edit
+  case delete
+  case react
+  case resolve
+  case unresolve
+
   public var titleKey: String {
     switch self {
     case .reply: "Reply"
@@ -484,9 +624,20 @@ public enum CommentOperation: String, Equatable, Sendable {
   }
 }
 
+// MARK: - ReactionContent
+
 public enum ReactionContent: String, CaseIterable, Codable, Sendable {
-  case thumbsUp = "THUMBS_UP", thumbsDown = "THUMBS_DOWN", laugh = "LAUGH", hooray = "HOORAY"
-  case confused = "CONFUSED", heart = "HEART", rocket = "ROCKET", eyes = "EYES"
+  case thumbsUp = "THUMBS_UP"
+  case thumbsDown = "THUMBS_DOWN"
+  case laugh = "LAUGH"
+  case hooray = "HOORAY"
+  case confused = "CONFUSED"
+  case heart = "HEART"
+  case rocket = "ROCKET"
+  case eyes = "EYES"
+
+  // MARK: Public
+
   public var symbol: String {
     switch self {
     case .thumbsUp: "+1"
@@ -501,23 +652,23 @@ public enum ReactionContent: String, CaseIterable, Codable, Sendable {
   }
 }
 
+// MARK: - CommentReaction
+
 public struct CommentReaction: Equatable, Sendable {
-  public var content: ReactionContent
-  public var count: Int
-  public var viewerHasReacted: Bool
   public init(content: ReactionContent, count: Int, viewerHasReacted: Bool) {
     self.content = content
     self.count = count
     self.viewerHasReacted = viewerHasReacted
   }
+
+  public var content: ReactionContent
+  public var count: Int
+  public var viewerHasReacted: Bool
 }
 
+// MARK: - ReviewThread
+
 public struct ReviewThread: Equatable, Sendable {
-  public var id: String
-  public var isResolved: Bool
-  public var canResolve: Bool
-  public var canUnresolve: Bool
-  public var canReply: Bool
   public init(id: String, isResolved: Bool, canResolve: Bool, canUnresolve: Bool, canReply: Bool) {
     self.id = id
     self.isResolved = isResolved
@@ -525,17 +676,20 @@ public struct ReviewThread: Equatable, Sendable {
     self.canUnresolve = canUnresolve
     self.canReply = canReply
   }
+
+  public var id: String
+  public var isResolved: Bool
+  public var canResolve: Bool
+  public var canUnresolve: Bool
+  public var canReply: Bool
 }
 
+// MARK: - CommentContext
+
 public struct CommentContext: Equatable, Sendable {
-  public var viewer: String
-  public var comment: DiscussionComment
-  public var canReply: Bool
-  public var canEdit: Bool
-  public var canDelete: Bool
-  public var canReact: Bool
-  public var thread: ReviewThread?
-  public var reactions: [CommentReaction]
+
+  // MARK: Lifecycle
+
   public init(
     comment: DiscussionComment,
     canReply: Bool,
@@ -556,6 +710,17 @@ public struct CommentContext: Equatable, Sendable {
     self.reactions = reactions
   }
 
+  // MARK: Public
+
+  public var viewer: String
+  public var comment: DiscussionComment
+  public var canReply: Bool
+  public var canEdit: Bool
+  public var canDelete: Bool
+  public var canReact: Bool
+  public var thread: ReviewThread?
+  public var reactions: [CommentReaction]
+
   public func allows(_ operation: CommentOperation) -> Bool {
     switch operation {
     case .reply: canReply
@@ -566,15 +731,15 @@ public struct CommentContext: Equatable, Sendable {
     case .unresolve: thread?.canUnresolve == true && thread?.isResolved == true
     }
   }
+
 }
 
+// MARK: - CommentMutation
+
 public struct CommentMutation: Equatable, Sendable {
-  public var item: ForgeItem
-  public var expectedHead: String?
-  public var context: CommentContext
-  public var operation: CommentOperation
-  public var body: String
-  public var reaction: ReactionContent
+
+  // MARK: Lifecycle
+
   public init(
     item: ForgeItem,
     expectedHead: String?,
@@ -590,4 +755,14 @@ public struct CommentMutation: Equatable, Sendable {
     self.body = body
     self.reaction = reaction
   }
+
+  // MARK: Public
+
+  public var item: ForgeItem
+  public var expectedHead: String?
+  public var context: CommentContext
+  public var operation: CommentOperation
+  public var body: String
+  public var reaction: ReactionContent
+
 }

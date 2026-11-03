@@ -13,31 +13,38 @@ import Testing
 
 @MainActor
 struct PresentationTests {
-  @Test func `sidebar geometry honors preference and preserves usable content width`() {
+
+  // MARK: Internal
+
+  @Test
+  func `sidebar geometry honors preference and preserves usable content width`() {
     #expect(WorkspaceGeometry(size: .init(width: 176, height: 40)).sidebarWidth == 52)
     #expect(WorkspaceGeometry(size: .init(width: 176, height: 40), preferredSidebarWidth: 64).content.x == 64)
     #expect(WorkspaceGeometry(size: .init(width: 104, height: 40), preferredSidebarWidth: 64).content.width == 60)
     #expect(WorkspaceGeometry(size: .init(width: 80, height: 40), preferredSidebarWidth: 64).files.width == 80)
   }
 
-  @Test func `item selection always reserves three metadata rows`() throws {
+  @Test
+  func `item selection always reserves three metadata rows`() throws {
     var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
     state.itemsHeight = 13
     #expect(state.itemsPage == 4)
     #expect(state.itemRowHeight == 3)
   }
 
-  @Test func `wrap preferences are explicit and validate configuration`() throws {
+  @Test
+  func `wrap preferences are explicit and validate configuration`() throws {
     let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".toml")
     defer { try? FileManager.default.removeItem(at: url) }
     try "wrap = false\nsidebar_width = 64\n".write(to: url, atomically: true, encoding: .utf8)
     let preferences = try Configuration.load(path: url.path)
     #expect(!preferences.wrap && preferences.sidebarWidth == 64)
-    try "wrap = \"extra\"\n".replacingOccurrences(of: "\\", with: "").write(to: url, atomically: true, encoding: .utf8)
+    try "wrap = \"extra\"\n".replacing("\\", with: "").write(to: url, atomically: true, encoding: .utf8)
     #expect(throws: TataraError.self) { try Configuration.load(path: url.path) }
   }
 
-  @Test func `terminal wheel parser preserves both axes modifiers and chunked input`() {
+  @Test
+  func `terminal wheel parser preserves both axes modifiers and chunked input`() {
     let directions: [MouseEventKind] = [.scrollUp, .scrollDown, .scrollLeft, .scrollRight]
     for modifiers in [0, 4, 8, 16, 28] {
       var expectedModifiers: KeyModifiers = []
@@ -61,29 +68,6 @@ struct PresentationTests {
     }
   }
 
-  private func presentation(
-    _ state: WorkspaceFeature.State,
-    size: Size = .init(width: 160, height: 40),
-    noColor: Bool = false,
-  ) -> WorkspacePresentation {
-    .init(
-      store: Store(initialState: state) { WorkspaceFeature() },
-      size: size,
-      demo: false,
-      fields: [:],
-      editors: [:],
-      editorTexts: [:],
-      reviewScroll: 0,
-      reviewPreview: nil,
-      commentScroll: 0,
-      failure: nil,
-      noColor: noColor,
-      ascii: false,
-      cursorFollowsFocus: false,
-      palette: Palette(state.preferences.theme, noColor: noColor),
-    )
-  }
-
   @Test(arguments: TataraCore.Theme.allCases)
   func `all flavors render semantic borders backgrounds selections and exact search spans`(_ theme: TataraCore.Theme) throws {
     var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"), preferences: .init(theme: theme))
@@ -92,7 +76,9 @@ struct PresentationTests {
     state.searches[.content] = .init()
     state.searches[.content]?.query = "hit"
     state.searches[.content]?.result = .init(lines: [0, 0], highlights: [0: [7 ..< 10, 17 ..< 20]], ranges: [7 ..< 10, 17 ..< 20])
-    let view = presentation(state), screen = view.screen(), palette = Palette(theme)
+    let view = presentation(state)
+    let screen = view.screen()
+    let palette = Palette(theme)
     var frame = Frame(buffer: Buffer(area: Rect(size: view.size)))
     frame.render(screen)
     let content = view.geometry.content
@@ -111,7 +97,8 @@ struct PresentationTests {
     expectNoDifference(palette.ansi(17), palette.rosewater)
   }
 
-  @Test func `inline review expands below its source and retains the surrounding workspace`() async throws {
+  @Test
+  func `inline review expands below its source and retains the surrounding workspace`() async throws {
     let repository = try RepositoryID("owner/repo")
     let item = try ForgeItem(
       id: .init(repository: repository, number: 1),
@@ -156,7 +143,8 @@ struct PresentationTests {
     #expect(frame.cursorPosition != nil)
   }
 
-  @Test func `no color still distinguishes matched source text`() throws {
+  @Test
+  func `no color still distinguishes matched source text`() throws {
     var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
     state.pane = .content
     state.document = .init(lines: [[.init(text: "hit")]])
@@ -187,11 +175,12 @@ struct PresentationTests {
     let added: Color = theme == .latte ? .green : .lightGreen
     for category in ["keyword", "type", "delimiter", "string", "comment", "normal", "tree_sitter_error", "future_category"] {
       let json = """
-      {"language":"Swift","status":"changed","aligned_lines":[[0,0]],"chunks":[[{"lhs":{"line_number":0,"changes":[{"start":0,"end":3,"content":"old","highlight":"\(category)"}]},"rhs":{"line_number":0,"changes":[{"start":0,"end":3,"content":"new","highlight":"\(category)"}]}}]]}
-      """
+        {"language":"Swift","status":"changed","aligned_lines":[[0,0]],"chunks":[[{"lhs":{"line_number":0,"changes":[{"start":0,"end":3,"content":"old","highlight":"\(category)"}]},"rhs":{"line_number":0,"changes":[{"start":0,"end":3,"content":"new","highlight":"\(category)"}]}}]]}
+        """
       let diff = try ReviewDiff.decode(Data(json.utf8), before: "old value", after: "new value", path: "A.swift")
       state.document = try await DocumentRenderer.prepareDiff(diff, 80)
-      let view = presentation(state), palette = Palette(theme)
+      let view = presentation(state)
+      let palette = Palette(theme)
       let oldCells = buffer(view.highlightedLine(state.document.displayLines[0], row: 0, selected: false))
       let newCells = buffer(view.highlightedLine(state.document.displayLines[1], row: 1, selected: false))
       let x = state.document.diffPrefixWidth
@@ -261,14 +250,18 @@ struct PresentationTests {
       #expect(selected >= margin)
       #expect(rows.count - selected - 1 >= margin)
       for distance in 1 ... max(1, margin) where margin > 0 {
-        #expect(rows[selected - distance].contains(pane == .items ? "PR-\(10 - distance)" : String(
-          format: "File%02d.swift",
-          10 - distance,
-        )))
-        #expect(rows[selected + distance].contains(pane == .items ? "PR-\(10 + distance)" : String(
-          format: "File%02d.swift",
-          10 + distance,
-        )))
+        #expect(rows[selected - distance].contains(pane == .items
+            ? "PR-\(10 - distance)"
+            : String(
+              format: "File%02d.swift",
+              10 - distance,
+            )))
+        #expect(rows[selected + distance].contains(pane == .items
+            ? "PR-\(10 + distance)"
+            : String(
+              format: "File%02d.swift",
+              10 + distance,
+            )))
       }
     }
   }
@@ -346,4 +339,30 @@ struct PresentationTests {
     #expect(view.compactFileName("日本語の長いファイル名.swift", width: 16).hasSuffix(".swift"))
     #expect(TerminalWidth.of(view.compactFileName("日本語の長いファイル名.swift", width: 16)) <= 16)
   }
+
+  // MARK: Private
+
+  private func presentation(
+    _ state: WorkspaceFeature.State,
+    size: Size = .init(width: 160, height: 40),
+    noColor: Bool = false,
+  ) -> WorkspacePresentation {
+    .init(
+      store: Store(initialState: state) { WorkspaceFeature() },
+      size: size,
+      demo: false,
+      fields: [:],
+      editors: [:],
+      editorTexts: [:],
+      reviewScroll: 0,
+      reviewPreview: nil,
+      commentScroll: 0,
+      failure: nil,
+      noColor: noColor,
+      ascii: false,
+      cursorFollowsFocus: false,
+      palette: Palette(state.preferences.theme, noColor: noColor),
+    )
+  }
+
 }

@@ -7,11 +7,14 @@ import Foundation
 import SwiftTerm
 import Synchronization
 
+// MARK: - SmokeError
+
 struct SmokeError: Error, CustomStringConvertible {
-  let description: String
   init(_ message: String) {
     description = message
   }
+
+  let description: String
 }
 
 func expect(_ value: Bool, _ message: String) throws {
@@ -20,22 +23,11 @@ func expect(_ value: Bool, _ message: String) throws {
   }
 }
 
+// MARK: - PTY
+
 final class PTY: TerminalDelegate {
-  private var master: Int32 = -1
-  private let process = Process()
-  private var terminal: Terminal!
-  private var isSynchronizedOutput = false
-  private var synchronizationPrefix = 0
-  private(set) var raw = Data()
-  private(set) var columns: Int
-  private(set) var rows: Int
-  let artifacts: URL
-  var onCompletedFrame: ((TimeInterval) -> Void)?
-  private let recordPreview: Bool
-  private var previewFrames: [[String: Any]] = []
-  private var previewTextBytes = 0
-  private var previewLimitExceeded = false
-  private var inputError: String?
+
+  // MARK: Lifecycle
 
   init(
     binary: URL,
@@ -60,10 +52,12 @@ final class PTY: TerminalDelegate {
     _ = fcntl(master, F_SETFL, flags | O_NONBLOCK)
     let input = FileHandle(fileDescriptor: slave, closeOnDealloc: true)
     process.executableURL = binary
-    process.arguments = ["--stable-output", "--force-color"] + arguments + (arguments.contains("--files-view") ? [] : [
-      "--files-view",
-      "list",
-    ])
+    process.arguments = ["--stable-output", "--force-color"] + arguments + (arguments.contains("--files-view")
+      ? []
+      : [
+        "--files-view",
+        "list",
+      ])
     process.standardInput = input
     process.standardOutput = input
     process.standardError = input
@@ -71,7 +65,7 @@ final class PTY: TerminalDelegate {
     // Isolating Tatara's XDG state must not relocate mise's installed tools or cache.
     env["MISE_DATA_DIR"] = env["MISE_DATA_DIR"] ??
       (env["XDG_DATA_HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
-        ".local/share",
+        ".local/share"
       ).path) + "/mise"
     env["MISE_CACHE_DIR"] = env["MISE_CACHE_DIR"] ??
       (env["XDG_CACHE_HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".cache").path) + "/mise"
@@ -85,16 +79,21 @@ final class PTY: TerminalDelegate {
     try input.close()
   }
 
+  // MARK: Internal
+
+  private(set) var raw = Data()
+  private(set) var columns: Int
+  private(set) var rows: Int
+  let artifacts: URL
+  var onCompletedFrame: ((TimeInterval) -> Void)?
+  private(set) var lastReplayInputTimes = [TimeInterval]()
+
   var pid: Int32 {
     process.processIdentifier
   }
 
   var text: String {
     (0 ..< rows).map(line).joined(separator: "\n")
-  }
-
-  func hasCompletedFrame(containing value: String) -> Bool {
-    !isSynchronizedOutput && text.contains(value)
   }
 
   var keyboardPane: Int? {
@@ -116,6 +115,10 @@ final class PTY: TerminalDelegate {
     let border = line(1)
     guard let corner = border.dropFirst().firstIndex(where: { $0 == "┌" || $0 == "╭" || $0 == "+" }) else { return 0 }
     return border.distance(from: border.startIndex, to: corner)
+  }
+
+  func hasCompletedFrame(containing value: String) -> Bool {
+    !isSynchronizedOutput && text.contains(value)
   }
 
   func focusPane(_ pane: Int) throws {
@@ -163,8 +166,11 @@ final class PTY: TerminalDelegate {
     if !files {
       let expression = try! NSRegularExpression(pattern: #"▸[^#\n]*#(\d+) "#)
       let value = (0 ..< rows).map { String(line($0).prefix(sidebarWidth)) }.joined(separator: "\n")
-      guard let match = expression.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)),
-            let range = Range(match.range(at: 1), in: value), let number = Int(value[range]) else { return nil }
+      guard
+        let match = expression.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)),
+        let range = Range(match.range(at: 1), in: value),
+        let number = Int(value[range])
+      else { return nil }
       return number - 1
     }
     guard let heading = (0 ..< rows).first(where: { line($0).prefix(sidebarWidth).contains("Files ·") }) else { return nil }
@@ -173,8 +179,9 @@ final class PTY: TerminalDelegate {
       guard terminal.getCharData(col: 2, row: row)?.attribute.bg == .trueColor(red: 0x37, green: 0x38, blue: 0x48)
       else { continue }
       let value = String(line(row).prefix(sidebarWidth))
-      if let match = expression.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)),
-         let range = Range(match.range(at: 1), in: value)
+      if
+        let match = expression.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)),
+        let range = Range(match.range(at: 1), in: value)
       {
         return Int(value[range])
       }
@@ -195,8 +202,11 @@ final class PTY: TerminalDelegate {
     let expression = try! NSRegularExpression(pattern: pattern)
     return (0 ..< rows).compactMap { row in
       let value = String(line(row).prefix(sidebarWidth))
-      guard let match = expression.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)),
-            let range = Range(match.range(at: 1), in: value), let number = Int(value[range]) else { return nil }
+      guard
+        let match = expression.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)),
+        let range = Range(match.range(at: 1), in: value),
+        let number = Int(value[range])
+      else { return nil }
       return files ? number : number - 1
     }
   }
@@ -210,41 +220,9 @@ final class PTY: TerminalDelegate {
     write(Data(data))
   }
 
-  private func write(_ data: Data) {
-    data.withUnsafeBytes { buffer in
-      guard let address = buffer.baseAddress else { return }
-      var offset = 0
-      let deadline = ProcessInfo.processInfo.systemUptime + 5
-      while offset < buffer.count {
-        let count = Darwin.write(master, address.advanced(by: offset), buffer.count - offset)
-        if count > 0 {
-          offset += count
-          continue
-        }
-        if count < 0, errno == EINTR {
-          continue
-        }
-        if count < 0, errno == EAGAIN || errno == EWOULDBLOCK,
-           process.isRunning, ProcessInfo.processInfo.systemUptime < deadline
-        {
-          var descriptor = pollfd(fd: master, events: Int16(POLLIN | POLLOUT), revents: 0)
-          if poll(&descriptor, 1, 100) > 0, descriptor.revents & Int16(POLLIN) != 0 {
-            // The child can redraw before reading the rest of a paste. Drain both PTY directions.
-            readOnce()
-          }
-          continue
-        }
-        inputError = "PTY input stopped after \(offset)/\(buffer.count) bytes (errno \(errno))."
-        return
-      }
-    }
-  }
-
   func key(_ value: String) {
     write(Data(value.utf8))
   }
-
-  private(set) var lastReplayInputTimes: [TimeInterval] = []
 
   func replay(_ keys: [String], interval: TimeInterval) throws -> TimeInterval {
     let descriptor = master
@@ -290,66 +268,6 @@ final class PTY: TerminalDelegate {
         }
       }
     } while ProcessInfo.processInfo.systemUptime < deadline
-  }
-
-  /// Return on receipt instead of adding a fixed polling window to every latency sample.
-  private func readOnce() {
-    var descriptor = pollfd(fd: master, events: Int16(POLLIN), revents: 0)
-    guard poll(&descriptor, 1, 20) > 0 else { return }
-    var bytes = [UInt8](repeating: 0, count: 65536)
-    let count = Darwin.read(master, &bytes, bytes.count)
-    if count > 0 {
-      ingest(bytes.prefix(count))
-    }
-  }
-
-  private func ingest(_ bytes: ArraySlice<UInt8>) {
-    // State predicates must observe a complete synchronized terminal frame, not
-    // new content paired with the previous frame's footer or interaction state.
-    let prefix: [UInt8] = [27, 91, 63, 50, 48, 50, 54]
-    var segmentStart = bytes.startIndex
-    for index in bytes.indices {
-      let byte = bytes[index]
-      if synchronizationPrefix == prefix.count {
-        if byte == 104 {
-          isSynchronizedOutput = true
-        }
-        if byte == 108 {
-          isSynchronizedOutput = false
-          if onCompletedFrame != nil || recordPreview {
-            terminal.feed(buffer: bytes[segmentStart ... index])
-            segmentStart = index + 1
-            let completedAt = ProcessInfo.processInfo.systemUptime
-            onCompletedFrame?(completedAt)
-            if recordPreview, !previewLimitExceeded {
-              let frameText = text
-              previewTextBytes += frameText.utf8.count
-              if previewFrames.count >= 5000 || previewTextBytes > 32 * 1024 * 1024 {
-                previewLimitExceeded = true
-              } else {
-                previewFrames.append([
-                  "uptime_ms": completedAt * 1000,
-                  "text": frameText,
-                  "columns": columns,
-                  "rows": rows,
-                  "pr_index": selectedFixtureIndex(files: false) as Any? ?? NSNull(),
-                  "file_index": selectedFixtureIndex(files: true) as Any? ?? NSNull(),
-                ])
-              }
-            }
-          }
-        }
-        synchronizationPrefix = byte == 27 ? 1 : 0
-      } else if byte == prefix[synchronizationPrefix] {
-        synchronizationPrefix += 1
-      } else {
-        synchronizationPrefix = byte == 27 ? 1 : 0
-      }
-    }
-    raw.append(contentsOf: bytes)
-    if segmentStart < bytes.endIndex {
-      terminal.feed(buffer: bytes[segmentStart...])
-    }
   }
 
   func wait(_ value: String, timeout: TimeInterval = 30) throws {
@@ -444,8 +362,10 @@ final class PTY: TerminalDelegate {
       guard let range = text.range(of: token) else { continue }
       let column = text.distance(from: text.startIndex, to: range.lowerBound)
       guard let cell = terminal.getCharData(col: column, row: row) else { continue }
-      if cell.attribute.fg == .ansi256(code: color), cell.attribute.style.contains(.bold) == bold,
-         !cell.attribute.style.contains(.underline)
+      if
+        cell.attribute.fg == .ansi256(code: color),
+        cell.attribute.style.contains(.bold) == bold,
+        !cell.attribute.style.contains(.underline)
       {
         return true
       }
@@ -460,8 +380,10 @@ final class PTY: TerminalDelegate {
   func cursorLine() -> Int? {
     let expression = try! NSRegularExpression(pattern: #"▸\s+(\d+)"#)
     let value = text
-    guard let match = expression.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)),
-          let range = Range(match.range(at: 1), in: value) else { return nil }
+    guard
+      let match = expression.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)),
+      let range = Range(match.range(at: 1), in: value)
+    else { return nil }
     return Int(value[range])
   }
 
@@ -472,31 +394,37 @@ final class PTY: TerminalDelegate {
 
   /// Render actual emulator cells; this is a visual artifact, never a timing sample.
   func screenshot(_ name: String) throws {
-    let cellWidth = 9, cellHeight = 20, padding = 16
-    let width = columns * cellWidth + padding * 2, height = rows * cellHeight + padding * 2
-    guard let bitmap = NSBitmapImageRep(
-      bitmapDataPlanes: nil,
-      pixelsWide: width,
-      pixelsHigh: height,
-      bitsPerSample: 8,
-      samplesPerPixel: 4,
-      hasAlpha: true,
-      isPlanar: false,
-      colorSpaceName: .deviceRGB,
-      bytesPerRow: 0,
-      bitsPerPixel: 0,
-    ),
+    let cellWidth = 9
+    let cellHeight = 20
+    let padding = 16
+    let width = columns * cellWidth + padding * 2
+    let height = rows * cellHeight + padding * 2
+    guard
+      let bitmap = NSBitmapImageRep(
+        bitmapDataPlanes: nil,
+        pixelsWide: width,
+        pixelsHigh: height,
+        bitsPerSample: 8,
+        samplesPerPixel: 4,
+        hasAlpha: true,
+        isPlanar: false,
+        colorSpaceName: .deviceRGB,
+        bytesPerRow: 0,
+        bitsPerPixel: 0,
+      ),
       let context = NSGraphicsContext(bitmapImageRep: bitmap)
     else { throw SmokeError("Could not create terminal preview bitmap.") }
     func color(_ value: Attribute.Color, background: Bool = false) throws -> NSColor {
       switch value {
-      case let .trueColor(red, green, blue): return NSColor(
+      case .trueColor(let red, let green, let blue): return NSColor(
           srgbRed: Double(red) / 255,
           green: Double(green) / 255,
           blue: Double(blue) / 255,
           alpha: 1,
         )
-      case .defaultColor, .defaultInvertedColor:
+
+      case .defaultColor,
+           .defaultInvertedColor:
         let source = (value == .defaultInvertedColor) != background ? terminal.backgroundColor : terminal.foregroundColor
         return NSColor(
           srgbRed: Double(source.red) / 65535,
@@ -504,7 +432,8 @@ final class PTY: TerminalDelegate {
           blue: Double(source.blue) / 65535,
           alpha: 1,
         )
-      case let .ansi256(code):
+
+      case .ansi256(let code):
         let colors = SwiftTerm.Color.defaultInstalledColors
         guard colors.indices.contains(Int(code)) else { throw SmokeError("Unexpected extended ANSI palette index.") }
         let value = colors[Int(code)]
@@ -524,15 +453,20 @@ final class PTY: TerminalDelegate {
     for row in 0 ..< rows {
       for column in 0 ..< columns {
         guard let cell = terminal.getCharData(col: column, row: row) else { continue }
-        let x = padding + column * cellWidth, y = height - padding - (row + 1) * cellHeight
+        let x = padding + column * cellWidth
+        let y = height - padding - (row + 1) * cellHeight
         let inverted = cell.attribute.style.contains(.inverse)
         try color(inverted ? cell.attribute.fg : cell.attribute.bg, background: !inverted).setFill()
         NSRect(x: x, y: y, width: cellWidth, height: cellHeight).fill()
       }
       for column in 0 ..< columns {
-        guard let cell = terminal.getCharData(col: column, row: row), cell.width > 0,
-              !cell.attribute.style.contains(.invisible) else { continue }
-        let bold = cell.attribute.style.contains(.bold), italic = cell.attribute.style.contains(.italic)
+        guard
+          let cell = terminal.getCharData(col: column, row: row),
+          cell.width > 0,
+          !cell.attribute.style.contains(.invisible)
+        else { continue }
+        let bold = cell.attribute.style.contains(.bold)
+        let italic = cell.attribute.style.contains(.italic)
         let name = bold ? (italic ? "Menlo-BoldItalic" : "Menlo-Bold") : (italic ? "Menlo-Italic" : "Menlo-Regular")
         guard let font = NSFont(name: name, size: 14) else { throw SmokeError("Missing preview font: \(name)") }
         var attributes: [NSAttributedString.Key: Any] = try [
@@ -563,7 +497,7 @@ final class PTY: TerminalDelegate {
   func finish() throws {
     try waitUntil("clean exit", timeout: 10) { !self.process.isRunning }
     try expect(process.terminationStatus == 0, "Application exited with status \(process.terminationStatus)")
-    try expect(raw.range(of: Data("\u{1B}[?1049l".utf8)) != nil, "Alternate screen was not restored.")
+    try expect(raw.contains(Data("\u{1B}[?1049l".utf8)), "Alternate screen was not restored.")
     if recordPreview {
       try expect(!previewLimitExceeded, "Preview exceeded the 5000-frame or 32 MiB text limit.")
       let recording: [String: Any] = [
@@ -595,4 +529,111 @@ final class PTY: TerminalDelegate {
       master = -1
     }
   }
+
+  // MARK: Private
+
+  private var master: Int32 = -1
+  private let process = Process()
+  private var terminal: Terminal!
+  private var isSynchronizedOutput = false
+  private var synchronizationPrefix = 0
+  private let recordPreview: Bool
+  private var previewFrames = [[String: Any]]()
+  private var previewTextBytes = 0
+  private var previewLimitExceeded = false
+  private var inputError: String?
+
+  private func write(_ data: Data) {
+    data.withUnsafeBytes { buffer in
+      guard let address = buffer.baseAddress else { return }
+      var offset = 0
+      let deadline = ProcessInfo.processInfo.systemUptime + 5
+      while offset < buffer.count {
+        let count = Darwin.write(master, address.advanced(by: offset), buffer.count - offset)
+        if count > 0 {
+          offset += count
+          continue
+        }
+        if count < 0, errno == EINTR {
+          continue
+        }
+        if
+          count < 0,
+          errno == EAGAIN || errno == EWOULDBLOCK,
+          process.isRunning,
+          ProcessInfo.processInfo.systemUptime < deadline
+        {
+          var descriptor = pollfd(fd: master, events: Int16(POLLIN | POLLOUT), revents: 0)
+          if poll(&descriptor, 1, 100) > 0, descriptor.revents & Int16(POLLIN) != 0 {
+            // The child can redraw before reading the rest of a paste. Drain both PTY directions.
+            readOnce()
+          }
+          continue
+        }
+        inputError = "PTY input stopped after \(offset)/\(buffer.count) bytes (errno \(errno))."
+        return
+      }
+    }
+  }
+
+  /// Return on receipt instead of adding a fixed polling window to every latency sample.
+  private func readOnce() {
+    var descriptor = pollfd(fd: master, events: Int16(POLLIN), revents: 0)
+    guard poll(&descriptor, 1, 20) > 0 else { return }
+    var bytes = [UInt8](repeating: 0, count: 65536)
+    let count = Darwin.read(master, &bytes, bytes.count)
+    if count > 0 {
+      ingest(bytes.prefix(count))
+    }
+  }
+
+  private func ingest(_ bytes: ArraySlice<UInt8>) {
+    // State predicates must observe a complete synchronized terminal frame, not
+    // new content paired with the previous frame's footer or interaction state.
+    let prefix: [UInt8] = [27, 91, 63, 50, 48, 50, 54]
+    var segmentStart = bytes.startIndex
+    for index in bytes.indices {
+      let byte = bytes[index]
+      if synchronizationPrefix == prefix.count {
+        if byte == 104 {
+          isSynchronizedOutput = true
+        }
+        if byte == 108 {
+          isSynchronizedOutput = false
+          if onCompletedFrame != nil || recordPreview {
+            terminal.feed(buffer: bytes[segmentStart ... index])
+            segmentStart = index + 1
+            let completedAt = ProcessInfo.processInfo.systemUptime
+            onCompletedFrame?(completedAt)
+            if recordPreview, !previewLimitExceeded {
+              let frameText = text
+              previewTextBytes += frameText.utf8.count
+              if previewFrames.count >= 5000 || previewTextBytes > 32 * 1024 * 1024 {
+                previewLimitExceeded = true
+              } else {
+                previewFrames.append([
+                  "uptime_ms": completedAt * 1000,
+                  "text": frameText,
+                  "columns": columns,
+                  "rows": rows,
+                  "pr_index": selectedFixtureIndex(files: false) as Any? ?? NSNull(),
+                  "file_index": selectedFixtureIndex(files: true) as Any? ?? NSNull(),
+                ])
+              }
+            }
+          }
+        }
+        synchronizationPrefix = byte == 27 ? 1 : 0
+      } else if byte == prefix[synchronizationPrefix] {
+        synchronizationPrefix += 1
+      } else {
+        synchronizationPrefix = byte == 27 ? 1 : 0
+      }
+    }
+    raw.append(contentsOf: bytes)
+    if segmentStart < bytes.endIndex {
+      terminal.feed(buffer: bytes[segmentStart...])
+    }
+  }
+
 }

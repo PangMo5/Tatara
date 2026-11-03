@@ -9,7 +9,11 @@ import Testing
 
 @MainActor
 struct FeatureTests {
-  @Test func `help navigation does not change the review selection`() async throws {
+
+  // MARK: Internal
+
+  @Test
+  func `help navigation does not change the review selection`() async throws {
     var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
     state.showsHelp = true
     let store = TestStore(initialState: state) { WorkspaceFeature() }
@@ -20,18 +24,8 @@ struct FeatureTests {
     }
   }
 
-  private func item(_ number: Int = 1, kind: ItemKind = .pullRequest) throws -> ForgeItem {
-    let repository = try RepositoryID("owner/repo")
-    return try ForgeItem(
-      id: .init(repository: repository, number: number),
-      kind: kind,
-      title: "Example",
-      author: "reviewer",
-      url: #require(URL(string: "https://github.com/owner/repo/pull/\(number)")),
-    )
-  }
-
-  @Test func `stale detail cannot replace selected pull request`() async throws {
+  @Test
+  func `stale detail cannot replace selected pull request`() async throws {
     let first = try item()
     let second = try item(2)
     var state = WorkspaceFeature.State(repository: first.id.repository)
@@ -43,7 +37,8 @@ struct FeatureTests {
     #expect(store.state.detail == nil)
   }
 
-  @Test func `stale diff cannot replace new viewport`() async throws {
+  @Test
+  func `stale diff cannot replace new viewport`() async throws {
     var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
     state.contentGeneration = 5
     state.document = .init(lines: [[.init(text: "current")]])
@@ -52,7 +47,8 @@ struct FeatureTests {
     #expect(store.state.document.lines == [[.init(text: "current")]])
   }
 
-  @Test func `submitting requires preview and keeps draft on failure`() async throws {
+  @Test
+  func `submitting requires preview and keeps draft on failure`() async throws {
     let reviewItem = try item()
     let store = TestStore(initialState: ReviewFeature.State(item: reviewItem, expectedHead: "head")) { ReviewFeature()
     } withDependencies: {
@@ -70,14 +66,16 @@ struct FeatureTests {
     #expect(store.state.body == "Please test the boundary.")
   }
 
-  @Test func `issues cannot be approved`() async throws {
+  @Test
+  func `issues cannot be approved`() async throws {
     let reviewItem = try item(kind: .issue)
     let store = TestStore(initialState: ReviewFeature.State(item: reviewItem, expectedHead: nil)) { ReviewFeature() }
     await store.send(.eventSelected(.approve))
     #expect(store.state.event == .comment)
   }
 
-  @Test func `duplicate submission is ignored while in flight`() async throws {
+  @Test
+  func `duplicate submission is ignored while in flight`() async throws {
     var state = try ReviewFeature.State(item: item(), expectedHead: "head")
     state.isSubmitting = true
     state.isConfirming = true
@@ -85,7 +83,8 @@ struct FeatureTests {
     await store.send(.submitButtonPressed)
   }
 
-  @Test func `search consumes quit key as text`() async throws {
+  @Test
+  func `search consumes quit key as text`() async throws {
     var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
     state.searches[.items] = .init()
     state.searches[.items]?.isEditing = true
@@ -95,7 +94,8 @@ struct FeatureTests {
     }
   }
 
-  @Test func `reviewed status is scoped to commit`() async throws {
+  @Test
+  func `reviewed status is scoped to commit`() async throws {
     let item = try item()
     var state = WorkspaceFeature.State(repository: item.id.repository)
     state.detail = .init(item: item, revision: .init(mergeBase: "base", head: "one"), files: [.init(path: "File.swift")])
@@ -104,4 +104,18 @@ struct FeatureTests {
     await store.send(.markReviewedPressed) { $0.reviewedFiles = ["github.com/owner/repo#1|base|one|File.swift"] }
     await store.send(.markReviewedPressed) { $0.reviewedFiles = [] }
   }
+
+  // MARK: Private
+
+  private func item(_ number: Int = 1, kind: ItemKind = .pullRequest) throws -> ForgeItem {
+    let repository = try RepositoryID("owner/repo")
+    return try ForgeItem(
+      id: .init(repository: repository, number: number),
+      kind: kind,
+      title: "Example",
+      author: "reviewer",
+      url: #require(URL(string: "https://github.com/owner/repo/pull/\(number)")),
+    )
+  }
+
 }

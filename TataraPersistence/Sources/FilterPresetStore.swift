@@ -6,6 +6,8 @@ import SQLiteData
 import TataraCore
 import TataraKit
 
+// MARK: - SavedFilterPreset
+
 @Table
 private struct SavedFilterPreset: Identifiable, Sendable {
   let id: String
@@ -14,10 +16,20 @@ private struct SavedFilterPreset: Identifiable, Sendable {
   var query: String
 }
 
+// MARK: - FilterPresetStore
+
 public actor FilterPresetStore {
-  private let database: any DatabaseWriter
+
+  // MARK: Lifecycle
+
   private init(_ database: any DatabaseWriter) {
     self.database = database
+  }
+
+  // MARK: Public
+
+  public nonisolated var client: FilterPresetClient {
+    .init(load: { try await self.load($0) }, save: { try await self.save($0, $1) }, delete: { try await self.delete($0, $1) })
   }
 
   @concurrent
@@ -34,21 +46,21 @@ public actor FilterPresetStore {
     var migrator = DatabaseMigrator()
     migrator.registerMigration("Create filter presets") { db in
       try #sql("""
-      CREATE TABLE "savedFilterPresets" (
-        "id" TEXT PRIMARY KEY NOT NULL,
-        "repository" TEXT NOT NULL,
-        "name" TEXT NOT NULL,
-        "query" TEXT NOT NULL
-      ) STRICT
-      """).execute(db)
+        CREATE TABLE "savedFilterPresets" (
+          "id" TEXT PRIMARY KEY NOT NULL,
+          "repository" TEXT NOT NULL,
+          "name" TEXT NOT NULL,
+          "query" TEXT NOT NULL
+        ) STRICT
+        """).execute(db)
     }
     try migrator.migrate(database)
     return Self(database)
   }
 
-  public nonisolated var client: FilterPresetClient {
-    .init(load: { try await self.load($0) }, save: { try await self.save($0, $1) }, delete: { try await self.delete($0, $1) })
-  }
+  // MARK: Private
+
+  private let database: any DatabaseWriter
 
   private func load(_ repository: RepositoryID) async throws -> [FilterPreset] {
     let scope = "\(repository.forge.rawValue):\(repository)"
@@ -78,4 +90,5 @@ public actor FilterPresetStore {
       try SavedFilterPreset.where { $0.id.eq(scope + "|" + id) && $0.repository.eq(scope) }.delete().execute(db)
     }
   }
+
 }

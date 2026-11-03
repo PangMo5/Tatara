@@ -5,26 +5,35 @@ import Foundation
 import Subprocess
 import TataraCore
 
-public struct CommandResult: Sendable {
-  public var output: Data
-  public var error: String
-  public var status: Int32
-  public var text: String {
-    String(decoding: output, as: UTF8.self)
-  }
+// MARK: - CommandResult
 
+public struct CommandResult: Sendable {
   public init(output: Data = Data(), error: String = "", status: Int32 = 0) {
     self.output = output
     self.error = error
     self.status = status
   }
+
+  public var output: Data
+  public var error: String
+  public var status: Int32
+
+  public var text: String {
+    String(decoding: output, as: UTF8.self)
+  }
 }
 
+// MARK: - CommandRunner
+
 public struct CommandRunner: Sendable {
-  public var run: @Sendable (String, [String], String?) async throws -> CommandResult
+
+  // MARK: Lifecycle
+
   public init(run: @escaping @Sendable (String, [String], String?) async throws -> CommandResult) {
     self.run = run
   }
+
+  // MARK: Public
 
   public static let live = Self { executable, arguments, input in
     try Task.checkCancellation()
@@ -36,20 +45,28 @@ public struct CommandRunner: Sendable {
         options.qualityOfService = .utility
         options.teardownSequence = [.gracefulShutDown(toProcessGroup: true, allowedDurationToNextStep: .milliseconds(250))]
         let result = try await Subprocess.run(
-          .name(executable), arguments: Arguments(arguments),
+          .name(executable),
+          arguments: Arguments(arguments),
           environment: .inherit.updating([
-            "GH_PROMPT_DISABLED": "1", "GH_PAGER": "cat", "PAGER": "cat",
-            "DFT_EXIT_CODE": "false", "DFT_IGNORE_COMMENTS": "false", "DFT_SKIP_UNCHANGED": "false",
+            "GH_PROMPT_DISABLED": "1",
+            "GH_PAGER": "cat",
+            "PAGER": "cat",
+            "DFT_EXIT_CODE": "false",
+            "DFT_IGNORE_COMMENTS": "false",
+            "DFT_SKIP_UNCHANGED": "false",
             "DFT_UNSTABLE": "yes",
           ]),
-          platformOptions: options, input: .string(input ?? ""),
-          output: .bytes(limit: 16 * 1024 * 1024), error: .string(limit: 65536),
+          platformOptions: options,
+          input: .string(input ?? ""),
+          output: .bytes(limit: 16 * 1024 * 1024),
+          error: .string(limit: 65536),
         )
         try Task.checkCancellation()
-        let status: Int32 = switch result.terminationStatus {
-        case let .exited(code): code
-        case let .signaled(signal): 128 + signal
-        }
+        let status: Int32 =
+          switch result.terminationStatus {
+          case .exited(let code): code
+          case .signaled(let signal): 128 + signal
+          }
         let output = Data(result.standardOutput)
         guard output.count < 16 * 1024 * 1024 else {
           throw TataraError(.incompleteResponse, detail: "Command output exceeds 16 MiB.")
@@ -66,6 +83,8 @@ public struct CommandRunner: Sendable {
     }
   }
 
+  public var run: @Sendable (String, [String], String?) async throws -> CommandResult
+
   public func checked(_ executable: String, _ arguments: [String], input: String? = nil) async throws -> CommandResult {
     try Task.checkCancellation()
     let result = try await run(executable, arguments, input)
@@ -76,4 +95,5 @@ public struct CommandRunner: Sendable {
     }
     return result
   }
+
 }

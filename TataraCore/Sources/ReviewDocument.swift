@@ -3,56 +3,42 @@
 
 import Foundation
 
+// MARK: - SourceLocation
+
 public struct SourceLocation: Hashable, Codable, Sendable {
-  public let path: String
-  public let line: Int
-  public let side: InlineComment.Side
   public init(path: String, line: Int, side: InlineComment.Side) {
     self.path = path
     self.line = line
     self.side = side
   }
+
+  public let path: String
+  public let line: Int
+  public let side: InlineComment.Side
 }
 
+// MARK: - DiffViewport
+
 public struct DiffViewport: Equatable, Sendable {
-  public var width: Int
-  public var wrap: Bool
-  public var offset: Int
   public init(width: Int, wrap: Bool = false, offset: Int = 0) {
     self.width = width
     self.wrap = wrap
     self.offset = offset
   }
+
+  public var width: Int
+  public var wrap: Bool
+  public var offset: Int
 }
 
+// MARK: - ReviewDocument
+
 public struct ReviewDocument: Equatable, Sendable {
-  public let lines: [[DiffSpan]]
-  public let displayLines: [[DiffSpan]]
-  public let searchableLines: [String]
-  public let diff: ReviewDiff?
-  /// Original alignment, retained when presentation expands changed pairs into separate rows.
-  public let sourceDiff: ReviewDiff?
-  public let diffSideWidth: Int
-  public let horizontalOffset: Int
-  public let wrapsLines: Bool
-  public let maximumHorizontalOffset: Int
-  public let commentKeys: [String]
-  private let commentRows: [String: Int]
-  private let commentIndices: [String: Int]
-  private let wrappedRows: [SourceLocation: [Int]]
-  private let logicalLeftRows: [Int]
-  private let logicalRightRows: [Int]
-  private let logicalAllRows: [Int]
-  public let isUnifiedDiff: Bool
-  public let diffPrefixWidth: Int
-  private let sourceRows: [SourceLocation: Int]
-  private let leftRows: [Int]
-  private let rightRows: [Int]
-  private let allSourceRows: [Int]
-  private let counterpartRows: [Int: Int]
+
+  // MARK: Lifecycle
 
   public init(lines: [[DiffSpan]] = []) {
-    self.init(lines: lines, checkingCancellation: {})
+    self.init(lines: lines, checkingCancellation: { })
   }
 
   public init(
@@ -79,12 +65,17 @@ public struct ReviewDocument: Equatable, Sendable {
     self.wrapsLines = wrapsLines
     self.maximumHorizontalOffset = maximumHorizontalOffset
     precondition(self.displayLines.count == lines.count, "Display rows must preserve source row indices.")
-    var indexLines: [String] = []
-    var left: [Int] = [], right: [Int] = [], all: [Int] = []
-    var sourceRows: [SourceLocation: Int] = [:]
-    var wrapped: [SourceLocation: [Int]] = [:]
-    var commentRows: [String: Int] = [:], commentKeys: [String] = []
-    var logicalLeft: [Int] = [], logicalRight: [Int] = [], logicalAll: [Int] = []
+    var indexLines = [String]()
+    var left = [Int]()
+    var right = [Int]()
+    var all = [Int]()
+    var sourceRows = [SourceLocation: Int]()
+    var wrapped = [SourceLocation: [Int]]()
+    var commentRows = [String: Int]()
+    var commentKeys = [String]()
+    var logicalLeft = [Int]()
+    var logicalRight = [Int]()
+    var logicalAll = [Int]()
     indexLines.reserveCapacity(lines.count)
     for (index, line) in lines.enumerated() {
       if index % 128 == 0 {
@@ -136,15 +127,18 @@ public struct ReviewDocument: Equatable, Sendable {
     leftRows = left
     rightRows = right
     allSourceRows = all
-    var counterparts: [Int: Int] = [:]
+    var counterparts = [Int: Int]()
     if isUnifiedDiff, let sourceDiff {
       for (index, row) in sourceDiff.rows.enumerated() {
         if index % 128 == 0 {
           try checkingCancellation()
         }
-        guard let lhs = row.left, let rhs = row.right,
-              let left = sourceRows[.init(path: row.path ?? sourceDiff.path, line: lhs.number, side: .left)],
-              let right = sourceRows[.init(path: row.path ?? sourceDiff.path, line: rhs.number, side: .right)] else { continue }
+        guard
+          let lhs = row.left,
+          let rhs = row.right,
+          let left = sourceRows[.init(path: row.path ?? sourceDiff.path, line: lhs.number, side: .left)],
+          let right = sourceRows[.init(path: row.path ?? sourceDiff.path, line: rhs.number, side: .right)]
+        else { continue }
         counterparts[left] = right
         counterparts[right] = left
       }
@@ -152,9 +146,26 @@ public struct ReviewDocument: Equatable, Sendable {
     counterpartRows = counterparts
   }
 
+  // MARK: Public
+
+  public let lines: [[DiffSpan]]
+  public let displayLines: [[DiffSpan]]
+  public let searchableLines: [String]
+  public let diff: ReviewDiff?
+  /// Original alignment, retained when presentation expands changed pairs into separate rows.
+  public let sourceDiff: ReviewDiff?
+  public let diffSideWidth: Int
+  public let horizontalOffset: Int
+  public let wrapsLines: Bool
+  public let maximumHorizontalOffset: Int
+  public let commentKeys: [String]
+  public let isUnifiedDiff: Bool
+  public let diffPrefixWidth: Int
+
   public func row(for location: SourceLocation, column: Int = 0) -> Int? {
     guard column > 0, let candidates = wrappedRows[location], let diff else { return sourceRows[location] }
-    var lower = 0, upper = candidates.count
+    var lower = 0
+    var upper = candidates.count
     while lower < upper {
       let middle = lower + (upper - lower) / 2
       let row = diff.rows[candidates[middle]]
@@ -213,7 +224,8 @@ public struct ReviewDocument: Equatable, Sendable {
       ? side.map { $0 == .left ? logicalLeftRows : logicalRightRows } ?? logicalAllRows
       : side.map { $0 == .left ? leftRows : rightRows } ?? allSourceRows
     guard !indices.isEmpty else { return nil }
-    var lower = 0, upper = indices.count
+    var lower = 0
+    var upper = indices.count
     while lower < upper {
       let middle = lower + (upper - lower) / 2
       if indices[middle] < row {
@@ -237,16 +249,29 @@ public struct ReviewDocument: Equatable, Sendable {
     guard let after else { return before }
     return row - before <= after - row ? before : after
   }
+
+  // MARK: Private
+
+  private let commentRows: [String: Int]
+  private let commentIndices: [String: Int]
+  private let wrappedRows: [SourceLocation: [Int]]
+  private let logicalLeftRows: [Int]
+  private let logicalRightRows: [Int]
+  private let logicalAllRows: [Int]
+  private let sourceRows: [SourceLocation: Int]
+  private let leftRows: [Int]
+  private let rightRows: [Int]
+  private let allSourceRows: [Int]
+  private let counterpartRows: [Int: Int]
+
 }
+
+// MARK: - SearchMatches
 
 /// Prepare both ordered navigation and viewport membership on the search worker.
 public struct SearchMatches: Equatable, Sendable, ExpressibleByArrayLiteral {
-  public let lines: [Int]
-  public let membership: Set<Int>
-  public let highlights: [Int: [Range<Int>]]
-  public let sides: [InlineComment.Side?]
-  public let ranges: [Range<Int>?]
-  public let sourceRanges: [Range<Int>?]
+
+  // MARK: Lifecycle
 
   public init(
     lines: [Int],
@@ -266,12 +291,37 @@ public struct SearchMatches: Equatable, Sendable, ExpressibleByArrayLiteral {
   public init(arrayLiteral elements: Int...) {
     self.init(lines: elements)
   }
+
+  // MARK: Public
+
+  public let lines: [Int]
+  public let membership: Set<Int>
+  public let highlights: [Int: [Range<Int>]]
+  public let sides: [InlineComment.Side?]
+  public let ranges: [Range<Int>?]
+  public let sourceRanges: [Range<Int>?]
+
 }
 
+// MARK: - PaneSearch
+
 public struct PaneSearch: Equatable, Sendable {
+
+  // MARK: Lifecycle
+
+  public init() { }
+
+  // MARK: Public
+
   public var query = ""
   public var isEditing = false
   public var result: SearchMatches = []
+  public var origin = 0
+  public var originSide: InlineComment.Side?
+  public var originColumn: Int?
+  public var direction = 1
+  public var selection = 0
+
   public var matches: [Int] {
     get { result.lines }
     set { result = .init(lines: newValue) }
@@ -281,20 +331,27 @@ public struct PaneSearch: Equatable, Sendable {
     result.membership
   }
 
-  public var origin = 0
-  public var originSide: InlineComment.Side?
-  public var originColumn: Int?
-  public var direction = 1
-  public var selection = 0
-  public init() {}
   public var isActive: Bool {
     isEditing || !query.isEmpty
   }
+
 }
+
+// MARK: - SearchPattern
 
 /// A case-sensitive regular expression, with explicit (?i) for insensitive matching.
 /// Progress callbacks allow cancellation during expensive matching, not only between lines.
 public struct SearchPattern: Sendable {
+
+  // MARK: Lifecycle
+
+  public init(_ query: String) throws {
+    do { expression = try NSRegularExpression(pattern: query) }
+    catch { throw TataraError(.invalidResponse, detail: "Invalid search expression: \(error.localizedDescription)") }
+  }
+
+  // MARK: Public
+
   public struct WordQuery: Equatable, Sendable {
     public let pattern: String
     public let range: Range<Int>
@@ -324,14 +381,9 @@ public struct SearchPattern: Sendable {
     return WordQuery(pattern: whole && keyword ? #"(?<!\w)"# + literal + #"(?!\w)"# : literal, range: range)
   }
 
-  private let expression: NSRegularExpression
-  public init(_ query: String) throws {
-    do { expression = try NSRegularExpression(pattern: query) }
-    catch { throw TataraError(.invalidResponse, detail: "Invalid search expression: \(error.localizedDescription)") }
-  }
-
   public func ranges(in text: String) throws -> [Range<Int>] {
-    var result: [Range<Int>] = [], exceededLimit = false
+    var result = [Range<Int>]()
+    var exceededLimit = false
     expression.enumerateMatches(in: text, options: [.reportProgress], range: NSRange(
       text.startIndex...,
       in: text,
@@ -375,4 +427,9 @@ public struct SearchPattern: Sendable {
     try Task.checkCancellation()
     return found
   }
+
+  // MARK: Private
+
+  private let expression: NSRegularExpression
+
 }

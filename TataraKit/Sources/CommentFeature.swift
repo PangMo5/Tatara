@@ -7,8 +7,35 @@ import TataraCore
 
 @Reducer
 public struct CommentFeature {
+
+  // MARK: Lifecycle
+
+  public init() { }
+
+  // MARK: Public
+
   @ObservableState
   public struct State: Equatable {
+
+    // MARK: Lifecycle
+
+    public init(
+      item: ForgeItem,
+      expectedHead: String?,
+      target: DiscussionComment,
+      operation: CommentOperation = .reply,
+      strings: [String: String] = [:],
+    ) {
+      self.item = item
+      self.expectedHead = expectedHead
+      self.target = target
+      self.operation = operation
+      body = operation == .edit ? target.body : ""
+      self.strings = strings
+    }
+
+    // MARK: Public
+
     public var item: ForgeItem
     public var expectedHead: String?
     public var target: DiscussionComment
@@ -27,21 +54,6 @@ public struct CommentFeature {
     public var error: TataraError?
     public var strings: [String: String]
 
-    public init(
-      item: ForgeItem,
-      expectedHead: String?,
-      target: DiscussionComment,
-      operation: CommentOperation = .reply,
-      strings: [String: String] = [:],
-    ) {
-      self.item = item
-      self.expectedHead = expectedHead
-      self.target = target
-      self.operation = operation
-      body = operation == .edit ? target.body : ""
-      self.strings = strings
-    }
-
     public var mutation: CommentMutation? {
       guard let context, context.allows(operation) else { return nil }
       let submittedBody = operation == .reply && target.anchor == nil ? "@\(context.comment.author)\n\n" + body : body
@@ -58,6 +70,7 @@ public struct CommentFeature {
     public func text(_ key: String) -> String {
       strings[key] ?? key
     }
+
   }
 
   public enum Action: Sendable {
@@ -74,27 +87,25 @@ public struct CommentFeature {
     case submissionResponse(Result<Void, TataraError>)
     case close
     case delegate(Delegate)
+
     public enum Delegate: Sendable { case changed, dismissed }
   }
-
-  @Dependency(ForgeClient.self) var forge
-  @Dependency(DocumentClient.self) var documents
-  enum CancelID { case context, preview, submission }
-  public init() {}
 
   public var body: some ReducerOf<Self> {
     Reduce { state, action in
       switch action {
       case .appeared:
-        let item = state.item, target = state.target
+        let item = state.item
+        let target = state.target
         return .run { [forge] send in
           do { try await send(.contextResponse(.success(forge.commentContext(item, target)))) }
           catch is CancellationError {} catch { await send(.contextResponse(.failure(.wrapping(error)))) }
         }.cancellable(id: CancelID.context)
-      case let .contextResponse(result):
+
+      case .contextResponse(let result):
         state.isLoading = false
         switch result {
-        case let .success(context):
+        case .success(let context):
           if state.operation == .edit, state.body == state.target.body {
             state.body = context.comment.body
           }
@@ -106,10 +117,12 @@ public struct CommentFeature {
           if !context.allows(state.operation) {
             state.error = .init(.unavailable)
           }
-        case let .failure(error): state.error = error
+
+        case .failure(let error): state.error = error
         }
         return .none
-      case let .operationSelected(operation):
+
+      case .operationSelected(let operation):
         guard !state.isSubmitting, state.context?.allows(operation) == true else { return .none }
         state.operation = operation
         state.body = operation == .edit ? state.target.body : ""
@@ -119,25 +132,29 @@ public struct CommentFeature {
         state.error = nil
         state.generation += 1
         return .cancel(id: CancelID.preview)
-      case let .bodyChanged(value):
+
+      case .bodyChanged(let value):
         guard !state.isSubmitting else { return .none }
         state.body = value
         state.isConfirming = false
         state.isPreparing = false
         state.generation += 1
         return .cancel(id: CancelID.preview)
-      case let .reactionSelected(value):
+
+      case .reactionSelected(let value):
         guard !state.isSubmitting else { return .none }
         state.reaction = value
         state.isConfirming = false
         state.isPreparing = false
         state.generation += 1
         return .cancel(id: CancelID.preview)
-      case let .previewPressed(width):
+
+      case .previewPressed(let width):
         guard !state.isSubmitting, !state.isLoading, let mutation = state.mutation else { return .none }
-        if mutation.operation == .reply || mutation.operation == .edit,
-           mutation.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || state.body
-           .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if
+          mutation.operation == .reply || mutation.operation == .edit,
+          mutation.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || state.body
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         {
           state.error = .init(.emptyReview)
           return .none
@@ -165,27 +182,38 @@ public struct CommentFeature {
             .failure(.wrapping(error)),
           )) }
         }.cancellable(id: CancelID.preview, cancelInFlight: true)
-      case let .previewResponse(generation, result):
+
+      case .previewResponse(let generation, let result):
         guard generation == state.generation else { return .none }
         state.isPreparing = false
         switch result {
-        case let .success(document): state.preview = document
+        case .success(let document): state.preview = document
           state.previewScroll = 0
           state.isConfirming = true
           state.hasSubmittedPreview = false
-        case let .failure(error): state.error = error
+
+        case .failure(let error): state.error = error
         }
         return .none
-      case let .previewScrolled(delta):
+
+      case .previewScrolled(let delta):
         state.previewScroll = max(0, min(max(0, (state.preview?.lines.count ?? 0) - 1), state.previewScroll + delta))
         return .none
+
       case .editPressed:
         guard !state.isSubmitting else { return .none }
         state.isConfirming = false
         return .none
+
       case .confirmPressed:
-        guard state.isConfirming, !state.hasSubmittedPreview, !state.isSubmitting, !state.isPreparing, state.preview != nil,
-              let mutation = state.mutation else { return .none }
+        guard
+          state.isConfirming,
+          !state.hasSubmittedPreview,
+          !state.isSubmitting,
+          !state.isPreparing,
+          state.preview != nil,
+          let mutation = state.mutation
+        else { return .none }
         state.isSubmitting = true
         state.hasSubmittedPreview = true
         state.error = nil
@@ -194,19 +222,30 @@ public struct CommentFeature {
             await send(.submissionResponse(.success(())))
           } catch { await send(.submissionResponse(.failure(.wrapping(error)))) }
         }.cancellable(id: CancelID.submission)
-      case let .submissionResponse(result):
+
+      case .submissionResponse(let result):
         state.isSubmitting = false
         switch result {
         case .success: return .send(.delegate(.changed))
-        case let .failure(error): state.error = error
+        case .failure(let error): state.error = error
           state.isConfirming = false
         }
         return .none
+
       case .close:
         guard !state.isSubmitting else { return .none }
         return .send(.delegate(.dismissed))
+
       case .delegate: return .none
       }
     }
   }
+
+  // MARK: Internal
+
+  enum CancelID { case context, preview, submission }
+
+  @Dependency(ForgeClient.self) var forge
+  @Dependency(DocumentClient.self) var documents
+
 }

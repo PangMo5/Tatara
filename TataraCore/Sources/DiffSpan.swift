@@ -3,31 +3,45 @@
 
 import Foundation
 
+// MARK: - DiffRole
+
 public enum DiffRole: String, Codable, Sendable {
-  case metadata, filePath, hunkHeader, diffHeader, comment, added, removed
-  case commentBody, commentCode, commentEmphasis, commentLink, commentQuote, commentStrikethrough, commentGap
+  case metadata
+  case filePath
+  case hunkHeader
+  case diffHeader
+  case comment
+  case added
+  case removed
+  case commentBody
+  case commentCode
+  case commentEmphasis
+  case commentLink
+  case commentQuote
+  case commentStrikethrough
+  case commentGap
+
+  // MARK: Public
 
   public var isComment: Bool {
     switch self {
-    case .comment, .commentBody, .commentCode, .commentEmphasis, .commentLink, .commentQuote, .commentStrikethrough: true
+    case .comment,
+         .commentBody,
+         .commentCode,
+         .commentEmphasis,
+         .commentLink,
+         .commentQuote,
+         .commentStrikethrough: true
     default: false
     }
   }
 }
 
+// MARK: - DiffSpan
+
 public struct DiffSpan: Equatable, Codable, Sendable {
-  public var text: String
-  public var color: Int?
-  public var bold: Bool
-  public var role: DiffRole?
-  public var side: InlineComment.Side?
-  /// Difftastic's syntax category for a changed token; retain unknown future categories verbatim.
-  public var highlight: String?
-  public var commentKey: String?
-  public var commentSide: InlineComment.Side?
-  public var isChanged: Bool {
-    role == .added || role == .removed
-  }
+
+  // MARK: Lifecycle
 
   public init(
     text: String,
@@ -48,4 +62,21 @@ public struct DiffSpan: Equatable, Codable, Sendable {
     self.commentKey = commentKey
     self.commentSide = commentSide
   }
+
+  // MARK: Public
+
+  public var text: String
+  public var color: Int?
+  public var bold: Bool
+  public var role: DiffRole?
+  public var side: InlineComment.Side?
+  /// Difftastic's syntax category for a changed token; retain unknown future categories verbatim.
+  public var highlight: String?
+  public var commentKey: String?
+  public var commentSide: InlineComment.Side?
+
+  public var isChanged: Bool {
+    role == .added || role == .removed
+  }
+
 }

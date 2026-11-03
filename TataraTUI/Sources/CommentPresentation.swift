@@ -7,7 +7,9 @@ import TermLoom
 
 extension WorkspacePresentation {
   func commentEditor(_ comment: CommentFeature.State, into result: inout TerminalScreen) {
-    let rect = geometry.popup, x = rect.x + 2, width = rect.width - 4
+    let rect = geometry.popup
+    let x = rect.x + 2
+    let width = rect.width - 4
     pane(rect, title: l10n(comment.operation.titleKey), selected: true, into: &result)
     if rect.height < 20 {
       result.text(

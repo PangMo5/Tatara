@@ -14,10 +14,14 @@ client boundary while retaining their own terminology and capabilities.
 
 ## Try from source
 
-Requires Xcode with Swift 6.3 or newer and [mise](https://mise.jdx.dev).
+Requires Xcode 27.2 (Swift 6.4.2, macOS 27.2 SDK) and [mise](https://mise.jdx.dev).
+The project pins its tools in `.mise.toml`; set `DEVELOPER_DIR` if your Xcode
+installation uses another path. Development uses colocated [Jujutsu](https://jj-vcs.dev)
+with the existing Git history. See [contributing](CONTRIBUTING.md).
 
 ```sh
 mise install
+mise run toolchain
 mise run generate
 mise run build
 DerivedData/Build/Products/Debug/tatara --demo
@@ -30,14 +34,15 @@ Run without `--repo` inside a repository to use `gh repo view`'s repository
 selection. `--host github.example.com --repo OWNER/REPO` selects an Enterprise
 host; authenticate it first with `gh auth login --hostname github.example.com`.
 
-For a local optimized installation, run `swift Scripts/Tatara.swift build Release`
-and `swift Scripts/Tatara.swift install-local`. This installs into
+For a local optimized installation, run `mise exec -- swift Scripts/Tatara.swift build Release`
+and `mise exec -- swift Scripts/Tatara.swift install-local`. This installs into
 `~/.local/share/tatara/local/bin`; add that directory to your mise environment
 PATH. Re-run the installer after rebuilding, then restart Tatara.
 
 ## Binary installation
 
-The first public release and Homebrew tap publication have **not happened yet**.
+Tatara is pre-release software. The first binary release and Homebrew tap
+publication have **not happened yet**.
 The release workflow prepares the following installation paths.
 
 Recommended, after publication:
@@ -179,7 +184,7 @@ Interactive diffs use difftastic's JSON alignment and token coordinates, then
 validate source anchors against GitHub's patch. Tatara enables `DFT_UNSTABLE=yes`
 for its child process; JSON schema mismatches are visible errors. Formats without
 source alignment, including binary and syntactically unchanged results, do not
-invent cursor anchors. The adapter is validated against difftastic 0.69/0.70.
+invent cursor anchors. The adapter is validated against difftastic 0.72.0.
 
 Ordinary surfaces inherit the terminal background, including its configured
 transparency and blur. Catppuccin colors style text, borders and interaction
@@ -220,12 +225,12 @@ dependency provides the fix; changed source checksums require an explicit review
 ```sh
 mise run test
 mise run format
-swift Scripts/Tatara.swift localizations --check
-swift Scripts/Tatara.swift notices --check
-uvx --from 'reuse[charset-normalizer]' reuse lint
-swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Debug/tatara
-swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara --workspace
-swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara --stress
+mise exec -- swift Scripts/Tatara.swift localizations --check
+mise exec -- swift Scripts/Tatara.swift notices --check
+mise exec -- uvx --from 'reuse[charset-normalizer]==6.2.0' reuse lint
+mise exec -- swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Debug/tatara
+mise exec -- swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara --workspace
+mise exec -- swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara --stress
 ```
 
 See [architecture and initial boundaries](docs/ARCHITECTURE.md),

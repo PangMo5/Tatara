@@ -11,7 +11,8 @@ import TataraSystem
 import Testing
 
 struct ReviewWorkflowTests {
-  @Test func `live difftastic adapter returns structured source rows`() async throws {
+  @Test
+  func `live difftastic adapter returns structured source rows`() async throws {
     var forge = ForgeClient()
     forge.content = { _, revision, _ in Data((revision.hasPrefix("a") ? "let a = 1\n" : "let a = 2\n").utf8) }
     let renderer = Difftastic(forge: forge)
@@ -30,7 +31,8 @@ struct ReviewWorkflowTests {
     #expect(diff.revision == request.revision)
   }
 
-  @Test func `tree keeps directories distinct from files and filters with ancestors`() {
+  @Test
+  func `tree keeps directories distinct from files and filters with ancestors`() {
     let tree = FileTree(paths: ["a", "a/b.swift", "Sources/File10.swift", "Sources/File2.swift", "README.md"])
     #expect(Set(tree.rows.map(\.id)).count == tree.rows.count)
     #expect(tree.rows.first?.id == "directory:/")
@@ -56,7 +58,8 @@ struct ReviewWorkflowTests {
     #expect(tree.visible(collapsed: ["/"], matching: ["README.md"]).map(\.path) == ["/", "README.md"])
   }
 
-  @Test func `configuration selects a flat file list and rejects unknown layouts`() throws {
+  @Test
+  func `configuration selects a flat file list and rejects unknown layouts`() throws {
     let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".toml")
     defer { try? FileManager.default.removeItem(at: file) }
     try "files_view = \"list\"".write(to: file, atomically: true, encoding: .utf8)
@@ -66,7 +69,8 @@ struct ReviewWorkflowTests {
     #expect(throws: TataraError.self) { try Configuration.load(path: file.path) }
   }
 
-  @Test func `sidebar width is configurable and invalid dimensions are visible errors`() throws {
+  @Test
+  func `sidebar width is configurable and invalid dimensions are visible errors`() throws {
     let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".toml")
     defer { try? FileManager.default.removeItem(at: file) }
     #expect(Preferences().sidebarWidth == 52)
@@ -78,7 +82,8 @@ struct ReviewWorkflowTests {
     }
   }
 
-  @Test func `structured diff maps original source coordinates and changed tokens`() throws {
+  @Test
+  func `structured diff maps original source coordinates and changed tokens`() throws {
     let json = #"{"language":"Swift","status":"changed","aligned_lines":[[0,0],[1,1],[null,2],[2,3]],"chunks":[[{"lhs":{"line_number":0,"changes":[{"start":8,"end":9,"content":"1","highlight":"normal"}]},"rhs":{"line_number":0,"changes":[{"start":8,"end":9,"content":"3","highlight":"normal"}]}},{"rhs":{"line_number":2,"changes":[{"start":0,"end":3,"content":"let","highlight":"keyword"}]}}]]}"#
     let diff = try ReviewDiff.decode(
       Data(json.utf8),
@@ -93,12 +98,14 @@ struct ReviewWorkflowTests {
     #expect(diff.rows[0].right?.spans.contains(.init(text: "3", role: .added, highlight: "normal")) == true)
     #expect(diff.rows[2].right?.spans.first?.highlight == "keyword")
     let future = try ReviewDiff.decode(
-      Data(json.replacingOccurrences(of: "keyword", with: "future_category").utf8),
-      before: "let a = 1\nlet b = 2\n", after: "let a = 3\nlet b = 2\nlet c = 4\n", path: "File.swift",
+      Data(json.replacing("keyword", with: "future_category").utf8),
+      before: "let a = 1\nlet b = 2\n",
+      after: "let a = 3\nlet b = 2\nlet c = 4\n",
+      path: "File.swift",
     )
     let restored = try JSONDecoder().decode(ReviewDiff.self, from: JSONEncoder().encode(future))
     #expect(restored.rows[2].right?.spans.first?.highlight == "future_category")
-    let invalid = json.replacingOccurrences(of: "\"start\":8", with: "\"start\":99")
+    let invalid = json.replacing("\"start\":8", with: "\"start\":99")
     #expect(throws: TataraError.self) { try ReviewDiff.decode(
       Data(invalid.utf8),
       before: "let a = 1\nlet b = 2\n",
@@ -107,7 +114,8 @@ struct ReviewWorkflowTests {
     ) }
   }
 
-  @Test func `line ranges stay within a single actual patch hunk`() throws {
+  @Test
+  func `line ranges stay within a single actual patch hunk`() throws {
     let patch = "@@ -1,2 +1,2 @@ function name\n-old\n+new\n context\n@@ -20 +20 @@ next function\n-next\n+updated"
     #expect(ReviewAnchor.contains(range: 1 ... 2, side: .right, patch: patch))
     #expect(!ReviewAnchor.contains(range: 2 ... 20, side: .right, patch: patch))
@@ -120,7 +128,8 @@ struct ReviewWorkflowTests {
     #expect(json["startLine"] == nil)
   }
 
-  @MainActor @Test func `Shift V selects a reverse range and opens its locked comment editor`() async throws {
+  @MainActor @Test
+  func `Shift V selects a reverse range and opens its locked comment editor`() async throws {
     let repository = try RepositoryID("owner/repo")
     let item = try ForgeItem(
       id: .init(repository: repository, number: 1),
@@ -146,7 +155,7 @@ struct ReviewWorkflowTests {
     state.document = .init(
       lines: [[.init(text: "a")], [.init(text: "b")]],
       diff: .init(path: file.path, language: "Swift", status: "changed", rows: rows, revision: state.detail?.revision),
-      checkingCancellation: {},
+      checkingCancellation: { },
     )
     let diff = try #require(state.document.diff)
     let store = TestStore(initialState: state) { WorkspaceFeature() } withDependencies: {
@@ -186,10 +195,12 @@ struct ReviewWorkflowTests {
     #expect(store.state.review?.comments.first?.body == "Preserve this draft.")
   }
 
-  @Test func `presets survive reopening and stay repository scoped`() async throws {
+  @Test
+  func `presets survive reopening and stay repository scoped`() async throws {
     let url = FileManager.default.temporaryDirectory.appendingPathComponent("tatara-presets-\(UUID())/state.sqlite")
     defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-    let one = try RepositoryID("owner/one"), two = try RepositoryID("owner/two")
+    let one = try RepositoryID("owner/one")
+    let two = try RepositoryID("owner/two")
     let store = try await FilterPresetStore.open(at: url)
     let preset = FilterPreset(id: "test", name: "My reviews", query: "is:open review-requested:@me")
     try await store.client.save(one, preset)
@@ -202,7 +213,8 @@ struct ReviewWorkflowTests {
     #expect(try await reopened.client.load(one).isEmpty)
   }
 
-  @Test func `remote search preserves merged pull request state`() async throws {
+  @Test
+  func `remote search preserves merged pull request state`() async throws {
     let payload = #"{"total_count":1,"incomplete_results":false,"items":[{"number":1,"title":"Merged","user":{"login":"author"},"html_url":"https://github.com/owner/repo/pull/1","state":"closed","labels":[],"pull_request":{"merged_at":"2026-09-07T00:00:00Z"}}]}"#
     let adapter = GitHubAdapter(runner: .init { _, arguments, _ in
       if arguments.contains("graphql") {
@@ -214,7 +226,8 @@ struct ReviewWorkflowTests {
     #expect(page.items.first?.state == .merged)
   }
 
-  @Test func `remote search rejects results from another repository`() async throws {
+  @Test
+  func `remote search rejects results from another repository`() async throws {
     let payload = #"{"total_count":1,"incomplete_results":false,"items":[{"number":1,"title":"Result","user":{"login":"author"},"body":"","html_url":"https://github.com/another/repo/pull/1","state":"open","labels":[]}]}"#
     let adapter = GitHubAdapter(runner: .init { executable, arguments, _ in
       #expect(executable == "gh")
@@ -226,7 +239,8 @@ struct ReviewWorkflowTests {
     } catch { #expect((error as? TataraError)?.code == .invalidResponse) }
   }
 
-  @Test func `decoded file snapshots rebuild anchors without serializing derived state`() throws {
+  @Test
+  func `decoded file snapshots rebuild anchors without serializing derived state`() throws {
     let file = ChangedFile(path: "Source.swift", patch: "@@ -1,2 +1,2 @@\n-old\n+new\n context\n@@ -20 +20 @@\n-next\n+updated")
     let data = try JSONEncoder().encode(file)
     let decoded = try JSONDecoder().decode(ChangedFile.self, from: data)

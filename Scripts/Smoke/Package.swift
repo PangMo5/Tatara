@@ -1,4 +1,4 @@
-// swift-tools-version: 6.3
+// swift-tools-version: 6.4
 // SPDX-FileCopyrightText: 2026 PangMo5 and contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 
@@ -8,7 +8,7 @@ let package = Package(
   name: "TataraSmoke",
   platforms: [.macOS(.v15)],
   products: [.executable(name: "tatara-smoke", targets: ["TataraSmoke"])],
-  dependencies: [.package(url: "https://github.com/migueldeicaza/SwiftTerm", exact: "1.20.0")],
+  dependencies: [.package(url: "https://github.com/migueldeicaza/SwiftTerm", exact: "1.99.2")],
   targets: [.executableTarget(
     name: "TataraSmoke",
     dependencies: [.product(name: "SwiftTerm", package: "SwiftTerm")],

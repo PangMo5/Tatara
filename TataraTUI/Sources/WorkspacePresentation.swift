@@ -32,6 +32,81 @@ struct WorkspacePresentation {
     WorkspaceGeometry(size: size, preferredSidebarWidth: store.preferences.sidebarWidth, isSelectingItems: store.isSelectingItems)
   }
 
+  var mode: String {
+    if store.filterEditor != nil {
+      return l10n("Filters and presets")
+    }
+    if store.review != nil {
+      return l10n("Review")
+    }
+    if store.visualStart != nil, store.pane == .content {
+      return l10n("Visual")
+    }
+    if store.isSearching {
+      return l10n("Search")
+    }
+    if store.activeSearch.isActive {
+      return l10n(store.pane == .content && !store.showsHelp ? "Find" : "Filter")
+    }
+    return l10n("Normal")
+  }
+
+  var scope: String {
+    switch store.searchScope { case .items: l10n(store.kind == .pullRequest ? "Pull requests" : "Issues")
+    case .files: l10n("Files")
+    case .content: l10n(Self.tabTitle(store.tab))
+    case .help: l10n("Help") }
+  }
+
+  var searchCount: String {
+    switch store.searchScope {
+    case .items: "\(store.visibleItems.count)/\(store.items.count)"
+    case .files: "\(store.visibleFiles.count)/\(store.detail?.files.count ?? 0)"
+    case .help: "\(store.visibleHelp.count)/\(KeyCommand.allCases.count)"
+    case .content: store.isFinding
+      ? l10n("Finding…")
+      : !store.isDocumentCurrent
+        ? l10n("Preview")
+        : store.activeSearch.matches
+          .isEmpty ? l10n("No matches.") : "\(store.activeSearch.selection + 1)/\(store.activeSearch.matches.count)"
+    }
+  }
+
+  var activity: String {
+    if store.review?.isSubmitting == true {
+      return l10n("Submitting…")
+    }
+    if store.error != nil || store.review?.error != nil {
+      return l10n("Error")
+    }
+    if store.isLoading {
+      return l10n("Loading…")
+    }
+    if store.isLoadingDiff {
+      return l10n("Loading diff…")
+    }
+    if store.isLoadingDetail {
+      return l10n("Loading details…")
+    }
+    if store.isPreparingDocument {
+      return l10n("Preparing text…")
+    }
+    if store.isFinding || store.isSearchingFiles {
+      return l10n("Finding…")
+    }
+    if !store.isDocumentCurrent {
+      return l10n("Preview")
+    }
+    return store.nextPage != nil ? "\(key(.loadMore)) · \(l10n("Load more"))" : l10n("Ready")
+  }
+
+  static func tabTitle(_ tab: WorkspaceFeature.ContentTab) -> String {
+    switch tab { case .overview: "Overview"
+    case .diff: "Diff"
+    case .discussion: "Discussion"
+    case .checks: "Checks" }
+  }
+
   func screen() -> TerminalScreen {
     var result = TerminalScreen(ascii: ascii)
     result.operations.append(.fill(Rect(size: size), palette.background))
@@ -101,7 +176,9 @@ struct WorkspacePresentation {
   }
 
   func items(into result: inout TerminalScreen) {
-    let rect = geometry.items, visible = store.visibleItems, count = max(1, (rect.height - 3) / store.itemRowHeight)
+    let rect = geometry.items
+    let visible = store.visibleItems
+    let count = max(1, (rect.height - 3) / store.itemRowHeight)
     let selected = store.selectedItemIndex ?? 0
     let start = min(max(0, visible.count - count), max(0, store.itemsScroll))
     pane(
@@ -122,10 +199,16 @@ struct WorkspacePresentation {
         result.operations.append(.fill(row, palette.sidebarSelection))
       }
       let current = store.detail.flatMap { $0.item.id == item.id ? $0.item : nil } ?? item
-      let status = current.isDraft ? (ascii ? "D" : "◌") : current.state == .merged ? (ascii ? "M" : "◆") : current
-        .state == .closed ? (ascii ? "X" : "×") : (ascii ? "O" : "○")
-      let color = current.isDraft ? palette.muted : current.state == .merged ? palette.mauve : current.state == .closed ? palette
-        .red : palette.green
+      let status = current.isDraft
+        ? (ascii ? "D" : "◌")
+        : current.state == .merged
+          ? (ascii ? "M" : "◆")
+          : current
+            .state == .closed ? (ascii ? "X" : "×") : (ascii ? "O" : "○")
+      let color = current.isDraft
+        ? palette.muted
+        : current.state == .merged ? palette.mauve : current.state == .closed ? palette
+          .red : palette.green
       result.text(
         selected ? (ascii ? ">" : "▸") : " ",
         in: Rect(x: row.x, y: row.y, width: 1, height: 1),
@@ -158,8 +241,10 @@ struct WorkspacePresentation {
           in: Rect(x: row.x + 3, y: row.y + 1, width: row.width - 4, height: 1),
           color: palette.muted,
         )
-        let details = [current.github?.headBranch.map { $0 + " → " + (current.github?.baseBranch ?? "?") },
-                       current.labels.isEmpty ? nil : current.labels.joined(separator: " · ")].compactMap(\.self)
+        let details = [
+          current.github?.headBranch.map { $0 + " → " + (current.github?.baseBranch ?? "?") },
+          current.labels.isEmpty ? nil : current.labels.joined(separator: " · "),
+        ].compactMap(\.self)
           .joined(separator: " · ")
         result.text(details, in: Rect(x: row.x + 3, y: row.y + 2, width: row.width - 4, height: 1), color: palette.overlay2)
       }
@@ -217,7 +302,8 @@ struct WorkspacePresentation {
       in: Rect(x: rect.x + 2, y: rect.y + 3, width: rect.width - 4, height: 1),
       color: palette.text,
     )
-    let count = max(1, rect.height - 8), start = max(0, picker.selection - count + 1)
+    let count = max(1, rect.height - 8)
+    let start = max(0, picker.selection - count + 1)
     for (index, item) in picker.items.dropFirst(start).prefix(count).enumerated() {
       let row = Rect(x: rect.x + 1, y: rect.y + 5 + index, width: rect.width - 2, height: 1)
       if index + start == picker.selection {
@@ -254,7 +340,7 @@ struct WorkspacePresentation {
 
   func itemBadges(_ item: ForgeItem) -> String {
     guard let info = item.github else { return "" }
-    var badges: [String] = []
+    var badges = [String]()
     if let checks = info.checksState {
       badges
         .append("CI" +
@@ -270,7 +356,9 @@ struct WorkspacePresentation {
   }
 
   func files(into result: inout TerminalScreen) {
-    let rect = geometry.files, visible = store.visibleFileRows, count = max(1, rect.height - 3)
+    let rect = geometry.files
+    let visible = store.visibleFileRows
+    let count = max(1, rect.height - 3)
     let selected = store.fileCursorIndex ?? 0
     let start = min(max(0, visible.count - count), max(0, store.filesScroll))
     let reviewPrefix = store.detail
@@ -323,8 +411,10 @@ struct WorkspacePresentation {
     }
     if visible.isEmpty {
       result.text(
-        l10n(store.isLoadingDetail || store.isSearchingFiles ? "Loading…" : store
-          .fileMatches != nil ? "No matches." : "No changed files."),
+        l10n(store.isLoadingDetail || store.isSearchingFiles
+          ? "Loading…"
+          : store
+            .fileMatches != nil ? "No matches." : "No changed files."),
         in: Rect(x: rect.x + 1, y: rect.y + 2, width: rect.width - 2, height: 1),
         color: palette.muted,
       )
@@ -333,7 +423,7 @@ struct WorkspacePresentation {
   }
 
   func fileBadges(_ file: ChangedFile) -> [(text: String, color: Color)] {
-    var badges: [(text: String, color: Color)] = []
+    var badges = [(text: String, color: Color)]()
     let comments = store.detail?.commentCount(at: file.path) ?? 0
     if comments > 0 {
       badges.append(("c\(comments)", palette.teal))
@@ -349,8 +439,10 @@ struct WorkspacePresentation {
 
   func fileStatus(_ status: String) -> (symbol: String, title: String, color: Color) {
     switch status {
-    case "added", "created": ("A", "Added", palette.green)
-    case "removed", "deleted": ("D", "Deleted", palette.red)
+    case "added",
+         "created": ("A", "Added", palette.green)
+    case "removed",
+         "deleted": ("D", "Deleted", palette.red)
     case "modified": ("M", "Modified", palette.yellow)
     case "changed": ("M", "Changed", palette.yellow)
     case "renamed": ("R", "Renamed", palette.blue)
@@ -365,14 +457,16 @@ struct WorkspacePresentation {
     let text = TerminalText.sanitize(value)
     guard TerminalWidth.of(text) > width else { return text }
     guard width > 1 else { return ascii ? "~" : "…" }
-    var suffix = "", suffixWidth = 0
+    var suffix = ""
+    var suffixWidth = 0
     for character in text.reversed() {
       let cells = TerminalWidth.of(character)
       guard suffixWidth + cells <= min(12, width / 2) else { break }
       suffix.insert(character, at: suffix.startIndex)
       suffixWidth += cells
     }
-    var prefix = "", prefixWidth = 0
+    var prefix = ""
+    var prefixWidth = 0
     for character in text {
       let cells = TerminalWidth.of(character)
       guard prefixWidth + cells <= width - suffixWidth - 1 else { break }
@@ -383,7 +477,8 @@ struct WorkspacePresentation {
   }
 
   func content(into result: inout TerminalScreen) {
-    let rect = geometry.content, count = max(1, rect.height - 3)
+    let rect = geometry.content
+    let count = max(1, rect.height - 3)
     let offset = store.scroll
     let panelRow = store.review == nil ? nil : store.reviewRow
     let panelHeight = panelRow == nil ? 0 : store.reviewPanelHeight
@@ -394,7 +489,7 @@ struct WorkspacePresentation {
       into: &result,
     )
     result.operations.append(.fill(Rect(x: rect.x + 1, y: rect.y + 2, width: rect.width - 2, height: count), palette.background))
-    var header: [Span] = []
+    var header = [Span]()
     for tab in WorkspaceFeature.ContentTab.allCases {
       header.append(Span(
         " " + l10n(Self.tabTitle(tab)) + " ",
@@ -418,10 +513,12 @@ struct WorkspacePresentation {
       let comment = spans.contains { $0.commentKey != nil || $0.commentSide != nil }
       let commentSide = spans.first(where: { $0.commentSide != nil })?.commentSide
       let commentX = rect.x + 1 + (!store.document.isUnifiedDiff && commentSide == .right ? store.document.diffSideWidth + 3 : 0)
-      let commentWidth = commentSide != nil && !store.document.isUnifiedDiff ? store.document.diffSideWidth : min(
-        rect.width - 2,
-        116,
-      )
+      let commentWidth = commentSide != nil && !store.document.isUnifiedDiff
+        ? store.document.diffSideWidth
+        : min(
+          rect.width - 2,
+          116,
+        )
       let focused = store.focusedCommentKey != nil && spans.contains { $0.commentKey == store.focusedCommentKey }
       if comment {
         result.operations.append(.fill(
@@ -434,8 +531,10 @@ struct WorkspacePresentation {
         result.text(
           ascii ? "|" : "│",
           in: Rect(x: commentX, y: y, width: 1, height: 1),
-          color: focused ? palette.lavender : commentSide == .left ? palette.red : commentSide == .right ? palette.green : palette
-            .teal,
+          color: focused
+            ? palette.lavender
+            : commentSide == .left ? palette.red : commentSide == .right ? palette.green : palette
+              .teal,
         )
       }
     }
@@ -457,9 +556,15 @@ struct WorkspacePresentation {
       result.operations.append(.fill(row, palette.background))
       result.text(message, in: row, color: store.error == nil ? palette.yellow : palette.red)
     }
-    if store.pane == .content || store.pane == .files, store.tab == .diff, store.isDocumentCurrent,
-       let rows = store.document.diff?.rows, rows.indices.contains(store.diffCursor),
-       rows[store.diffCursor].line(on: store.diffSide) != nil, store.diffCursor >= offset, store.diffCursor < offset + count
+    if
+      store.pane == .content || store.pane == .files,
+      store.tab == .diff,
+      store.isDocumentCurrent,
+      let rows = store.document.diff?.rows,
+      rows.indices.contains(store.diffCursor),
+      rows[store.diffCursor].line(on: store.diffSide) != nil,
+      store.diffCursor >= offset,
+      store.diffCursor < offset + count
     {
       let x = rect.x + 1 + (!store.document.isUnifiedDiff && store.diffSide == .right ? store.document.diffSideWidth + 3 : 0)
       result.text(
@@ -475,15 +580,19 @@ struct WorkspacePresentation {
   func highlightedLine(_ spans: [DiffSpan], row: Int, selected: Bool) -> Line {
     let search = store.searches[.content]
     let ranges = search?.result.highlights[row] ?? []
-    let active: Range<Int>? = if let search, search.result.lines.indices.contains(search.selection),
-                                 search.result.lines[search.selection] == row,
-                                 search.result.ranges.indices.contains(search.selection)
-    {
-      search.result.ranges[search.selection]
-    } else {
-      nil
-    }
-    var output: [Span] = [], offset = 0
+    let active: Range<Int>? =
+      if
+        let search,
+        search.result.lines.indices.contains(search.selection),
+        search.result.lines[search.selection] == row,
+        search.result.ranges.indices.contains(search.selection)
+      {
+        search.result.ranges[search.selection]
+      } else {
+        nil
+      }
+    var output = [Span]()
+    var offset = 0
     for span in spans {
       let end = offset + span.text.utf16.count
       let overlaps = ranges.filter { $0.overlaps(offset ..< end) }
@@ -492,9 +601,13 @@ struct WorkspacePresentation {
       let selected = selected && (span.side == store.diffSide || shared && span.side != nil)
       let normal = Style(
         foreground: palette.foreground(span),
-        background: selected ? palette
-          .selection : (span.commentKey != nil && span.commentKey == store.focusedCommentKey) ? palette.sidebarSelection : span
-          .role == .commentCode ? palette.surface : palette.background,
+        background: selected
+          ? palette
+            .selection
+          : (span.commentKey != nil && span.commentKey == store.focusedCommentKey)
+            ? palette.sidebarSelection
+            : span
+              .role == .commentCode ? palette.surface : palette.background,
         modifiers: (span.bold && (!noColor || span.side == nil && !span.isChanged) ? Modifier.bold : [])
           .union(!noColor && span.isChanged && span.highlight == "comment" ? .italic : [])
           .union(!noColor && span.role == .metadata && span.side != nil ? .dim : [])
@@ -505,15 +618,19 @@ struct WorkspacePresentation {
       if overlaps.isEmpty {
         output.append(Span(span.text, style: normal))
       } else {
-        var run = "", lastStyle: Style?
+        var run = ""
+        var lastStyle: Style?
         for character in span.text {
-          let length = character.utf16.count, range = offset ..< offset + length
+          let length = character.utf16.count
+          let range = offset ..< offset + length
           let matched = overlaps.contains { $0.overlaps(range) }
-          let style = matched ? Style(
-            foreground: palette.text,
-            background: active?.overlaps(range) == true ? palette.activeSearch : palette.search,
-            modifiers: noColor ? [.bold, .underlined] : .bold,
-          ) : normal
+          let style = matched
+            ? Style(
+              foreground: palette.text,
+              background: active?.overlaps(range) == true ? palette.activeSearch : palette.search,
+              modifiers: noColor ? [.bold, .underlined] : .bold,
+            )
+            : normal
           if let lastStyle, lastStyle != style {
             output.append(Span(run, style: lastStyle))
             run = ""
@@ -532,7 +649,8 @@ struct WorkspacePresentation {
   }
 
   func help(into result: inout TerminalScreen) {
-    let rect = geometry.popup, rows = max(1, rect.height - 5)
+    let rect = geometry.popup
+    let rows = max(1, rect.height - 5)
     pane(rect, title: l10n("Help"), selected: true, into: &result)
     result.text(
       "/\(store.searches[.help]?.query ?? "")\(store.isSearching ? "▏" : "")",
@@ -564,10 +682,14 @@ struct WorkspacePresentation {
     let rect = Rect(x: 0, y: max(0, size.height - 2), width: size.width, height: 2)
     result.operations.append(.fill(rect, palette.background))
     var label = " \(mode) · \(scope)"
-    if store.focusedCommentKey == nil, store.pane == .content || store.pane == .files, store.tab == .diff,
-       store.isDocumentCurrent,
-       let rows = store.document.diff?.rows,
-       rows.indices.contains(store.diffCursor), let end = rows[store.diffCursor].line(on: store.diffSide)?.number
+    if
+      store.focusedCommentKey == nil,
+      store.pane == .content || store.pane == .files,
+      store.tab == .diff,
+      store.isDocumentCurrent,
+      let rows = store.document.diff?.rows,
+      rows.indices.contains(store.diffCursor),
+      let end = rows[store.diffCursor].line(on: store.diffSide)?.number
     {
       let start = store.visualStart.flatMap { rows.indices.contains($0) ? rows[$0].line(on: store.diffSide)?.number : nil } ?? end
       label += "  \(store.diffSide.rawValue) · \(start == end ? String(end) : "\(min(start, end))–\(max(start, end))")"
@@ -601,7 +723,8 @@ struct WorkspacePresentation {
       label += "  \(store.activeFilter)"
     }
     let range = "\(store.document.lines.isEmpty ? 0 : store.scroll + 1)–\(min(store.document.lines.count, store.scroll + store.contentHeight))/\(store.document.lines.count) "
-    let status = "\(activity)  \(range)", statusWidth = min(size.width / 2, TerminalWidth.of(status))
+    let status = "\(activity)  \(range)"
+    let statusWidth = min(size.width / 2, TerminalWidth.of(status))
     result.text(
       label,
       in: Rect(x: 0, y: rect.y, width: max(0, size.width - statusWidth - 1), height: 1),
@@ -615,8 +738,10 @@ struct WorkspacePresentation {
     )
     let hints: String
     if store.isSearching {
-      let title = store.searchScope == .items ? "GitHub search query" : store
-        .searchScope == .files ? "File contents (regex)" : store.searchScope == .content ? "Find in diff (regex)" : "Search"
+      let title = store.searchScope == .items
+        ? "GitHub search query"
+        : store
+          .searchScope == .files ? "File contents (regex)" : store.searchScope == .content ? "Find in diff (regex)" : "Search"
       hints = " \(l10n(title))  Enter · \(l10n("Search"))  Esc · \(l10n("Clear search"))"
     } else if store.activeSearch.isActive {
       hints = " Esc · \(l10n("Clear search"))  \(key(.nextMatch))/\(key(.previousMatch)) · \(l10n("Next match"))"
@@ -633,78 +758,7 @@ struct WorkspacePresentation {
     )
   }
 
-  var mode: String {
-    if store.filterEditor != nil {
-      return l10n("Filters and presets")
-    }
-    if store.review != nil {
-      return l10n("Review")
-    }
-    if store.visualStart != nil, store.pane == .content {
-      return l10n("Visual")
-    }
-    if store.isSearching {
-      return l10n("Search")
-    }
-    if store.activeSearch.isActive {
-      return l10n(store.pane == .content && !store.showsHelp ? "Find" : "Filter")
-    }
-    return l10n("Normal")
-  }
-
-  var scope: String {
-    switch store.searchScope { case .items: l10n(store.kind == .pullRequest ? "Pull requests" : "Issues")
-    case .files: l10n("Files")
-    case .content: l10n(Self.tabTitle(store.tab))
-    case .help: l10n("Help") }
-  }
-
-  var searchCount: String {
-    switch store.searchScope {
-    case .items: "\(store.visibleItems.count)/\(store.items.count)"
-    case .files: "\(store.visibleFiles.count)/\(store.detail?.files.count ?? 0)"
-    case .help: "\(store.visibleHelp.count)/\(KeyCommand.allCases.count)"
-    case .content: store.isFinding ? l10n("Finding…") : !store.isDocumentCurrent ? l10n("Preview") : store.activeSearch.matches
-      .isEmpty ? l10n("No matches.") : "\(store.activeSearch.selection + 1)/\(store.activeSearch.matches.count)"
-    }
-  }
-
-  var activity: String {
-    if store.review?.isSubmitting == true {
-      return l10n("Submitting…")
-    }
-    if store.error != nil || store.review?.error != nil {
-      return l10n("Error")
-    }
-    if store.isLoading {
-      return l10n("Loading…")
-    }
-    if store.isLoadingDiff {
-      return l10n("Loading diff…")
-    }
-    if store.isLoadingDetail {
-      return l10n("Loading details…")
-    }
-    if store.isPreparingDocument {
-      return l10n("Preparing text…")
-    }
-    if store.isFinding || store.isSearchingFiles {
-      return l10n("Finding…")
-    }
-    if !store.isDocumentCurrent {
-      return l10n("Preview")
-    }
-    return store.nextPage != nil ? "\(key(.loadMore)) · \(l10n("Load more"))" : l10n("Ready")
-  }
-
   func key(_ command: KeyCommand) -> String {
     store.preferences.keymap.bindings[command]?.first ?? ""
-  }
-
-  static func tabTitle(_ tab: WorkspaceFeature.ContentTab) -> String {
-    switch tab { case .overview: "Overview"
-    case .diff: "Diff"
-    case .discussion: "Discussion"
-    case .checks: "Checks" }
   }
 }

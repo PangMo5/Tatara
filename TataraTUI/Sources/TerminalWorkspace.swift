@@ -13,29 +13,49 @@ import TataraSystem
 import TermLoom
 import TermLoomTextArea
 
+// MARK: - TataraCommand
+
 @main
 struct TataraCommand: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
-    commandName: "tatara", abstract: "A structural code review workspace for your terminal.",
+    commandName: "tatara",
+    abstract: "A structural code review workspace for your terminal.",
     version: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "development",
   )
-  @Option(name: .shortAndLong, help: "Repository in OWNER/REPO format.") var repo: String?
-  @Option(help: "GitHub hostname, including GitHub Enterprise.") var host: String?
-  @Option(help: "Catppuccin flavor: latte, frappe, macchiato, mocha.") var theme: String?
-  @Option(help: "Language: en, ko, ja, zh-Hans, zh-Hant.") var language: String?
-  @Option(help: "Path to config.toml.") var config: String?
-  @Option(help: "Files pane layout: tree or list.") var filesView: String?
-  @Option(help: "Preferred PR and Files pane width in columns (minimum 24).") var sidebarWidth: Int?
-  @Option(help: "Wrap diff lines: on or off (toggle with w).") var wrap: String?
-  @Flag(help: "Explore synthetic review data without a GitHub account.") var demo = false
 
-  @Flag(help: "Enable color even when NO_COLOR is set.") var forceColor = false
-  @Flag(help: "Disable color output. Also honors NO_COLOR.") var noColor = false
-  @Flag(help: "Use ASCII decorations while preserving source text.") var ascii = false
-  @Flag(help: "Follow pane focus with the terminal cursor; no animated motion.") var accessible = false
-  @Flag(help: "Follow pane focus with the terminal cursor.") var cursorFollowsFocus = false
-  @Flag(help: "Suppress motion (Tatara uses no animated transitions).") var reduceMotion = false
-  @Flag(help: "Suppress motion for captures (Tatara uses no animated transitions).") var stableOutput = false
+  @Option(name: .shortAndLong, help: "Repository in OWNER/REPO format.")
+  var repo: String?
+  @Option(help: "GitHub hostname, including GitHub Enterprise.")
+  var host: String?
+  @Option(help: "Catppuccin flavor: latte, frappe, macchiato, mocha.")
+  var theme: String?
+  @Option(help: "Language: en, ko, ja, zh-Hans, zh-Hant.")
+  var language: String?
+  @Option(help: "Path to config.toml.")
+  var config: String?
+  @Option(help: "Files pane layout: tree or list.")
+  var filesView: String?
+  @Option(help: "Preferred PR and Files pane width in columns (minimum 24).")
+  var sidebarWidth: Int?
+  @Option(help: "Wrap diff lines: on or off (toggle with w).")
+  var wrap: String?
+  @Flag(help: "Explore synthetic review data without a GitHub account.")
+  var demo = false
+
+  @Flag(help: "Enable color even when NO_COLOR is set.")
+  var forceColor = false
+  @Flag(help: "Disable color output. Also honors NO_COLOR.")
+  var noColor = false
+  @Flag(help: "Use ASCII decorations while preserving source text.")
+  var ascii = false
+  @Flag(help: "Follow pane focus with the terminal cursor; no animated motion.")
+  var accessible = false
+  @Flag(help: "Follow pane focus with the terminal cursor.")
+  var cursorFollowsFocus = false
+  @Flag(help: "Suppress motion (Tatara uses no animated transitions).")
+  var reduceMotion = false
+  @Flag(help: "Suppress motion for captures (Tatara uses no animated transitions).")
+  var stableOutput = false
 
   mutating func run() async throws {
     let workspace = try await TerminalWorkspace(options: self)
@@ -43,24 +63,12 @@ struct TataraCommand: AsyncParsableCommand {
   }
 }
 
+// MARK: - TerminalWorkspace
+
 @MainActor @Observable
 final class TerminalWorkspace: TerminalApplication {
-  // Wheel updates use source-owned offsets and do not depend on refreshed widget hit testing.
-  let coalescesScrollPresentation = true
-  let options: TataraCommand
-  var store: StoreOf<WorkspaceFeature>?
-  var failure: String?
-  var size: Size
-  var focusedControl: ControlID?
-  var fields: [String: TextFieldState] = [:]
-  var editors: [String: TextAreaState] = [:]
-  var editorTexts: [String: String] = [:]
-  var reviewScroll = 0
-  var commentScroll = 0
-  var reviewPreview: ReviewDocument?
-  @ObservationIgnored var previewTask: Task<Void, Never>?
-  @ObservationIgnored var previewGeneration = 0
-  @ObservationIgnored private var appearance: StoreTask?
+
+  // MARK: Lifecycle
 
   init(options: TataraCommand) throws {
     self.options = options
@@ -68,15 +76,23 @@ final class TerminalWorkspace: TerminalApplication {
     size = try backend.size()
   }
 
-  func start() async throws {
-    let bootstrap = Task { await self.bootstrap() }
-    defer { bootstrap.cancel()
-      appearance?.cancel()
-      previewTask?.cancel()
-      store = nil
-    }
-    try await run(viewport: .fullscreen, capturesMouse: true)
-  }
+  // MARK: Internal
+
+  // Wheel updates use source-owned offsets and do not depend on refreshed widget hit testing.
+  let coalescesScrollPresentation = true
+  let options: TataraCommand
+  var store: StoreOf<WorkspaceFeature>?
+  var failure: String?
+  var size: Size
+  var focusedControl: ControlID?
+  var fields = [String: TextFieldState]()
+  var editors = [String: TextAreaState]()
+  var editorTexts = [String: String]()
+  var reviewScroll = 0
+  var commentScroll = 0
+  var reviewPreview: ReviewDocument?
+  @ObservationIgnored var previewTask: Task<Void, Never>?
+  @ObservationIgnored var previewGeneration = 0
 
   var body: TerminalScreen {
     guard let store else {
@@ -107,6 +123,213 @@ final class TerminalWorkspace: TerminalApplication {
     .screen()
   }
 
+  var geometry: WorkspaceGeometry {
+    .init(
+      size: size,
+      preferredSidebarWidth: store?.preferences.sidebarWidth ?? Preferences.defaultSidebarWidth,
+      isSelectingItems: store?.isSelectingItems ?? true,
+    )
+  }
+
+  var reviewPreviewHeight: Int {
+    store?.reviewLocation == nil ? max(1, size.height - 14) : max(1, (store?.reviewPanelHeight ?? 9) - 7)
+  }
+
+  var reviewCommentCapacity: Int {
+    if store?.reviewLocation == nil {
+      geometry.reviewCommentCapacity
+    } else {
+      max(
+        0,
+        min(3, (store?.reviewPanelHeight ?? 9) - 11),
+      )
+    }
+  }
+
+  static func keyName(_ event: KeyEvent) -> String {
+    switch event.key {
+    case .character(let value):
+      if event.modifiers.contains(.control) {
+        return "ctrl-\(String(value).lowercased())"
+      }
+      if value == " " {
+        return "space"
+      }
+      return event.modifiers.contains(.shift) && value.isLetter ? String(value).uppercased() : String(value)
+
+    case .enter: return "enter"
+
+    case .escape: return "esc"
+
+    case .tab: return event.modifiers.contains(.shift) ? "shift-tab" : "tab"
+
+    case .up: return "up"
+
+    case .down: return "down"
+
+    case .left: return "left"
+
+    case .right: return "right"
+
+    case .backspace: return "backspace"
+
+    case .home: return "home"
+
+    case .end: return "end"
+
+    case .pageDown: return "page-down"
+
+    case .pageUp: return "page-up"
+
+    default: return ""
+    }
+  }
+
+  func start() async throws {
+    let bootstrap = Task { await self.bootstrap() }
+    defer { bootstrap.cancel()
+      appearance?.cancel()
+      previewTask?.cancel()
+      store = nil
+    }
+    try await run(viewport: .fullscreen, capturesMouse: true)
+  }
+
+  func updateViewport() {
+    guard let store else { return }
+    store.send(.viewportChanged(width: geometry.content.width - 2, height: max(1, geometry.content.height - 3)))
+    store.send(.helpViewportChanged(max(1, geometry.popup.height - 5)))
+    store.send(.sidebarViewportChanged(items: max(1, geometry.items.height - 3), files: max(1, geometry.files.height - 3)))
+  }
+
+  func update(_ event: TerminalEvent) async -> ApplicationUpdate {
+    if case .resize(let size) = event {
+      self.size = size
+      updateViewport()
+      if store?.review?.isConfirming == true {
+        prepareReviewPreview()
+      }
+      return .redraw
+    }
+    if case .focusChanged(let id) = event {
+      focusedControl = id
+      return .redraw
+    }
+    if case .key(let key) = event, key.kind == .release {
+      return .ignore
+    }
+    if case .key(let key) = event, key.key == .character("c"), key.modifiers.contains(.control) {
+      return .quit
+    }
+    guard let store else {
+      return event == .key(KeyEvent(.character("q"))) ? .quit : .ignore
+    }
+    if store.filterEditor != nil || store.review != nil || store.commentEditor != nil {
+      return handleEditor(event)
+    }
+    if case .mouse(let mouse) = event {
+      handleMouse(mouse)
+      return .redraw
+    }
+    if case .paste(let text) = event, let picker = store.picker {
+      guard picker.isEditing else { return .ignore }
+      store.send(.pickerQueryChanged(picker.query + TerminalText.sanitize(text).replacing("\n", with: " ")))
+      return .redraw
+    }
+    if case .paste(let text) = event, store.isSearching {
+      for character in TerminalText.sanitize(text) {
+        store.send(.keyPressed(String(character)))
+      }
+      return .redraw
+    }
+    guard case .key(let press) = event else { return .ignore }
+    let key = Self.keyName(press)
+    if !store.isSearching, !store.showsHelp, store.picker == nil {
+      if store.preferences.keymap.command(for: key) == .quit {
+        return .quit
+      }
+      if
+        store.preferences.keymap.command(for: key) == .openBrowser,
+        let url = store.focusedCommentKey == nil
+        ? store.selectedItem?.url
+        : store.focusedCommentKey
+          .flatMap({ store.detail?.comment(for: $0)?.url }),
+        url.scheme == "https",
+        url.host == store.repository.host
+      {
+        Task { do { try await Self.open(url) } catch { self.failure = String(describing: error) } }
+        return .ignore
+      }
+    }
+    let wasSelecting = store.isSelectingItems
+    let start = ProcessInfo.processInfo.systemUptime
+    store.send(.keyPressed(key))
+    if wasSelecting != store.isSelectingItems {
+      updateViewport()
+    }
+    if NavigationTrace.destination != nil {
+      let elapsed = ProcessInfo.processInfo.systemUptime - start
+      Task { await NavigationTrace.shared.record(start: start, elapsed: elapsed, frameStart: .seconds(start)) }
+    }
+    return .redraw
+  }
+
+  func prepareReviewPreview() {
+    previewTask?.cancel()
+    previewGeneration += 1
+    reviewPreview = nil
+    guard let review = store?.review else { return }
+    let generation = previewGeneration
+    let width = max(1, store?.reviewLocation == nil ? size.width - 4 : geometry.content.width - 4)
+    let body = review.body
+    let comments = review.comments
+    let item = review.item.id
+    previewTask = Task {
+      do {
+        let document = try await Self.preparePreview(body: body, comments: comments, width: width)
+        try Task.checkCancellation()
+        guard
+          generation == previewGeneration,
+          let current = store?.review,
+          current.item.id == item,
+          current.body == body,
+          current.comments == comments
+        else { return }
+        reviewPreview = document
+        reviewScroll = min(reviewScroll, max(0, document.lines.count - reviewPreviewHeight))
+      } catch is CancellationError {} catch { failure = String(describing: error) }
+    }
+  }
+
+  // MARK: Private
+
+  @ObservationIgnored private var appearance: StoreTask?
+
+  @concurrent
+  private static func preparePreview(
+    body: String,
+    comments: [InlineComment],
+    width: Int,
+  ) async throws -> ReviewDocument {
+    let text = ([body] + comments.flatMap { comment in
+      [
+        "\(comment.path):\(comment.startLine.map { String($0) + "–" } ?? "")\(comment.line) · \(comment.side.rawValue)",
+        comment.body,
+      ]
+    }).joined(separator: "\n\n")
+    return try await DocumentRenderer.prepare(text, width)
+  }
+
+  @concurrent
+  private static func open(_ url: URL) async throws {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+    process.arguments = [url.absoluteString]
+    try process.run()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else { throw TataraError(.unavailable, detail: "Could not open the browser.") }
+  }
+
   private func bootstrap() async {
     do {
       try await NavigationTrace.shared.start()
@@ -133,13 +356,14 @@ final class TerminalWorkspace: TerminalApplication {
         preferences.language = value
       }
       let adapter = GitHubAdapter()
-      let repository: RepositoryID = if options.demo {
-        try RepositoryID("PangMo5/Tatara")
-      } else if let repo = options.repo {
-        try RepositoryID(repo, host: options.host ?? "github.com")
-      } else {
-        try await adapter.detectRepository(host: options.host)
-      }
+      let repository: RepositoryID =
+        if options.demo {
+          try RepositoryID("PangMo5/Tatara")
+        } else if let repo = options.repo {
+          try RepositoryID(repo, host: options.host ?? "github.com")
+        } else {
+          try await adapter.detectRepository(host: options.host)
+        }
       let cache: CacheClient
       if options.demo {
         cache = .disabled
@@ -175,166 +399,4 @@ final class TerminalWorkspace: TerminalApplication {
     }
   }
 
-  var geometry: WorkspaceGeometry {
-    .init(
-      size: size,
-      preferredSidebarWidth: store?.preferences.sidebarWidth ?? Preferences.defaultSidebarWidth,
-      isSelectingItems: store?.isSelectingItems ?? true,
-    )
-  }
-
-  func updateViewport() {
-    guard let store else { return }
-    store.send(.viewportChanged(width: geometry.content.width - 2, height: max(1, geometry.content.height - 3)))
-    store.send(.helpViewportChanged(max(1, geometry.popup.height - 5)))
-    store.send(.sidebarViewportChanged(items: max(1, geometry.items.height - 3), files: max(1, geometry.files.height - 3)))
-  }
-
-  func update(_ event: TerminalEvent) async -> ApplicationUpdate {
-    if case let .resize(size) = event {
-      self.size = size
-      updateViewport()
-      if store?.review?.isConfirming == true {
-        prepareReviewPreview()
-      }
-      return .redraw
-    }
-    if case let .focusChanged(id) = event {
-      focusedControl = id
-      return .redraw
-    }
-    if case let .key(key) = event, key.kind == .release {
-      return .ignore
-    }
-    if case let .key(key) = event, key.key == .character("c"), key.modifiers.contains(.control) {
-      return .quit
-    }
-    guard let store else {
-      return event == .key(KeyEvent(.character("q"))) ? .quit : .ignore
-    }
-    if store.filterEditor != nil || store.review != nil || store.commentEditor != nil {
-      return handleEditor(event)
-    }
-    if case let .mouse(mouse) = event {
-      handleMouse(mouse)
-      return .redraw
-    }
-    if case let .paste(text) = event, let picker = store.picker {
-      guard picker.isEditing else { return .ignore }
-      store.send(.pickerQueryChanged(picker.query + TerminalText.sanitize(text).replacingOccurrences(of: "\n", with: " ")))
-      return .redraw
-    }
-    if case let .paste(text) = event, store.isSearching {
-      for character in TerminalText.sanitize(text) {
-        store.send(.keyPressed(String(character)))
-      }
-      return .redraw
-    }
-    guard case let .key(press) = event else { return .ignore }
-    let key = Self.keyName(press)
-    if !store.isSearching, !store.showsHelp, store.picker == nil {
-      if store.preferences.keymap.command(for: key) == .quit {
-        return .quit
-      }
-      if store.preferences.keymap.command(for: key) == .openBrowser,
-         let url = store.focusedCommentKey == nil ? store.selectedItem?.url : store.focusedCommentKey
-         .flatMap({ store.detail?.comment(for: $0)?.url }),
-         url.scheme == "https", url.host == store.repository.host
-      {
-        Task { do { try await Self.open(url) } catch { self.failure = String(describing: error) } }
-        return .ignore
-      }
-    }
-    let wasSelecting = store.isSelectingItems
-    let start = ProcessInfo.processInfo.systemUptime
-    store.send(.keyPressed(key))
-    if wasSelecting != store.isSelectingItems {
-      updateViewport()
-    }
-    if NavigationTrace.destination != nil {
-      let elapsed = ProcessInfo.processInfo.systemUptime - start
-      Task { await NavigationTrace.shared.record(start: start, elapsed: elapsed, frameStart: .seconds(start)) }
-    }
-    return .redraw
-  }
-
-  var reviewPreviewHeight: Int {
-    store?.reviewLocation == nil ? max(1, size.height - 14) : max(1, (store?.reviewPanelHeight ?? 9) - 7)
-  }
-
-  var reviewCommentCapacity: Int {
-    store?.reviewLocation == nil ? geometry.reviewCommentCapacity : max(
-      0,
-      min(3, (store?.reviewPanelHeight ?? 9) - 11),
-    )
-  }
-
-  func prepareReviewPreview() {
-    previewTask?.cancel()
-    previewGeneration += 1
-    reviewPreview = nil
-    guard let review = store?.review else { return }
-    let generation = previewGeneration
-    let width = max(1, store?.reviewLocation == nil ? size.width - 4 : geometry.content.width - 4)
-    let body = review.body, comments = review.comments, item = review.item.id
-    previewTask = Task {
-      do {
-        let document = try await Self.preparePreview(body: body, comments: comments, width: width)
-        try Task.checkCancellation()
-        guard generation == previewGeneration, let current = store?.review,
-              current.item.id == item, current.body == body, current.comments == comments else { return }
-        reviewPreview = document
-        reviewScroll = min(reviewScroll, max(0, document.lines.count - reviewPreviewHeight))
-      } catch is CancellationError {} catch { failure = String(describing: error) }
-    }
-  }
-
-  @concurrent private static func preparePreview(
-    body: String,
-    comments: [InlineComment],
-    width: Int,
-  ) async throws -> ReviewDocument {
-    let text = ([body] + comments.flatMap { comment in
-      [
-        "\(comment.path):\(comment.startLine.map { String($0) + "–" } ?? "")\(comment.line) · \(comment.side.rawValue)",
-        comment.body,
-      ]
-    }).joined(separator: "\n\n")
-    return try await DocumentRenderer.prepare(text, width)
-  }
-
-  static func keyName(_ event: KeyEvent) -> String {
-    switch event.key {
-    case let .character(value):
-      if event.modifiers.contains(.control) {
-        return "ctrl-\(String(value).lowercased())"
-      }
-      if value == " " {
-        return "space"
-      }
-      return event.modifiers.contains(.shift) && value.isLetter ? String(value).uppercased() : String(value)
-    case .enter: return "enter"
-    case .escape: return "esc"
-    case .tab: return event.modifiers.contains(.shift) ? "shift-tab" : "tab"
-    case .up: return "up"
-    case .down: return "down"
-    case .left: return "left"
-    case .right: return "right"
-    case .backspace: return "backspace"
-    case .home: return "home"
-    case .end: return "end"
-    case .pageDown: return "page-down"
-    case .pageUp: return "page-up"
-    default: return ""
-    }
-  }
-
-  @concurrent private static func open(_ url: URL) async throws {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-    process.arguments = [url.absoluteString]
-    try process.run()
-    process.waitUntilExit()
-    guard process.terminationStatus == 0 else { throw TataraError(.unavailable, detail: "Could not open the browser.") }
-  }
 }

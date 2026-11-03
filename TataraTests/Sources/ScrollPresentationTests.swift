@@ -3,81 +3,16 @@
 
 import Darwin
 import Foundation
-@testable import TermLoom
 import Testing
+@testable import TermLoom
 
 @MainActor
 struct ScrollPresentationTests {
-  private final class Application: TerminalApplication {
-    let automaticallyTracksObservableState = false
-    let coalescesScrollPresentation: Bool
-    var offset = 0
-    var wheelCount = 0
-    var frames: [Int] = []
-    var boundaries: [Int] = []
 
-    init(coalesces: Bool = true) {
-      coalescesScrollPresentation = coalesces
-    }
+  // MARK: Internal
 
-    var body: Paragraph {
-      frames.append(offset)
-      return Paragraph("Offset \(offset)")
-    }
-
-    func update(_ event: TerminalEvent) async -> ApplicationUpdate {
-      if case let .mouse(mouse) = event {
-        switch mouse.kind {
-        case .scrollDown: offset = min(30, offset + 1)
-          wheelCount += 1
-        case .scrollUp: offset = max(0, offset - 1)
-          wheelCount += 1
-        default: boundaries.append(frames.last ?? -1)
-        }
-        return .redraw
-      }
-      if case let .key(key) = event {
-        if key.key == .character("q") {
-          return .quit
-        }
-        boundaries.append(frames.last ?? -1)
-      }
-      return .ignore
-    }
-  }
-
-  @MainActor private final class TerminalPair {
-    var master: Int32 = -1
-    var slave: Int32 = -1
-    let session: TerminalSession
-
-    init() throws {
-      var window = winsize(ws_row: 8, ws_col: 24, ws_xpixel: 0, ws_ypixel: 0)
-      guard openpty(&master, &slave, nil, nil, &window) == 0 else { throw POSIXError(.EIO) }
-      session = try TerminalSession(
-        viewport: .fullscreen,
-        capturesMouse: true,
-        inputDescriptor: slave,
-        output: FileHandle(fileDescriptor: slave, closeOnDealloc: false),
-      )
-    }
-
-    func send(_ text: String) throws {
-      let data = Data(text.utf8)
-      let written = data.withUnsafeBytes { Darwin.write(master, $0.baseAddress, $0.count) }
-      guard written == data.count else { throw POSIXError(.EIO) }
-    }
-
-    deinit {
-      close(master)
-      close(slave)
-    }
-  }
-
-  private let down = "\u{1B}[<65;10;4M"
-  private let up = "\u{1B}[<64;10;4M"
-
-  @Test func `wheel batches preserve every transition including clamping and reversal`() async throws {
+  @Test
+  func `wheel batches preserve every transition including clamping and reversal`() async throws {
     let pair = try TerminalPair()
     defer { try? pair.session.restore() }
     let app = Application()
@@ -88,7 +23,8 @@ struct ScrollPresentationTests {
     #expect(app.frames == [0, 30, 28])
   }
 
-  @Test func `keyboard clicks and pointer changes end the current wheel presentation`() async throws {
+  @Test
+  func `keyboard clicks and pointer changes end the current wheel presentation`() async throws {
     let pair = try TerminalPair()
     defer { try? pair.session.restore() }
     let app = Application()
@@ -100,7 +36,8 @@ struct ScrollPresentationTests {
     #expect(app.frames.last == 6)
   }
 
-  @Test func `applications retain per-event presentation unless they opt in`() async throws {
+  @Test
+  func `applications retain per-event presentation unless they opt in`() async throws {
     let pair = try TerminalPair()
     defer { try? pair.session.restore() }
     let app = Application(coalesces: false)
@@ -109,7 +46,8 @@ struct ScrollPresentationTests {
     #expect(app.frames == [0, 1, 2, 1])
   }
 
-  @Test func `nonblocking lookahead preserves a fragmented escape sequence`() throws {
+  @Test
+  func `nonblocking lookahead preserves a fragmented escape sequence`() throws {
     let pair = try TerminalPair()
     defer { try? pair.session.restore() }
     var input = pair.session.makeInput()
@@ -123,7 +61,8 @@ struct ScrollPresentationTests {
     #expect(try input.readEvent(timeoutMilliseconds: 0) == .key(KeyEvent(.escape)))
   }
 
-  @Test func `idle input remains cancellable with scroll presentation enabled`() async throws {
+  @Test
+  func `idle input remains cancellable with scroll presentation enabled`() async throws {
     let pair = try TerminalPair()
     defer { try? pair.session.restore() }
     let app = Application()
@@ -132,4 +71,91 @@ struct ScrollPresentationTests {
     task.cancel()
     try await task.value
   }
+
+  // MARK: Private
+
+  private final class Application: TerminalApplication {
+
+    // MARK: Lifecycle
+
+    init(coalesces: Bool = true) {
+      coalescesScrollPresentation = coalesces
+    }
+
+    // MARK: Internal
+
+    let automaticallyTracksObservableState = false
+    let coalescesScrollPresentation: Bool
+    var offset = 0
+    var wheelCount = 0
+    var frames = [Int]()
+    var boundaries = [Int]()
+
+    var body: Paragraph {
+      frames.append(offset)
+      return Paragraph("Offset \(offset)")
+    }
+
+    func update(_ event: TerminalEvent) async -> ApplicationUpdate {
+      if case .mouse(let mouse) = event {
+        switch mouse.kind {
+        case .scrollDown: offset = min(30, offset + 1)
+          wheelCount += 1
+
+        case .scrollUp: offset = max(0, offset - 1)
+          wheelCount += 1
+
+        default: boundaries.append(frames.last ?? -1)
+        }
+        return .redraw
+      }
+      if case .key(let key) = event {
+        if key.key == .character("q") {
+          return .quit
+        }
+        boundaries.append(frames.last ?? -1)
+      }
+      return .ignore
+    }
+
+  }
+
+  @MainActor
+  private final class TerminalPair {
+
+    // MARK: Lifecycle
+
+    init() throws {
+      var window = winsize(ws_row: 8, ws_col: 24, ws_xpixel: 0, ws_ypixel: 0)
+      guard openpty(&master, &slave, nil, nil, &window) == 0 else { throw POSIXError(.EIO) }
+      session = try TerminalSession(
+        viewport: .fullscreen,
+        capturesMouse: true,
+        inputDescriptor: slave,
+        output: FileHandle(fileDescriptor: slave, closeOnDealloc: false),
+      )
+    }
+
+    deinit {
+      close(master)
+      close(slave)
+    }
+
+    // MARK: Internal
+
+    var master: Int32 = -1
+    var slave: Int32 = -1
+    let session: TerminalSession
+
+    func send(_ text: String) throws {
+      let data = Data(text.utf8)
+      let written = data.withUnsafeBytes { Darwin.write(master, $0.baseAddress, $0.count) }
+      guard written == data.count else { throw POSIXError(.EIO) }
+    }
+
+  }
+
+  private let down = "\u{1B}[<65;10;4M"
+  private let up = "\u{1B}[<64;10;4M"
+
 }

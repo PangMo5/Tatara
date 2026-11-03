@@ -7,52 +7,8 @@ import TermLoom
 /// Catppuccin palette and ANSI values, verified against catppuccin/palette.
 /// Highlight roles are blended against the theme base; ordinary surfaces inherit the terminal background.
 struct Palette {
-  let background: Color = .reset
-  private let lightBackground: Bool
-  private let noColor: Bool
-  let rosewater: Color
-  let flamingo: Color
-  let pink: Color
-  let mauve: Color
-  let red: Color
-  let maroon: Color
-  let peach: Color
-  let yellow: Color
-  let green: Color
-  let teal: Color
-  let sky: Color
-  let sapphire: Color
-  let blue: Color
-  let lavender: Color
-  let text: Color
-  let subtext1: Color
-  let subtext0: Color
-  let overlay2: Color
-  let overlay1: Color
-  let overlay0: Color
-  let surface2: Color
-  let surface1: Color
-  let surface0: Color
-  let base: Color
-  let mantle: Color
-  let crust: Color
-  let selection: Color
-  let editorSelection: Color
-  let sidebarSelection: Color
-  let search: Color
-  let activeSearch: Color
-  private let ansiColors: [Color]
-  var surface: Color {
-    surface0
-  }
 
-  var muted: Color {
-    subtext0
-  }
-
-  var accent: Color {
-    lavender
-  }
+  // MARK: Lifecycle
 
   init(_ theme: TataraCore.Theme, noColor: Bool = false) {
     lightBackground = theme == .latte
@@ -107,6 +63,7 @@ struct Palette {
         0x2D9FA8,
         0xBCC0CC,
       ]
+
     case .frappe:
       values = [
         0xF2D5CF,
@@ -154,6 +111,7 @@ struct Palette {
         0x5ABFB5,
         0xB5BFE2,
       ]
+
     case .macchiato:
       values = [
         0xF4DBD6,
@@ -201,6 +159,7 @@ struct Palette {
         0x63CBC0,
         0xB8C0E0,
       ]
+
     case .mocha:
       values = [
         0xF5E0DC,
@@ -286,6 +245,53 @@ struct Palette {
     ansiColors = ansi.map(color)
   }
 
+  // MARK: Internal
+
+  let background = Color.reset
+  let rosewater: Color
+  let flamingo: Color
+  let pink: Color
+  let mauve: Color
+  let red: Color
+  let maroon: Color
+  let peach: Color
+  let yellow: Color
+  let green: Color
+  let teal: Color
+  let sky: Color
+  let sapphire: Color
+  let blue: Color
+  let lavender: Color
+  let text: Color
+  let subtext1: Color
+  let subtext0: Color
+  let overlay2: Color
+  let overlay1: Color
+  let overlay0: Color
+  let surface2: Color
+  let surface1: Color
+  let surface0: Color
+  let base: Color
+  let mantle: Color
+  let crust: Color
+  let selection: Color
+  let editorSelection: Color
+  let sidebarSelection: Color
+  let search: Color
+  let activeSearch: Color
+
+  var surface: Color {
+    surface0
+  }
+
+  var muted: Color {
+    subtext0
+  }
+
+  var accent: Color {
+    lavender
+  }
+
   func ansi(_ index: Int?) -> Color {
     guard let index else { return text }
     if index == 16 {
@@ -318,17 +324,27 @@ struct Palette {
     case .commentCode: peach
     case .commentEmphasis: text
     case .commentLink: blue
-    case .commentQuote, .commentStrikethrough, .commentGap: subtext0
+    case .commentQuote,
+         .commentStrikethrough,
+         .commentGap: subtext0
     case .added: green
     case .removed: red
     case nil: ansi(span.color)
     }
   }
 
+  // MARK: Private
+
+  private let lightBackground: Bool
+  private let noColor: Bool
+  private let ansiColors: [Color]
+
   private static func blend(_ foreground: UInt32, over background: UInt32, opacity: Double) -> UInt32 {
     [16, 8, 0].reduce(0) { result, shift in
-      let front = Double((foreground >> shift) & 255), back = Double((background >> shift) & 255)
+      let front = Double((foreground >> shift) & 255)
+      let back = Double((background >> shift) & 255)
       return result | (UInt32((front * opacity + back * (1 - opacity)).rounded()) << shift)
     }
   }
+
 }

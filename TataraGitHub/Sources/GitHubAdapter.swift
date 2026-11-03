@@ -6,13 +6,21 @@ import TataraCore
 import TataraKit
 import TataraSystem
 
+// MARK: - GitHubAdapter
+
 public struct GitHubAdapter: Sendable {
-  public let runner: CommandRunner
-  public let cache: CacheClient
+
+  // MARK: Lifecycle
+
   public init(runner: CommandRunner = .live, cache: CacheClient = .disabled) {
     self.runner = runner
     self.cache = cache
   }
+
+  // MARK: Public
+
+  public let runner: CommandRunner
+  public let cache: CacheClient
 
   public var capabilities: ForgeCapabilities {
     .init(reviews: true, inlineComments: true, issues: true)
@@ -41,10 +49,6 @@ public struct GitHubAdapter: Sendable {
       detail: "Missing GitHub account identity.",
     ) }
     return value
-  }
-
-  private static func metadataNamespace(_ repository: RepositoryID) -> String {
-    "metadata-v3:\(repository)"
   }
 
   @concurrent
@@ -93,18 +97,36 @@ public struct GitHubAdapter: Sendable {
       return try decode(ItemPage.self, data)
     }
     let q = "repo:\(repository.slug) is:\(kind == .pullRequest ? "pr" : "issue") \(query)"
-    let output = try await runner.checked("gh", ["api", "--hostname", repository.host, "--method", "GET", "search/issues",
-                                                 "-f", "q=\(q)", "-f", "sort=updated", "-f", "order=desc",
-                                                 "-f", "per_page=100", "-f", "page=\(page)"])
+    let output = try await runner.checked("gh", [
+      "api",
+      "--hostname",
+      repository.host,
+      "--method",
+      "GET",
+      "search/issues",
+      "-f",
+      "q=\(q)",
+      "-f",
+      "sort=updated",
+      "-f",
+      "order=desc",
+      "-f",
+      "per_page=100",
+      "-f",
+      "page=\(page)",
+    ])
     let result = try decode(Results.self, output.output)
     guard !result.incomplete_results, result.total_count <= 1000 else {
       throw TataraError(.incompleteResponse, detail: "Refine the search to at most 1,000 complete results.")
     }
     for item in result.items {
       let path = item.htmlURL.path.split(separator: "/")
-      guard item.htmlURL.host?.lowercased() == repository.host.lowercased(), path.count >= 4,
-            "\(path[0])/\(path[1])".lowercased() == repository.slug.lowercased(),
-            path[2] == (kind == .pullRequest ? "pull" : "issues"), Int(path[3]) == item.number
+      guard
+        item.htmlURL.host?.lowercased() == repository.host.lowercased(),
+        path.count >= 4,
+        "\(path[0])/\(path[1])".lowercased() == repository.slug.lowercased(),
+        path[2] == (kind == .pullRequest ? "pull" : "issues"),
+        Int(path[3]) == item.number
       else {
         throw TataraError(.invalidResponse, detail: "The search escaped the selected repository or item kind.")
       }
@@ -137,9 +159,13 @@ public struct GitHubAdapter: Sendable {
     let key = "detail:\(number)"
     if let data = try await cache.read(Self.metadataNamespace(repository), key, 30) {
       let result = try decode(ItemDetail.self, data)
-      if result.item.title == item.title, result.item.body == item.body, result.item.isDraft == item.isDraft,
-         result.item.state == item.state, result.item.labels == item.labels,
-         result.item.github == item.github
+      if
+        result.item.title == item.title,
+        result.item.body == item.body,
+        result.item.isDraft == item.isDraft,
+        result.item.state == item.state,
+        result.item.labels == item.labels,
+        result.item.github == item.github
       {
         return result
       }
@@ -173,7 +199,8 @@ public struct GitHubAdapter: Sendable {
       throw TataraError(.incompleteResponse, detail: "GitHub returned \(changed.count) of \(value.changedFiles) changed files.")
     }
     let metadata = GitHubMetadata(
-      baseBranch: value.base.ref, headBranch: value.head.label,
+      baseBranch: value.base.ref,
+      headBranch: value.head.label,
       mergeableState: value.mergeableState ?? "unknown",
       checks: checkPages.flatMap(\.checkRuns).map { "\($0.name): \($0.conclusion ?? $0.status)" }
         + commitStatus.statuses.map { "\($0.context): \($0.state)" },
@@ -208,9 +235,15 @@ public struct GitHubAdapter: Sendable {
       return data
     }
     let escaped = path.split(separator: "/", omittingEmptySubsequences: false)
-      .map { String($0).addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "" }.joined(separator: "/")
+      .lazy.map { String($0).addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "" }.joined(separator: "/")
     let result = try await runner.checked("gh", [
-      "api", "--hostname", repository.host, "--method", "GET", "-H", "Accept: application/vnd.github.raw+json",
+      "api",
+      "--hostname",
+      repository.host,
+      "--method",
+      "GET",
+      "-H",
+      "Accept: application/vnd.github.raw+json",
       "repos/\(repository.slug)/contents/\(escaped)?ref=\(revision)",
     ]).output
     try Task.checkCancellation()
@@ -220,8 +253,9 @@ public struct GitHubAdapter: Sendable {
 
   @concurrent
   public func submit(_ submission: ReviewSubmission) async throws {
-    guard !submission.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !submission.comments.isEmpty || submission
-      .event == .approve
+    guard
+      !submission.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !submission.comments.isEmpty || submission
+        .event == .approve
     else {
       throw TataraError(.emptyReview)
     }
@@ -259,28 +293,43 @@ public struct GitHubAdapter: Sendable {
     // The reviewed commit is part of the write itself. Never retry writes automatically.
     _ = try await runner.checked(
       "gh",
-      ["api", "--hostname", repository.host, "--method", "POST",
-       "repos/\(repository.slug)/\(endpoint)", "--input", "-"],
+      [
+        "api",
+        "--hostname",
+        repository.host,
+        "--method",
+        "POST",
+        "repos/\(repository.slug)/\(endpoint)",
+        "--input",
+        "-",
+      ],
       input: String(decoding: payload, as: UTF8.self),
     )
+  }
+
+  // MARK: Private
+
+  private static func metadataNamespace(_ repository: RepositoryID) -> String {
+    "metadata-v3:\(repository)"
   }
 
   /// One bounded GraphQL request enriches a REST page; no per-row subprocesses or inferred decisions.
   private func enrich(_ items: [ForgeItem], repository: RepositoryID) async throws -> [ForgeItem] {
     let pulls = items.filter { $0.kind == .pullRequest }
     guard !pulls.isEmpty else { return items }
-    let fields = pulls.map { "p\($0.id.number): pullRequest(number: \($0.id.number)) { ...Summary }" }.joined(separator: "\n")
+    let fields = pulls.lazy.map { "p\($0.id.number): pullRequest(number: \($0.id.number)) { ...Summary }" }
+      .joined(separator: "\n")
     let query = """
-    query($owner: String!, $name: String!) {
-      repository(owner: $owner, name: $name) { \(fields) }
-    }
-    fragment Summary on PullRequest {
-      number url state isDraft
-      createdAt updatedAt closedAt mergedAt headRefOid headRefName baseRefName
-      reviewDecision totalCommentsCount statusCheckRollup { state }
-      additions deletions changedFiles commits { totalCount }
-    }
-    """
+      query($owner: String!, $name: String!) {
+        repository(owner: $owner, name: $name) { \(fields) }
+      }
+      fragment Summary on PullRequest {
+        number url state isDraft
+        createdAt updatedAt closedAt mergedAt headRefOid headRefName baseRefName
+        reviewDecision totalCommentsCount statusCheckRollup { state }
+        additions deletions changedFiles commits { totalCount }
+      }
+      """
     let payload = try JSONSerialization.data(withJSONObject: [
       "query": query,
       "variables": ["owner": repository.owner, "name": repository.name],
@@ -299,8 +348,11 @@ public struct GitHubAdapter: Sendable {
     }
     return try items.map { item in
       guard item.kind == .pullRequest else { return item }
-      guard let optional = values["p\(item.id.number)"], let summary = optional,
-            summary.number == item.id.number, summary.url == item.url
+      guard
+        let optional = values["p\(item.id.number)"],
+        let summary = optional,
+        summary.number == item.id.number,
+        summary.url == item.url
       else {
         throw TataraError(.incompleteResponse, detail: "GitHub metadata does not match pull request #\(item.id.number).")
       }
@@ -372,22 +424,41 @@ public struct GitHubAdapter: Sendable {
     try Task.checkCancellation()
     return value
   }
+
 }
 
+// MARK: - UserDTO
+
 private struct UserDTO: Decodable { var login: String }
+
+// MARK: - LabelDTO
+
 private struct LabelDTO: Decodable { var name: String }
+
+// MARK: - MilestoneDTO
+
 private struct MilestoneDTO: Decodable { var title: String }
+
+// MARK: - TeamDTO
+
 private struct TeamDTO: Decodable { var slug: String }
+
+// MARK: - SummaryResponse
+
 private struct SummaryResponse: Decodable {
   struct Payload: Decodable { var repository: [String: PullSummaryDTO?]? }
   struct Failure: Decodable { var message: String }
+
   var data: Payload?
   var errors: [Failure]?
 }
 
+// MARK: - PullSummaryDTO
+
 private struct PullSummaryDTO: Decodable {
   struct Rollup: Decodable { var state: GitHubItemSummary.ChecksState }
   struct Count: Decodable { var totalCount: Int }
+
   var number: Int
   var url: URL
   var state: String
@@ -408,10 +479,33 @@ private struct PullSummaryDTO: Decodable {
   var commits: Count
 }
 
+// MARK: - ItemDTO
+
 private struct ItemDTO: Decodable {
   struct PullMarker: Decodable {
-    var mergedAt: String?
     enum CodingKeys: String, CodingKey { case mergedAt = "merged_at" }
+
+    var mergedAt: String?
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case createdAt = "created_at"
+    case updatedAt = "updated_at"
+    case closedAt = "closed_at"
+    case requestedReviewers = "requested_reviewers"
+    case requestedTeams = "requested_teams"
+    case assignees
+    case milestone
+    case comments
+    case number
+    case title
+    case user
+    case body
+    case state
+    case labels
+    case draft
+    case htmlURL = "html_url"
+    case pullRequest = "pull_request"
   }
 
   var createdAt: String?
@@ -431,13 +525,6 @@ private struct ItemDTO: Decodable {
   var labels: [LabelDTO]
   var draft: Bool?
   var pullRequest: PullMarker?
-  enum CodingKeys: String, CodingKey {
-    case createdAt = "created_at", updatedAt = "updated_at", closedAt = "closed_at"
-    case requestedReviewers = "requested_reviewers", requestedTeams = "requested_teams"
-    case assignees, milestone, comments
-    case number, title, user, body, state, labels, draft
-    case htmlURL = "html_url", pullRequest = "pull_request"
-  }
 
   func model(_ repository: RepositoryID, _ kind: ItemKind) -> ForgeItem {
     ForgeItem(
@@ -464,10 +551,36 @@ private struct ItemDTO: Decodable {
   }
 }
 
+// MARK: - PullRequestDTO
+
 private struct PullRequestDTO: Decodable {
   struct Ref: Decodable { var sha: String
     var ref: String
     var label: String
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case createdAt = "created_at"
+    case updatedAt = "updated_at"
+    case closedAt = "closed_at"
+    case requestedReviewers = "requested_reviewers"
+    case requestedTeams = "requested_teams"
+    case assignees
+    case milestone
+    case comments
+    case number
+    case title
+    case user
+    case body
+    case state
+    case labels
+    case draft
+    case merged
+    case base
+    case head
+    case htmlURL = "html_url"
+    case changedFiles = "changed_files"
+    case mergeableState = "mergeable_state"
   }
 
   var createdAt: String?
@@ -491,13 +604,6 @@ private struct PullRequestDTO: Decodable {
   var head: Ref
   var changedFiles: Int
   var mergeableState: String?
-  enum CodingKeys: String, CodingKey {
-    case createdAt = "created_at", updatedAt = "updated_at", closedAt = "closed_at"
-    case requestedReviewers = "requested_reviewers", requestedTeams = "requested_teams"
-    case assignees, milestone, comments
-    case number, title, user, body, state, labels, draft, merged, base, head
-    case htmlURL = "html_url", changedFiles = "changed_files", mergeableState = "mergeable_state"
-  }
 
   func model(_ repository: RepositoryID) -> ForgeItem {
     ForgeItem(
@@ -524,16 +630,19 @@ private struct PullRequestDTO: Decodable {
   }
 }
 
+// MARK: - FileDTO
+
 private struct FileDTO: Decodable {
+  enum CodingKeys: String, CodingKey { case filename, status, additions, deletions, patch
+    case previousFilename = "previous_filename"
+  }
+
   var filename: String
   var previousFilename: String?
   var status: String
   var additions: Int
   var deletions: Int
   var patch: String?
-  enum CodingKeys: String, CodingKey { case filename, status, additions, deletions, patch
-    case previousFilename = "previous_filename"
-  }
 
   var model: ChangedFile {
     .init(
@@ -547,11 +656,16 @@ private struct FileDTO: Decodable {
   }
 }
 
+// MARK: - CompareDTO
+
 private struct CompareDTO: Decodable {
   struct Commit: Decodable { var sha: String }
-  var mergeBaseCommit: Commit
   enum CodingKeys: String, CodingKey { case mergeBaseCommit = "merge_base_commit" }
+
+  var mergeBaseCommit: Commit
 }
+
+// MARK: - CommentDTO
 
 private struct CommentDTO: Decodable {
   var id: Int
@@ -568,6 +682,7 @@ private struct CommentDTO: Decodable {
   var subject_type: String?
   var original_line: Int?
   var commit_id: String?
+
   var model: DiscussionComment {
     .init(
       id: id,
@@ -585,14 +700,21 @@ private struct CommentDTO: Decodable {
           subjectType: subject_type,
         )
       },
-      nodeID: node_id, url: html_url, updatedAt: updated_at, replyToID: in_reply_to_id,
+      nodeID: node_id,
+      url: html_url,
+      updatedAt: updated_at,
+      replyToID: in_reply_to_id,
     )
   }
 }
 
+// MARK: - ReviewDTO
+
 private struct ReviewDTO: Decodable { var user: UserDTO?
   var state: String
 }
+
+// MARK: - ChecksDTO
 
 private struct ChecksDTO: Decodable {
   struct Check: Decodable { var name: String
@@ -600,9 +722,12 @@ private struct ChecksDTO: Decodable {
     var conclusion: String?
   }
 
-  var checkRuns: [Check]
   enum CodingKeys: String, CodingKey { case checkRuns = "check_runs" }
+
+  var checkRuns: [Check]
 }
+
+// MARK: - StatusDTO
 
 private struct StatusDTO: Decodable {
   struct Status: Decodable { var context: String
@@ -612,27 +737,38 @@ private struct StatusDTO: Decodable {
   var statuses: [Status]
 }
 
+// MARK: - ReviewPayload
+
 private struct ReviewPayload: Encodable {
+  enum CodingKeys: String, CodingKey { case body, event, comments
+    case commitID = "commit_id"
+  }
+
   var body: String
   var event: String
   var commitID: String
   var comments: [InlineComment]
-  enum CodingKeys: String, CodingKey { case body, event, comments
-    case commitID = "commit_id"
-  }
 }
+
+// MARK: - CommentPayload
 
 private struct CommentPayload: Encodable { var body: String }
 
+// MARK: - CommentGraphQL
+
 private struct CommentGraphQL<Value: Decodable>: Decodable {
   struct Failure: Decodable { var message: String }
+
   var data: Value?
   var errors: [Failure]?
 }
 
+// MARK: - CommentNodePayload
+
 private struct CommentNodePayload: Decodable {
   struct Parent: Decodable {
     struct Repository: Decodable { var nameWithOwner: String }
+
     var number: Int
     var locked: Bool
     var viewerCanUpdate: Bool
@@ -643,6 +779,7 @@ private struct CommentNodePayload: Decodable {
     struct Ref: Decodable { var id: String }
     struct Group: Decodable {
       struct Users: Decodable { var totalCount: Int }
+
       var content: ReactionContent
       var viewerHasReacted: Bool
       var users: Users
@@ -665,6 +802,8 @@ private struct CommentNodePayload: Decodable {
   var viewer: UserDTO
 }
 
+// MARK: - ThreadPayload
+
 private struct ThreadPayload: Decodable {
   struct PageInfo: Decodable { var hasNextPage: Bool
     var endCursor: String?
@@ -672,6 +811,7 @@ private struct ThreadPayload: Decodable {
 
   struct Thread: Decodable {
     struct Comments: Decodable { struct Node: Decodable { var id: String }
+
       var nodes: [Node]
     }
 
@@ -689,10 +829,14 @@ private struct ThreadPayload: Decodable {
 
   struct Pull: Decodable { var reviewThreads: Connection }
   struct Repository: Decodable { var pullRequest: Pull? }
+
   var repository: Repository?
 }
 
 extension GitHubAdapter {
+
+  // MARK: Public
+
   @concurrent
   public func commentContext(_ item: ForgeItem, _ target: DiscussionComment) async throws -> CommentContext {
     let repository = item.id.repository
@@ -704,18 +848,22 @@ extension GitHubAdapter {
     }
     let common = "id body updatedAt url viewerCanUpdate viewerDidAuthor viewerCanDelete viewerCanReact reactionGroups { content viewerHasReacted users { totalCount } }"
     let query = """
-    query($id: ID!) {
-      viewer { login }
-      node(id: $id) {
-        ... on IssueComment { \(common) parent: issue { number locked viewerCanUpdate repository { nameWithOwner } } }
-        ... on PullRequestReviewComment { \(common) replyTo { id } parent: pullRequest { number locked viewerCanUpdate repository { nameWithOwner } } }
+      query($id: ID!) {
+        viewer { login }
+        node(id: $id) {
+          ... on IssueComment { \(common) parent: issue { number locked viewerCanUpdate repository { nameWithOwner } } }
+          ... on PullRequestReviewComment { \(common) replyTo { id } parent: pullRequest { number locked viewerCanUpdate repository { nameWithOwner } } }
+        }
       }
-    }
-    """
+      """
     let payload: CommentNodePayload = try await commentQuery(repository, query, variables: ["id": nodeID])
-    guard let node = payload.node, node.id == nodeID, node.parent.number == item.id.number,
-          node.parent.repository.nameWithOwner.lowercased() == repository.slug.lowercased(),
-          node.url.scheme == "https", node.url.host == repository.host
+    guard
+      let node = payload.node,
+      node.id == nodeID,
+      node.parent.number == item.id.number,
+      node.parent.repository.nameWithOwner.lowercased() == repository.slug.lowercased(),
+      node.url.scheme == "https",
+      node.url.host == repository.host
     else {
       throw TataraError(.invalidResponse, detail: "Comment ownership does not match the selected repository and item.")
     }
@@ -740,21 +888,122 @@ extension GitHubAdapter {
   }
 
   @concurrent
+  public func mutateComment(_ mutation: CommentMutation) async throws {
+    let repository = mutation.item.id.repository
+    let current = try await commentContext(mutation.item, mutation.context.comment)
+    guard current.viewer == mutation.context.viewer else { throw TataraError(
+      .authentication,
+      detail: "The active GitHub account changed. Reopen the comment before submitting.",
+    ) }
+    guard
+      current.comment.body == mutation.context.comment.body,
+      current.comment.updatedAt == mutation.context.comment.updatedAt
+    else {
+      throw TataraError(.invalidResponse, detail: "The comment changed after the preview. Reopen it before submitting.")
+    }
+    guard current.allows(mutation.operation) else { throw TataraError(
+      .unavailable,
+      detail: "This comment action is no longer permitted.",
+    ) }
+    if mutation.item.kind == .pullRequest {
+      let pull: PullRequestDTO = try await get(repository, "pulls/\(mutation.item.id.number)")
+      guard let expected = mutation.expectedHead, pull.head.sha == expected else { throw TataraError(.revisionChanged) }
+    }
+    try Task.checkCancellation()
+    let comment = current.comment
+    let category = comment.anchor == nil ? "issues" : "pulls"
+    var endpoint = "\(category)/comments/\(comment.id)"
+    var method = "POST"
+    var payload = [String: String]()
+    switch mutation.operation {
+    case .reply,
+         .edit:
+      guard !mutation.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw TataraError(.emptyReview) }
+      payload["body"] = mutation.body
+      if mutation.operation == .edit {
+        method = "PATCH"
+      } else if comment.anchor == nil {
+        endpoint = "issues/\(mutation.item.id.number)/comments"
+      } else {
+        endpoint = "pulls/\(mutation.item.id.number)/comments/\(comment.replyToID ?? comment.id)/replies"
+      }
+
+    case .delete: method = "DELETE"
+
+    case .react:
+      guard let node = comment.nodeID else { throw TataraError(.invalidResponse, detail: "Missing comment node ID.") }
+      let wasSelected = mutation.context.reactions.first { $0.content == mutation.reaction }?.viewerHasReacted ?? false
+      let isSelected = current.reactions.first { $0.content == mutation.reaction }?.viewerHasReacted ?? false
+      guard wasSelected == isSelected else { throw TataraError(
+        .invalidResponse,
+        detail: "The reaction changed after the preview. Reopen the comment.",
+      ) }
+      let operation = isSelected ? "removeReaction" : "addReaction"
+      let query = "mutation($id: ID!, $content: ReactionContent!) { \(operation)(input: {subjectId: $id, content: $content}) { subject { id } } }"
+      try await cache.invalidate(Self.metadataNamespace(repository))
+      let response: [String: MutationAcknowledgement] = try await commentQuery(
+        repository,
+        query,
+        variables: ["id": node, "content": mutation.reaction.rawValue],
+      )
+      guard response[operation]?.subject?.id == node else { throw TataraError(
+        .invalidResponse,
+        detail: "GitHub did not acknowledge the reaction target. Refresh before attempting another write.",
+      ) }
+      return
+
+    case .resolve,
+         .unresolve:
+      guard let thread = current.thread, thread.id == mutation.context.thread?.id else { throw TataraError(
+        .invalidResponse,
+        detail: "The review thread changed after the preview.",
+      ) }
+      let operation = mutation.operation == .resolve ? "resolveReviewThread" : "unresolveReviewThread"
+      let query = "mutation($id: ID!) { \(operation)(input: {threadId: $id}) { thread { id } } }"
+      try await cache.invalidate(Self.metadataNamespace(repository))
+      let response: [String: MutationAcknowledgement] = try await commentQuery(repository, query, variables: ["id": thread.id])
+      guard response[operation]?.thread?.id == thread.id else { throw TataraError(
+        .invalidResponse,
+        detail: "GitHub did not acknowledge the review thread. Refresh before attempting another write.",
+      ) }
+      return
+    }
+    try await cache.invalidate(Self.metadataNamespace(repository))
+    let data = try JSONEncoder().encode(payload)
+    _ = try await runner.checked("gh", [
+      "api",
+      "--hostname",
+      repository.host,
+      "--method",
+      method,
+      "repos/\(repository.slug)/\(endpoint)",
+      "--input",
+      "-",
+    ], input: String(
+      decoding: data,
+      as: UTF8.self,
+    ))
+  }
+
+  // MARK: Private
+
+  @concurrent
   private func commentThread(_ item: ForgeItem, root: String) async throws -> ReviewThread {
     let repository = item.id.repository
     let query = """
-    query($owner: String!, $name: String!, $after: String) {
-      repository(owner: $owner, name: $name) {
-        pullRequest(number: \(item.id.number)) {
-          reviewThreads(first: 100, after: $after) {
-            nodes { id isResolved viewerCanResolve viewerCanUnresolve viewerCanReply comments(first: 1) { nodes { id } } }
-            pageInfo { hasNextPage endCursor }
+      query($owner: String!, $name: String!, $after: String) {
+        repository(owner: $owner, name: $name) {
+          pullRequest(number: \(item.id.number)) {
+            reviewThreads(first: 100, after: $after) {
+              nodes { id isResolved viewerCanResolve viewerCanUnresolve viewerCanReply comments(first: 1) { nodes { id } } }
+              pageInfo { hasNextPage endCursor }
+            }
           }
         }
       }
-    }
-    """
-    var cursor: String?, seen = Set<String>()
+      """
+    var cursor: String?
+    var seen = Set<String>()
     for _ in 0 ..< 100 {
       try Task.checkCancellation()
       var variables = ["owner": repository.owner, "name": repository.name]
@@ -787,90 +1036,6 @@ extension GitHubAdapter {
   }
 
   @concurrent
-  public func mutateComment(_ mutation: CommentMutation) async throws {
-    let repository = mutation.item.id.repository
-    let current = try await commentContext(mutation.item, mutation.context.comment)
-    guard current.viewer == mutation.context.viewer else { throw TataraError(
-      .authentication,
-      detail: "The active GitHub account changed. Reopen the comment before submitting.",
-    ) }
-    guard current.comment.body == mutation.context.comment.body,
-          current.comment.updatedAt == mutation.context.comment.updatedAt
-    else {
-      throw TataraError(.invalidResponse, detail: "The comment changed after the preview. Reopen it before submitting.")
-    }
-    guard current.allows(mutation.operation) else { throw TataraError(
-      .unavailable,
-      detail: "This comment action is no longer permitted.",
-    ) }
-    if mutation.item.kind == .pullRequest {
-      let pull: PullRequestDTO = try await get(repository, "pulls/\(mutation.item.id.number)")
-      guard let expected = mutation.expectedHead, pull.head.sha == expected else { throw TataraError(.revisionChanged) }
-    }
-    try Task.checkCancellation()
-    let comment = current.comment
-    let category = comment.anchor == nil ? "issues" : "pulls"
-    var endpoint = "\(category)/comments/\(comment.id)"
-    var method = "POST"
-    var payload: [String: String] = [:]
-    switch mutation.operation {
-    case .reply, .edit:
-      guard !mutation.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw TataraError(.emptyReview) }
-      payload["body"] = mutation.body
-      if mutation.operation == .edit {
-        method = "PATCH"
-      } else if comment.anchor == nil {
-        endpoint = "issues/\(mutation.item.id.number)/comments"
-      } else {
-        endpoint = "pulls/\(mutation.item.id.number)/comments/\(comment.replyToID ?? comment.id)/replies"
-      }
-    case .delete: method = "DELETE"
-    case .react:
-      guard let node = comment.nodeID else { throw TataraError(.invalidResponse, detail: "Missing comment node ID.") }
-      let wasSelected = mutation.context.reactions.first { $0.content == mutation.reaction }?.viewerHasReacted ?? false
-      let isSelected = current.reactions.first { $0.content == mutation.reaction }?.viewerHasReacted ?? false
-      guard wasSelected == isSelected else { throw TataraError(
-        .invalidResponse,
-        detail: "The reaction changed after the preview. Reopen the comment.",
-      ) }
-      let operation = isSelected ? "removeReaction" : "addReaction"
-      let query = "mutation($id: ID!, $content: ReactionContent!) { \(operation)(input: {subjectId: $id, content: $content}) { subject { id } } }"
-      try await cache.invalidate(Self.metadataNamespace(repository))
-      let response: [String: MutationAcknowledgement] = try await commentQuery(
-        repository,
-        query,
-        variables: ["id": node, "content": mutation.reaction.rawValue],
-      )
-      guard response[operation]?.subject?.id == node else { throw TataraError(
-        .invalidResponse,
-        detail: "GitHub did not acknowledge the reaction target. Refresh before attempting another write.",
-      ) }
-      return
-    case .resolve, .unresolve:
-      guard let thread = current.thread, thread.id == mutation.context.thread?.id else { throw TataraError(
-        .invalidResponse,
-        detail: "The review thread changed after the preview.",
-      ) }
-      let operation = mutation.operation == .resolve ? "resolveReviewThread" : "unresolveReviewThread"
-      let query = "mutation($id: ID!) { \(operation)(input: {threadId: $id}) { thread { id } } }"
-      try await cache.invalidate(Self.metadataNamespace(repository))
-      let response: [String: MutationAcknowledgement] = try await commentQuery(repository, query, variables: ["id": thread.id])
-      guard response[operation]?.thread?.id == thread.id else { throw TataraError(
-        .invalidResponse,
-        detail: "GitHub did not acknowledge the review thread. Refresh before attempting another write.",
-      ) }
-      return
-    }
-    try await cache.invalidate(Self.metadataNamespace(repository))
-    let data = try JSONEncoder().encode(payload)
-    _ = try await runner.checked("gh", ["api", "--hostname", repository.host, "--method", method,
-                                        "repos/\(repository.slug)/\(endpoint)", "--input", "-"], input: String(
-        decoding: data,
-        as: UTF8.self,
-      ))
-  }
-
-  @concurrent
   private func commentQuery<Value: Decodable>(
     _ repository: RepositoryID,
     _ query: String,
@@ -891,10 +1056,14 @@ extension GitHubAdapter {
     }
     return value
   }
+
 }
+
+// MARK: - MutationAcknowledgement
 
 private struct MutationAcknowledgement: Decodable {
   struct Node: Decodable { var id: String }
+
   var subject: Node?
   var thread: Node?
 }

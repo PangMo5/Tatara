@@ -1,8 +1,17 @@
 [tools]
-"aqua:tuist/tuist" = "4.207.0"
-swiftformat = "0.63.0"
-"aqua:cli/cli" = "2.100.0"
-"aqua:Wilfred/difftastic" = "0.70.0"
+"aqua:tuist/tuist" = "4.214.1"
+swiftformat = "0.64.5"
+"aqua:cli/cli" = "2.103.3"
+"aqua:Wilfred/difftastic" = "0.72.0"
+"aqua:jj-vcs/jj" = "0.46.0"
+"aqua:gitleaks/gitleaks" = "8.30.1"
+uv = "0.13.7"
+
+[env]
+DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode-27.2.0.app/Contents/Developer') }}"
+
+[tasks.toolchain]
+run = "swift Scripts/Tatara.swift toolchain"
 
 [tasks.generate]
 run = "swift Scripts/Tatara.swift generate"

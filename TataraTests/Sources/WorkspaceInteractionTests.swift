@@ -11,7 +11,11 @@ import Testing
 
 @MainActor
 struct WorkspaceInteractionTests {
-  @Test func `enter opens the selected PR into files and the selected file into diff`() async throws {
+
+  // MARK: Internal
+
+  @Test
+  func `enter opens the selected PR into files and the selected file into diff`() async throws {
     let item = try item()
     var state = WorkspaceFeature.State(repository: item.id.repository, preferences: .init(filesView: .list))
     state.items = [item]
@@ -28,7 +32,8 @@ struct WorkspaceInteractionTests {
     await store.receive(\.fileSelected)
   }
 
-  @Test func `sidebar scroll remains stationary until selection crosses either context margin`() {
+  @Test
+  func `sidebar scroll remains stationary until selection crosses either context margin`() {
     func offset(_ selected: Int, _ previous: Int, total: Int = 100, page: Int = 10) -> Int {
       ScrollMetrics.selectionOffset(selected: selected, total: total, page: page, previous: previous)
     }
@@ -71,7 +76,7 @@ struct WorkspaceInteractionTests {
     // Exercise the live observation boundary used by the view, not a reducer snapshot.
     let store = Store(initialState: state) { WorkspaceFeature() } withDependencies: {
       $0[DiffClient.self].render = { _ in
-        for await _ in stream {}
+        for await _ in stream { }
         throw CancellationError()
       }
     }
@@ -99,8 +104,10 @@ struct WorkspaceInteractionTests {
     await task.finish()
   }
 
-  @Test func `selection keeps an identified preview until replacement and blocks premature reviews`() async throws {
-    let first = try item(1), next = try item(2)
+  @Test
+  func `selection keeps an identified preview until replacement and blocks premature reviews`() async throws {
+    let first = try item(1)
+    let next = try item(2)
     let original = ReviewDocument(lines: (0 ..< 50).map { [.init(text: "Old source \($0)")] })
     let replacement = ReviewDocument(lines: [[.init(text: "New source")]])
     let (stream, continuation) = AsyncStream<Void>.makeStream()
@@ -140,7 +147,8 @@ struct WorkspaceInteractionTests {
     #expect(!store.state.isPreparingDocument)
   }
 
-  @Test func `wheel targets the hovered document without changing keyboard focus`() async throws {
+  @Test
+  func `wheel targets the hovered document without changing keyboard focus`() async throws {
     var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
     state.pane = .files
     state.contentHeight = 10
@@ -152,7 +160,8 @@ struct WorkspaceInteractionTests {
     #expect(store.state.pane == .files)
   }
 
-  @Test func `manual scrolling preserves sidebar selection pane focus and diff source cursor`() async throws {
+  @Test
+  func `manual scrolling preserves sidebar selection pane focus and diff source cursor`() async throws {
     let items = try (1 ... 50).map { try item($0) }
     let files = (0 ..< 50).map { ChangedFile(path: "File\($0).swift") }
     var state = WorkspaceFeature.State(repository: items[0].id.repository, preferences: .init(filesView: .list))
@@ -175,7 +184,7 @@ struct WorkspaceInteractionTests {
         rows:
         (0 ..< 100).map { .init(left: nil, right: .init(number: $0 + 1, spans: [.init(text: "line \($0)")])) },
       ),
-      checkingCancellation: {},
+      checkingCancellation: { },
     )
     state.diffCursor = 4
     state.visualStart = 2
@@ -200,7 +209,8 @@ struct WorkspaceInteractionTests {
     }
   }
 
-  @Test func `keyboard boundary motion reveals the selection after independent scrolling`() async throws {
+  @Test
+  func `keyboard boundary motion reveals the selection after independent scrolling`() async throws {
     let items = try (1 ... 20).map { try item($0) }
     var state = WorkspaceFeature.State(repository: items[0].id.repository)
     state.items = items
@@ -211,7 +221,8 @@ struct WorkspaceInteractionTests {
     await store.send(.commandPressed(.first)) { $0.itemsScroll = 0 }
   }
 
-  @Test func `help owns wheel input while presented`() async throws {
+  @Test
+  func `help owns wheel input while presented`() async throws {
     var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
     state.showsHelp = true
     state.helpHeight = 5
@@ -224,7 +235,8 @@ struct WorkspaceInteractionTests {
     await store.send(.wheelScrolled(.help, delta: -100)) { $0.helpScroll = 0 }
   }
 
-  @Test func `obsolete detail failure cannot replace current selection`() async throws {
+  @Test
+  func `obsolete detail failure cannot replace current selection`() async throws {
     let old = try item(1)
     let current = try item(2)
     var state = WorkspaceFeature.State(repository: current.id.repository)
@@ -235,7 +247,8 @@ struct WorkspaceInteractionTests {
     await store.send(.detailResponse(generation: 4, .failure(.init(.timedOut))))
   }
 
-  @Test func `next match without A search does not scroll`() async throws {
+  @Test
+  func `next match without A search does not scroll`() async throws {
     var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
     state.pane = .content
     state.document = .init(lines: (0 ..< 100).map { [.init(text: "Line \($0)")] })
@@ -244,18 +257,8 @@ struct WorkspaceInteractionTests {
     await store.send(.commandPressed(.previousMatch))
   }
 
-  private func item(_ number: Int = 1) throws -> ForgeItem {
-    try ForgeItem(
-      id: .init(repository: RepositoryID("owner/repo"), number: number),
-      kind: .pullRequest,
-      title: "Example \(number)",
-      author: "author",
-      body: "Overview \(number)",
-      url: #require(URL(string: "https://github.com/owner/repo/pull/\(number)")),
-    )
-  }
-
-  @Test func `committed filter clears without leaving its pane`() async throws {
+  @Test
+  func `committed filter clears without leaving its pane`() async throws {
     var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
     state.pane = .files
     state.tab = .diff
@@ -273,7 +276,8 @@ struct WorkspaceInteractionTests {
     #expect(store.state.searches[.items]?.query == "Example")
   }
 
-  @Test func `search does not move focus to the pull request list`() async throws {
+  @Test
+  func `search does not move focus to the pull request list`() async throws {
     var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
     state.pane = .files
     let store = TestStore(initialState: state) { WorkspaceFeature() }
@@ -305,7 +309,8 @@ struct WorkspaceInteractionTests {
     #expect(store.state.selectedItemID == item.id)
   }
 
-  @Test func `help search matches localized labels and actual bindings`() async throws {
+  @Test
+  func `help search matches localized labels and actual bindings`() async throws {
     var state = try WorkspaceFeature.State(
       repository: RepositoryID("owner/repo"),
       strings: ["Page down in content": "메인 패널 아래로"],
@@ -325,7 +330,8 @@ struct WorkspaceInteractionTests {
     #expect(store.state.pane == .files)
   }
 
-  @Test func `content search jumps between matches and rejects stale results`() async throws {
+  @Test
+  func `content search jumps between matches and rejects stale results`() async throws {
     var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
     state.pane = .content
     state.contentHeight = 5
@@ -356,14 +362,8 @@ struct WorkspaceInteractionTests {
     #expect(store.state.scroll == 20)
   }
 
-  private actor Requests {
-    var ids: [ItemID] = []
-    func record(_ id: ItemID) {
-      ids.append(id)
-    }
-  }
-
-  @Test func `detail starts without a timer and a cached revisit does not fetch again`() async throws {
+  @Test
+  func `detail starts without a timer and a cached revisit does not fetch again`() async throws {
     let calls = Requests()
     let items = try [item(1), item(2)]
     var state = WorkspaceFeature.State(repository: items[0].id.repository)
@@ -390,7 +390,8 @@ struct WorkspaceInteractionTests {
     #expect(!store.state.isLoadingDetail)
   }
 
-  @Test func `failed replacement remains a preview and cannot provide search or review anchors`() async throws {
+  @Test
+  func `failed replacement remains a preview and cannot provide search or review anchors`() async throws {
     let item = try item()
     let file = ChangedFile(path: "File.swift", patch: "@@ -1 +1 @@\n-old\n+new")
     var state = WorkspaceFeature.State(repository: item.id.repository)
@@ -405,9 +406,9 @@ struct WorkspaceInteractionTests {
     state.document = .init(
       lines: [[.init(text: "old preview")]],
       diff: .init(path: file.path, language: "Swift", status: "changed", rows: [
-        .init(left: nil, right: .init(number: 1, spans: [.init(text: "old preview")])),
+        .init(left: nil, right: .init(number: 1, spans: [.init(text: "old preview")]))
       ], revision: state.detail?.revision),
-      checkingCancellation: {},
+      checkingCancellation: { },
     )
     let store = TestStore(initialState: state) { WorkspaceFeature() }
     store.exhaustivity = .off
@@ -427,7 +428,8 @@ struct WorkspaceInteractionTests {
     await store.finish()
   }
 
-  @Test func `theme changes reuse the prepared diff and preserve selection`() async throws {
+  @Test
+  func `theme changes reuse the prepared diff and preserve selection`() async throws {
     var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
     state.tab = .diff
     state.scroll = 20
@@ -439,7 +441,8 @@ struct WorkspaceInteractionTests {
     #expect(store.state.visualStart == 21)
   }
 
-  @Test func `sidebar projections follow their inputs and preserve matching ancestors`() throws {
+  @Test
+  func `sidebar projections follow their inputs and preserve matching ancestors`() throws {
     let item = try item()
     var state = WorkspaceFeature.State(repository: item.id.repository)
     state.items = [item]
@@ -465,7 +468,8 @@ struct WorkspaceInteractionTests {
     #expect(state.visibleFileRows.isEmpty)
   }
 
-  @Test func `an older preset read cannot finish a newer save`() async throws {
+  @Test
+  func `an older preset read cannot finish a newer save`() async throws {
     let repository = try RepositoryID("owner/repo")
     var state = FilterFeature.State(repository: repository, kind: .pullRequest, query: "is:open")
     state.generation = 2
@@ -478,7 +482,8 @@ struct WorkspaceInteractionTests {
     await store.send(.loaded(generation: 2, .success([]))) { $0.isSaving = false }
   }
 
-  @Test func `detail cache evicts an old entry without flushing recently viewed items`() async throws {
+  @Test
+  func `detail cache evicts an old entry without flushing recently viewed items`() async throws {
     let items = try (1 ... 17).map { try item($0) }
     var state = WorkspaceFeature.State(repository: items[0].id.repository)
     state.items = items
@@ -502,4 +507,26 @@ struct WorkspaceInteractionTests {
     #expect(store.state.detailCache[items[1].id] == nil)
     #expect(store.state.detailCache[items[16].id] != nil)
   }
+
+  // MARK: Private
+
+  private actor Requests {
+    var ids = [ItemID]()
+
+    func record(_ id: ItemID) {
+      ids.append(id)
+    }
+  }
+
+  private func item(_ number: Int = 1) throws -> ForgeItem {
+    try ForgeItem(
+      id: .init(repository: RepositoryID("owner/repo"), number: number),
+      kind: .pullRequest,
+      title: "Example \(number)",
+      author: "author",
+      body: "Overview \(number)",
+      url: #require(URL(string: "https://github.com/owner/repo/pull/\(number)")),
+    )
+  }
+
 }

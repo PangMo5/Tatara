@@ -6,33 +6,50 @@ import TataraCore
 
 @Reducer
 public struct ReviewFeature {
+
+  // MARK: Lifecycle
+
+  public init() { }
+
+  // MARK: Public
+
   @ObservableState
   public struct State: Equatable {
+
+    // MARK: Lifecycle
+
+    public init(item: ForgeItem, expectedHead: String?, expectedMergeBase: String? = nil) {
+      self.item = item
+      self.expectedHead = expectedHead
+      latestHead = expectedHead
+      self.expectedMergeBase = expectedMergeBase
+      latestMergeBase = expectedMergeBase
+    }
+
+    // MARK: Public
+
     public var item: ForgeItem
     public var expectedHead: String?
     public var latestHead: String?
     public var expectedMergeBase: String?
     public var latestMergeBase: String?
-    public var revisionChanged: Bool {
-      expectedHead != latestHead || expectedMergeBase != latestMergeBase
-    }
-
     public var body = ""
     public var event = ReviewEvent.comment
     public var isConfirming = false
     public var isSubmitting = false
     public var error: TataraError?
     public var selectedFile: ChangedFile?
-    public var comments: [InlineComment] = []
+    public var comments = [InlineComment]()
     public var isEditingInline = false
     public var inlineLine = ""
     public var inlineStartLine = ""
     public var inlineAnchorLocked = false
-    public var inlineDrafts: [String: String] = [:]
+    public var inlineDrafts = [String: String]()
     public var inlineSide = InlineComment.Side.right
     public var inlineBody = ""
-    private var inlineKey: String {
-      "\(selectedFile?.path ?? "")|\(inlineSide)|\(inlineStartLine)|\(inlineLine)"
+
+    public var revisionChanged: Bool {
+      expectedHead != latestHead || expectedMergeBase != latestMergeBase
     }
 
     public mutating func stashInlineDraft() {
@@ -45,13 +62,12 @@ public struct ReviewFeature {
       inlineBody = inlineDrafts[inlineKey] ?? ""
     }
 
-    public init(item: ForgeItem, expectedHead: String?, expectedMergeBase: String? = nil) {
-      self.item = item
-      self.expectedHead = expectedHead
-      latestHead = expectedHead
-      self.expectedMergeBase = expectedMergeBase
-      latestMergeBase = expectedMergeBase
+    // MARK: Private
+
+    private var inlineKey: String {
+      "\(selectedFile?.path ?? "")|\(inlineSide)|\(inlineStartLine)|\(inlineLine)"
     }
+
   }
 
   public enum Action {
@@ -71,11 +87,10 @@ public struct ReviewFeature {
     case removeInlineButtonPressed(Int)
     case submissionResponse(Result<Void, TataraError>)
     case delegate(Delegate)
+
     public enum Delegate { case submitted, dismissed }
   }
 
-  @Dependency(ForgeClient.self) var forge
-  public init() {}
   public var body: some ReducerOf<Self> {
     Reduce { state, action in
       switch action {
@@ -92,28 +107,38 @@ public struct ReviewFeature {
         state.isConfirming = false
         state.error = nil
         return .none
+
       case .cancelButtonPressed:
         return state.isSubmitting ? .none : .send(.delegate(.dismissed))
-      case let .inlineLineChanged(line): state.inlineLine = line
+
+      case .inlineLineChanged(let line): state.inlineLine = line
         state.error = nil
         return .none
-      case let .inlineStartLineChanged(line): state.inlineStartLine = line
+
+      case .inlineStartLineChanged(let line): state.inlineStartLine = line
         state.error = nil
         return .none
-      case let .inlineSideSelected(side): state.inlineSide = side
+
+      case .inlineSideSelected(let side): state.inlineSide = side
         state.error = nil
         return .none
-      case let .inlineBodyChanged(body): state.inlineBody = body
+
+      case .inlineBodyChanged(let body): state.inlineBody = body
         state.error = nil
         return .none
+
       case .addInlineButtonPressed:
         guard !state.isSubmitting else { return .none }
         guard !state.revisionChanged else { state.error = .init(.revisionChanged)
           return .none
         }
-        guard let file = state.selectedFile, let line = Int(state.inlineLine),
-              let start = state.inlineStartLine.isEmpty ? line : Int(state.inlineStartLine), start > 0, start <= line,
-              file.anchors.contains(range: start ... line, side: state.inlineSide)
+        guard
+          let file = state.selectedFile,
+          let line = Int(state.inlineLine),
+          let start = state.inlineStartLine.isEmpty ? line : Int(state.inlineStartLine),
+          start > 0,
+          start <= line,
+          file.anchors.contains(range: start ... line, side: state.inlineSide)
         else { state.error = .init(.invalidLine)
           return .none
         }
@@ -136,32 +161,38 @@ public struct ReviewFeature {
         state.isConfirming = false
         state.error = nil
         return .none
+
       case .cancelInlineButtonPressed: state.isEditingInline = false
         state.error = nil
         return .none
-      case let .removeInlineButtonPressed(index):
+
+      case .removeInlineButtonPressed(let index):
         guard !state.isSubmitting, state.comments.indices.contains(index) else { return .none }
         state.comments.remove(at: index)
         state.isConfirming = false
         return .none
-      case let .bodyChanged(value):
+
+      case .bodyChanged(let value):
         guard !state.isSubmitting else { return .none }
         state.body = value
         state.isConfirming = false
         state.error = nil
         return .none
-      case let .eventSelected(value):
+
+      case .eventSelected(let value):
         guard !state.isSubmitting, state.item.kind == .pullRequest || value == .comment else { return .none }
         state.event = value
         state.isConfirming = false
         return .none
+
       case .previewButtonPressed:
         guard !state.isSubmitting else { return .none }
         guard !state.revisionChanged else { state.error = .init(.revisionChanged)
           return .none
         }
-        guard !state.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !state.comments.isEmpty || state
-          .event == .approve
+        guard
+          !state.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !state.comments.isEmpty || state
+            .event == .approve
         else {
           state.error = .init(.emptyReview)
           return .none
@@ -169,10 +200,12 @@ public struct ReviewFeature {
         state.error = nil
         state.isConfirming = true
         return .none
+
       case .editButtonPressed:
         guard !state.isSubmitting else { return .none }
         state.isConfirming = false
         return .none
+
       case .submitButtonPressed:
         guard state.isConfirming, !state.isSubmitting, !state.revisionChanged else { return .none }
         state.isSubmitting = true
@@ -189,17 +222,25 @@ public struct ReviewFeature {
             await send(.submissionResponse(.success(())))
           } catch { await send(.submissionResponse(.failure(.wrapping(error)))) }
         }
+
       case .submissionResponse(.success):
         state.isSubmitting = false
         return .send(.delegate(.submitted))
-      case let .submissionResponse(.failure(error)):
+
+      case .submissionResponse(.failure(let error)):
         state.isSubmitting = false
         state.error = error
         state.isConfirming = false
         return .none
+
       case .delegate:
         return .none
       }
     }
   }
+
+  // MARK: Internal
+
+  @Dependency(ForgeClient.self) var forge
+
 }

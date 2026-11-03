@@ -94,12 +94,13 @@ struct Smoke {
         try t.wait("Pull requests")
         let expression = try NSRegularExpression(pattern: #"#(\d+) "#)
         func itemIDs() -> [String] {
-          var ids: [String] = []
+          var ids = [String]()
           for row in 0 ..< t.rows / 2 {
             let line = String(t.line(row).prefix(t.sidebarWidth))
-            if let match = expression.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
-               let range = Range(match.range(at: 1), in: line),
-               !ids.contains(String(line[range]))
+            if
+              let match = expression.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
+              let range = Range(match.range(at: 1), in: line),
+              !ids.contains(String(line[range]))
             {
               ids.append(String(line[range]))
             }
@@ -108,15 +109,19 @@ struct Smoke {
         }
         try t.waitUntil("two open pull requests") { itemIDs().count >= 2 }
         try profileNavigation(t, binary: binary, artifacts: output, itemNumbers: Array(itemIDs().prefix(2)))
-      } else if let index = args.firstIndex(of: "--live"), args.indices.contains(index + 1),
-                let itemIndex = args.firstIndex(of: "--item"), args.indices.contains(itemIndex + 1)
+      } else if
+        let index = args.firstIndex(of: "--live"),
+        args.indices.contains(index + 1),
+        let itemIndex = args.firstIndex(of: "--item"),
+        args.indices.contains(itemIndex + 1)
       {
         try live(
           binary,
           directory: URL(fileURLWithPath: args[index + 1]),
           item: args[itemIndex + 1],
           artifacts: artifacts.appendingPathComponent("live"),
-          columns: size("--columns", 176), rows: size("--rows", 40),
+          columns: size("--columns", 176),
+          rows: size("--rows", 40),
         )
       } else if let index = args.firstIndex(of: "--navigation"), args.indices.contains(index + 1) {
         try workspace(
@@ -184,7 +189,7 @@ struct Smoke {
     terminal.key("R")
     try terminal.wait("Write your review")
     terminal.key("\u{1B}")
-    try terminal.wait("Pull requests")
+    try terminal.wait("Normal · Pull requests")
     terminal.key("c")
     try terminal.wait("Choose a source line")
     terminal.key("\u{1B}")
@@ -222,7 +227,7 @@ struct Smoke {
     t.key("\r")
     try t.wait("Current pull request")
     try t.wait("Ready")
-    var samples: [Double] = []
+    var samples = [Double]()
     for index in 0 ..< 24 {
       let number = index.isMultiple(of: 2) ? 43 : 42
       let start = ProcessInfo.processInfo.systemUptime
@@ -236,16 +241,18 @@ struct Smoke {
       }
     }
     samples.sort()
-    let result: [String: Any] = try ["samples": samples,
-                                     "count": samples.count,
-                                     "median_ms": samples[samples.count / 2],
-                                     "p95_ms": samples[Int(Double(samples.count) * 0.95)],
-                                     "maximum_ms": samples.last!,
-                                     "columns": t.columns,
-                                     "rows": t.rows,
-                                     "workload": "warm demo PRs; Ctrl-p + / + number + Enter delivered in one burst; complete Ready frame",
-                                     "binary_sha256": SHA256.hash(data: Data(contentsOf: binary))
-                                       .map { String(format: "%02x", $0) }.joined()]
+    let result: [String: Any] = try [
+      "samples": samples,
+      "count": samples.count,
+      "median_ms": samples[samples.count / 2],
+      "p95_ms": samples[Int(Double(samples.count) * 0.95)],
+      "maximum_ms": samples.last!,
+      "columns": t.columns,
+      "rows": t.rows,
+      "workload": "warm demo PRs; Ctrl-p + / + number + Enter delivered in one burst; complete Ready frame",
+      "binary_sha256": SHA256.hash(data: Data(contentsOf: binary))
+        .map { String(format: "%02x", $0) }.joined(),
+    ]
     let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
     try data.write(to: artifacts.appendingPathComponent("latency.json"))
     print(String(decoding: data, as: UTF8.self))
@@ -332,7 +339,8 @@ struct Smoke {
     try t.screenshot("focused-comment")
     t.key("c")
     try t.wait("@demo")
-    let popupX = (t.columns - 96) / 2, popupY = 1 + ((t.rows - 3) - 26) / 2
+    let popupX = (t.columns - 96) / 2
+    let popupY = 1 + ((t.rows - 3) - 26) / 2
     t.mouse(column: popupX + 4, row: popupY + 10, pressed: true)
     t.mouse(column: popupX + 4, row: popupY + 10, pressed: false)
     t.key("**A focused reply**")
@@ -378,7 +386,7 @@ struct Smoke {
     t.key("q")
     try t.finish()
     print(
-      "Swift PTY: rich PR selection, modal Vim picker, tall Files, wrap and horizontal scrolling, source paging, comment focus and all comment previews passed; no forge writes.",
+      "Swift PTY: rich PR selection, modal Vim picker, tall Files, wrap and horizontal scrolling, source paging, comment focus and all comment previews passed; no forge writes."
     )
   }
 
@@ -465,7 +473,7 @@ struct Smoke {
     t.key("q")
     try t.finish()
     print(
-      "Swift PTY: difftastic JSON, directional ANSI highlighting across all four themes, unified deletions/additions, resize source identity, LEFT review entry and root all-files diff passed; no forge writes.",
+      "Swift PTY: difftastic JSON, directional ANSI highlighting across all four themes, unified deletions/additions, resize source identity, LEFT review entry and root all-files diff passed; no forge writes."
     )
   }
 
@@ -549,7 +557,7 @@ struct Smoke {
       try custom.finish()
     }
     print(
-      "Swift PTY: Enter progression, configured sidebar width, comment Markdown, all themes, forms and compact presentation passed; no forge writes.",
+      "Swift PTY: Enter progression, configured sidebar width, comment Markdown, all themes, forms and compact presentation passed; no forge writes."
     )
   }
 
@@ -620,7 +628,7 @@ struct Smoke {
     t.key("q")
     try t.finish()
     print(
-      "Swift PTY: #/* and g#/g*, direction-preserving n/N, zt/zz/zb, generated help and no added diff backgrounds passed; no forge writes.",
+      "Swift PTY: #/* and g#/g*, direction-preserving n/N, zt/zz/zb, generated help and no added diff backgrounds passed; no forge writes."
     )
   }
 
@@ -662,7 +670,10 @@ struct Smoke {
     try t.wait("Normal · Files")
     t.key("h")
     try t.wait("Sources/ReviewQueue.swift")
+    t.wheel(column: 100, row: 15, down: true, count: 8)
     try t.wait("Sources/Selection.swift")
+    t.wheel(column: 100, row: 15, down: false, count: 8)
+    try t.waitUntil("combined diff returned to top") { position(t) == 1 }
     try t.wait("Boundary case checked.")
     try t.wait("Outdated")
     try t.wait("Ready")
@@ -722,7 +733,7 @@ struct Smoke {
     t.key("q")
     try t.finish()
     print(
-      "Swift PTY: GitHub query, label toggles, source-content grep, folder diff, existing comments, regex n/N, four palettes, inline editing and resized preview passed; no forge writes.",
+      "Swift PTY: GitHub query, label toggles, source-content grep, folder diff, existing comments, regex n/N, four palettes, inline editing and resized preview passed; no forge writes."
     )
   }
 
@@ -742,7 +753,7 @@ struct Smoke {
     try t.wait("Alpha 한글")
     try t.wait("→ ▸")
     // SwiftTerm 1.20 drops this ZWJ grapheme from translated cell text; verify the emitted sequence separately.
-    try expect(t.raw.range(of: Data("👩🏽‍💻".utf8)) != nil, "The editor dropped the ZWJ grapheme from terminal output.")
+    try expect(t.raw.contains(Data("👩🏽‍💻".utf8)), "The editor dropped the ZWJ grapheme from terminal output.")
     t.key("\u{1A}")
     try t.waitUntil("paste undo") { !t.text.contains("Beta end.") }
     t.key("\u{1B}[122;6u")
@@ -756,14 +767,14 @@ struct Smoke {
     try t.wait("Alpha 한글")
     try t.wait("→ ▸")
     // SwiftTerm 1.20 drops this ZWJ grapheme from translated cell text; verify the emitted sequence separately.
-    try expect(t.raw.range(of: Data("👩🏽‍💻".utf8)) != nil, "The editor dropped the ZWJ grapheme from terminal output.")
+    try expect(t.raw.contains(Data("👩🏽‍💻".utf8)), "The editor dropped the ZWJ grapheme from terminal output.")
     try t.wait("XBeta end.")
     try t.click("Edit")
     try t.wait("Preview")
     t.mouse(column: 3, row: 9, pressed: true)
     t.mouse(column: 3, row: 9, pressed: false)
     t.key("\u{1B}[97;9u")
-    let long = (0 ..< 120).map { "Preview row \($0) " + String(
+    let long = (0 ..< 120).lazy.map { "Preview row \($0) " + String(
       repeating: "한글 word ",
       count: 30,
     ) }.joined(separator: "\n") + "\nPREVIEW_END"
@@ -779,13 +790,13 @@ struct Smoke {
     t.key("\u{1B}[F")
     try t.wait("PREVIEW_END")
     try t.snapshot("multiline-preview")
-    try expect(t.raw.range(of: Data(";2;203;166;247".utf8)) == nil, "--no-color emitted the accent RGB color.")
+    try expect(!t.raw.contains(Data(";2;203;166;247".utf8)), "--no-color emitted the accent RGB color.")
     t.key("\u{1B}")
     try t.wait("Normal ·")
     t.key("q")
     try t.finish()
     print(
-      "Swift PTY: multiline Unicode paste, undo/redo, mouse cursor, ASCII source preservation, no color and complete resized preview passed; no forge writes.",
+      "Swift PTY: multiline Unicode paste, undo/redo, mouse cursor, ASCII source preservation, no color and complete resized preview passed; no forge writes."
     )
   }
 
@@ -800,12 +811,13 @@ struct Smoke {
       artifacts: artifacts,
     )
     defer { t.close() }
-    try t.wait("ReviewQueue.swift")
+    try t.wait("Normal · Pull requests")
     try t.wait("Ready")
+    try expect(t.selectedLabelHasBackground("Keep review"), "Selected PR text lost the row background.")
     try t.focusPane(2)
     try t.wait("Normal · Files")
+    try t.wait("ReviewQueue.swift")
     try expect(t.activeBorder(2), "The active file pane border is not accented.")
-    try expect(t.selectedLabelHasBackground("Keep review"), "Selected PR text lost the row background.")
     try expect(t.selectedLabelHasBackground("ReviewQueue.swift"), "Selected file text lost the row background.")
     t.key("h")
     t.read(for: 0.1)
@@ -876,8 +888,10 @@ struct Smoke {
       artifacts: artifacts.appendingPathComponent("reopened"),
     )
     defer { reopened.close() }
+    try reopened.focusPane(2)
     try reopened.wait("Sources/ReviewQueue.swift")
     try expect(!reopened.text.contains("▾ Sources"), "List configuration still rendered a directory tree.")
+    try reopened.focusPane(1)
     reopened.key("f")
     try reopened.wait("My review queue")
     try reopened.click("My review queue")
@@ -887,7 +901,7 @@ struct Smoke {
     reopened.key("q")
     try reopened.finish()
     print(
-      "Swift PTY: tree/list configuration, active borders, Shift-V ranges, both source sides, review preview and persistent presets passed; no forge writes.",
+      "Swift PTY: tree/list configuration, active borders, Shift-V ranges, both source sides, review preview and persistent presets passed; no forge writes."
     )
   }
 
@@ -907,7 +921,7 @@ struct Smoke {
     try t.wait("#\(item)")
     t.key("\u{1B}")
     try t.wait("Normal · Pull requests")
-    var times: [Double] = []
+    var times = [Double]()
     func exerciseFocus(_ labels: [(String, String)]) throws {
       let deadline = ProcessInfo.processInfo.systemUptime + 4
       repeat {
@@ -921,7 +935,7 @@ struct Smoke {
     }
     try exerciseFocus([("2", "Normal · Files"), ("1", "Normal · Pull requests")])
     try t.wait("Ready")
-    try bounds(t)
+    try bounds(t, sidebar: "Pull requests ·")
     try t.snapshot("overview")
     try t.focusPane(2)
     t.key("\r")
@@ -976,14 +990,17 @@ struct Smoke {
     if stress {
       try fm.createSymbolicLink(at: fixture.appendingPathComponent("difft"), withDestinationURL: executable)
     }
-    var env = ["PATH": fixture.path + ":" + (ProcessInfo.processInfo.environment["PATH"] ?? ""),
-               "TATARA_SMOKE_FIXTURE": fixture.path, "TATARA_SMOKE_STRESS": stress ? "1" : "0",
-               "TATARA_SMOKE_WIDE": CommandLine.arguments.contains("--wide-lines") ? "1" : "0",
-               "TATARA_SMOKE_SHORT_SOURCE": CommandLine.arguments.contains("--wheel-boundary") ? "1" : "0",
-               "TATARA_SMOKE_DENSE": CommandLine.arguments.contains("--dense-navigation") || CommandLine.arguments
-                 .contains("--wheel") ? "1" : "0",
-               "XDG_DATA_HOME": fixture.appendingPathComponent("data").path,
-               "XDG_CACHE_HOME": fixture.appendingPathComponent("cache").path]
+    var env = [
+      "PATH": fixture.path + ":" + (ProcessInfo.processInfo.environment["PATH"] ?? ""),
+      "TATARA_SMOKE_FIXTURE": fixture.path,
+      "TATARA_SMOKE_STRESS": stress ? "1" : "0",
+      "TATARA_SMOKE_WIDE": CommandLine.arguments.contains("--wide-lines") ? "1" : "0",
+      "TATARA_SMOKE_SHORT_SOURCE": CommandLine.arguments.contains("--wheel-boundary") ? "1" : "0",
+      "TATARA_SMOKE_DENSE": CommandLine.arguments.contains("--dense-navigation") || CommandLine.arguments
+        .contains("--wheel") ? "1" : "0",
+      "XDG_DATA_HOME": fixture.appendingPathComponent("data").path,
+      "XDG_CACHE_HOME": fixture.appendingPathComponent("cache").path,
+    ]
     if profile {
       env.merge(profilingEnvironment(artifacts)) { _, new in new }
     }
@@ -1031,7 +1048,7 @@ struct Smoke {
           sampler.waitUntilExit()
         }
       }
-      var times: [Double] = []
+      var times = [Double]()
       let focusDeadline = ProcessInfo.processInfo.systemUptime + 7
       repeat {
         for (key, label) in [("2", "Normal · Files"), ("1", "Normal · Pull requests")] {
@@ -1040,7 +1057,8 @@ struct Smoke {
           try t.wait(label)
           times.append((ProcessInfo.processInfo.systemUptime - start) * 1000)
         }
-      } while ProcessInfo.processInfo.systemUptime < focusDeadline
+      } while
+        ProcessInfo.processInfo.systemUptime < focusDeadline
       try t.wait("Ready", timeout: 60)
       try t.focusPane(2)
       t.key("\r")
@@ -1057,7 +1075,8 @@ struct Smoke {
           try t.wait(label)
           times.append((ProcessInfo.processInfo.systemUptime - start) * 1000)
         }
-      } while ProcessInfo.processInfo.systemUptime < diffDeadline
+      } while
+        ProcessInfo.processInfo.systemUptime < diffDeadline
       try t.wait("Ready", timeout: 60)
       try t.focusPane(2)
       try t.wait("Normal · Files")
@@ -1070,7 +1089,8 @@ struct Smoke {
         "focus_max_ms": sorted.last!,
         "focus_p95_ms": sorted[min(sorted.count - 1, Int(Double(sorted.count) * 0.95))],
         "samples": times.count,
-        "columns": columns, "rows": rows,
+        "columns": columns,
+        "rows": rows,
         "cpu_sampling": sampling,
         "diagnostics": env["TATARA_INPUT_TRACE"] != nil,
         "binary_sha256": SHA256.hash(data: Data(contentsOf: binary, options: .mappedIfSafe))
@@ -1083,7 +1103,7 @@ struct Smoke {
         try t.waitUntil("settled diff viewport", timeout: 60) {
           t.line(-2).contains("Ready") && t.text.contains("let value = 2") && position(t) == 1
         }
-        var scrollTimes: [Double] = []
+        var scrollTimes = [Double]()
         try t.snapshot("before-scroll")
         for step in 0 ..< 20 {
           for (key, moved) in [("\u{6}", true), ("\u{2}", false)] {
@@ -1122,7 +1142,7 @@ struct Smoke {
     }
     try t.wait("BODY 0000")
     try t.wait("Ready")
-    try bounds(t)
+    try bounds(t, sidebar: "Pull requests ·")
     t.wheel(column: 100, row: 10, down: true, count: 3)
     try t.waitUntil("main wheel scrolling") { position(t) > 1 }
     try expect(t.text.contains("Normal · Pull requests"), "Wheel scrolling stole keyboard focus.")
@@ -1187,7 +1207,7 @@ struct Smoke {
     try t.finish()
     let log = fixture.appendingPathComponent("requests.log")
     func repositoryRequests() throws -> Int {
-      try String(contentsOf: log, encoding: .utf8).split(separator: "\n").filter { $0.hasPrefix("gh repos/") }.count
+      try String(contentsOf: log, encoding: .utf8).split(separator: "\n").count(where: { $0.hasPrefix("gh repos/") })
     }
     let before = try repositoryRequests()
     let warm = try PTY(
@@ -1223,11 +1243,12 @@ struct Smoke {
       t.line(-2).components(separatedBy: "RIGHT · ").dropFirst().first?.split(separator: " ").first.map(String.init)
     }
     guard let originalCursor = cursorStatus() else { throw SmokeError("Missing source cursor status.") }
-    var measurements: [[String: Any]] = []
+    var measurements = [[String: Any]]()
     for downFirst in [true, false] {
-      var frames: [(time: Double, offset: Int)] = []
+      var frames = [(time: Double, offset: Int)]()
       t.onCompletedFrame = { frames.append(($0, position(t))) }
-      let down = "\u{1B}[<65;100;10M", up = "\u{1B}[<64;100;10M"
+      let down = "\u{1B}[<65;100;10M"
+      let up = "\u{1B}[<64;100;10M"
       let count = 240
       let start = ProcessInfo.processInfo.systemUptime
       let lastInput = try t.replay(
@@ -1240,11 +1261,14 @@ struct Smoke {
       let expected = downFirst ? max(1, bottom - 18) : min(bottom, 19)
       try t.waitUntil("reversed away from boundary", timeout: 60) { position(t) == expected }
       t.onCompletedFrame = nil
-      guard let reached = frames.first(where: { $0.offset == boundary }), reached.time <= reversed,
-            let firstReverse = frames.first(where: { $0.time >= reversed && (downFirst ? $0.offset < bottom : $0.offset > 1) })
+      guard
+        let reached = frames.first(where: { $0.offset == boundary }),
+        reached.time <= reversed,
+        let firstReverse = frames.first(where: { $0.time >= reversed && (downFirst ? $0.offset < bottom : $0.offset > 1) })
       else { throw SmokeError("The wheel replay did not reach its boundary before reversal.") }
       measurements.append([
-        "boundary": downFirst ? "bottom" : "top", "initial_direction_events": count,
+        "boundary": downFirst ? "bottom" : "top",
+        "initial_direction_events": count,
         "boundary_before_reverse_ms": (reversed - reached.time) * 1000,
         "first_reverse_frame_ms": (firstReverse.time - reversed) * 1000,
         "tail_after_last_input_ms": max(0, ((frames.last?.time ?? lastInput) - lastInput) * 1000),
@@ -1254,7 +1278,9 @@ struct Smoke {
     }
     let result: [String: Any] = try [
       "binary_sha256": SHA256.hash(data: Data(contentsOf: binary)).map { String(format: "%02x", $0) }.joined(),
-      "columns": t.columns, "rows": t.rows, "measurements": measurements,
+      "columns": t.columns,
+      "rows": t.rows,
+      "measurements": measurements,
     ]
     try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
       .write(to: artifacts.appendingPathComponent("boundary.json"))
@@ -1276,16 +1302,17 @@ struct Smoke {
       .waitUntil("prepared reversal document", timeout: 60) {
         position(t) == 1 && (t.line(-2).contains("Ready") || t.line(-2).contains("L · Load more"))
       }
-    var measurements: [[String: Any]] = []
+    var measurements = [[String: Any]]()
     let repetitions = CommandLine.arguments.firstIndex(of: "--reversal-repetitions").flatMap { index in
       CommandLine.arguments.indices.contains(index + 1) ? Int(CommandLine.arguments[index + 1]) : nil
     } ?? 1
     try expect((1 ... 10).contains(repetitions), "Reversal repetitions must be between 1 and 10.")
     for (trial, interval) in (0 ..< repetitions).flatMap({ trial in [0.001, 0.004, 0.012].map { (trial, $0) } }) {
-      var frames: [(time: Double, offset: Int)] = []
+      var frames = [(time: Double, offset: Int)]()
       t.onCompletedFrame = { time in frames.append((time, position(t))) }
       let count = 60
-      let down = "\u{1B}[<65;100;10M", up = "\u{1B}[<64;100;10M"
+      let down = "\u{1B}[<65;100;10M"
+      let up = "\u{1B}[<64;100;10M"
       let initial = ProcessInfo.processInfo.systemUptime
       let lastSent = try t.replay(Array(repeating: down, count: count) + Array(repeating: up, count: count), interval: interval)
       let reversed = t.lastReplayInputTimes[count]
@@ -1306,7 +1333,9 @@ struct Smoke {
       }
       guard let firstReverse else { throw SmokeError("No reversed scrolling frame was observed.") }
       measurements.append([
-        "trial": trial + 1, "interval_ms": interval * 1000, "events_each_direction": count,
+        "trial": trial + 1,
+        "interval_ms": interval * 1000,
+        "events_each_direction": count,
         "offset_when_reversed": atReversal,
         "first_reverse_frame_ms": (firstReverse - reversed) * 1000,
         "old_direction_frames_after_reversal": wrongDirectionFrames,
@@ -1318,7 +1347,9 @@ struct Smoke {
     }
     let result: [String: Any] = try [
       "binary_sha256": SHA256.hash(data: Data(contentsOf: binary)).map { String(format: "%02x", $0) }.joined(),
-      "columns": t.columns, "rows": t.rows, "measurements": measurements,
+      "columns": t.columns,
+      "rows": t.rows,
+      "measurements": measurements,
     ]
     try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
       .write(to: artifacts.appendingPathComponent("reversal.json"))
@@ -1326,7 +1357,8 @@ struct Smoke {
       measurement["frames"] = nil
       try print(String(decoding: JSONSerialization.data(withJSONObject: measurement, options: [.sortedKeys]), as: UTF8.self))
     }
-    let down = "\u{1B}[<65;100;10M", up = "\u{1B}[<64;100;10M"
+    let down = "\u{1B}[<65;100;10M"
+    let up = "\u{1B}[<64;100;10M"
     t.key(String(repeating: down, count: 60) + "\t" + String(repeating: up, count: 60))
     try t.waitUntil("wheel and keyboard barrier preserved") { t.keyboardPane == 1 && position(t) == 1 }
     t.key("q")
@@ -1334,9 +1366,9 @@ struct Smoke {
   }
 
   static func wheelAxes(_ t: PTY) throws {
-    try t.wait("Files · 120/120", timeout: 60)
+    try t.wait("Pull requests · 100/100", timeout: 60)
     try t.wait("A large paragraph")
-    var failures: [String] = []
+    var failures = [String]()
     for pane in 1 ... 3 {
       try t.focusPane(pane)
       if pane == 3 {
@@ -1387,7 +1419,8 @@ struct Smoke {
           }
         }
         t.read(for: 0.2)
-        if current() != start +
+        if
+          current() != start +
           12
         {
           failures.append("pane \(pane), mixed downward wheel: expected \(start + 12), got \(String(describing: current()))")
@@ -1407,10 +1440,12 @@ struct Smoke {
       }
       if pane < 3 {
         let files = pane == 2
-        t.key("gg" + String(repeating: "j", count: 20))
-        try t.waitUntil("sidebar reversal baseline") { t.selectedFixtureIndex(files: files) == 20 }
+        let baseline = files ? 60 : 20
+        t.key("gg" + String(repeating: "j", count: baseline))
+        try t.waitUntil("sidebar reversal baseline") { t.selectedFixtureIndex(files: files) == baseline }
         let first = t.visibleFixtureIndices(files: files).min()!
-        for selected in stride(from: 19, through: first + 2, by: -1) {
+        try expect(first > 0, "Sidebar reversal must start away from the top boundary.")
+        for selected in stride(from: baseline - 1, through: first + 2, by: -1) {
           t.key("k")
           try t.waitUntil("sidebar upward selection \(selected)") { t.selectedFixtureIndex(files: files) == selected }
           if t.visibleFixtureIndices(files: files).min() != first {
@@ -1434,7 +1469,7 @@ struct Smoke {
     t.key("q")
     try t.finish()
     print(
-      "Swift PTY: independent viewport scrolling, preserved pane focus and source cursor, wheel axes, and keyboard selection margins passed.",
+      "Swift PTY: independent viewport scrolling, preserved pane focus and source cursor, wheel axes, and keyboard selection margins passed."
     )
   }
 
@@ -1459,10 +1494,14 @@ struct Smoke {
   }
 
   static func profileNavigation(
-    _ t: PTY, binary: URL, artifacts: URL, itemNumbers: [String] = ["1", "2"], requestLog: URL? = nil,
+    _ t: PTY,
+    binary: URL,
+    artifacts: URL,
+    itemNumbers: [String] = ["1", "2"],
+    requestLog: URL? = nil,
   ) throws {
-    var observations: [[String: Any]] = []
-    var skippedMeasurements: [String] = []
+    var observations = [[String: Any]]()
+    var skippedMeasurements = [String]()
     let rendererProbe = CommandLine.arguments.contains("--renderer-probe")
     try expect(
       !rendererProbe || requestLog != nil && ["--loading-burst", "--dense-navigation", "--directional-burst"]
@@ -1488,13 +1527,21 @@ struct Smoke {
       let start = ProcessInfo.processInfo.systemUptime
       try t.navigationKey(key)
       try t.waitUntil("\(stage) selection \(key)", selected)
-      observations.append(["stage": stage, "key": key, "at_ms": (start - origin) * 1000,
-                           "latency_ms": (ProcessInfo.processInfo.systemUptime - start) * 1000,
-                           "status": t.line(-2).trimmingCharacters(in: .whitespaces)])
+      observations.append([
+        "stage": stage,
+        "key": key,
+        "at_ms": (start - origin) * 1000,
+        "latency_ms": (ProcessInfo.processInfo.systemUptime - start) * 1000,
+        "status": t.line(-2).trimmingCharacters(in: .whitespaces),
+      ])
       if stage.hasSuffix("warmup") {
         try settled()
-        observations.append(["stage": stage + "-ready", "key": key, "at_ms": (start - origin) * 1000,
-                             "latency_ms": (ProcessInfo.processInfo.systemUptime - start) * 1000])
+        observations.append([
+          "stage": stage + "-ready",
+          "key": key,
+          "at_ms": (start - origin) * 1000,
+          "latency_ms": (ProcessInfo.processInfo.systemUptime - start) * 1000,
+        ])
       }
     }
     func bursts(_ stage: String, scope: String) throws {
@@ -1505,9 +1552,12 @@ struct Smoke {
           if !t.hasCompletedFrame(containing: "Previous pane") {
             try t.wait("Previous pane")
           }
-          observations.append(["stage": "\(stage)-burst-\(Int(interval * 1000))ms", "key": "?",
-                               "at_ms": (sent - origin) * 1000,
-                               "latency_ms": (ProcessInfo.processInfo.systemUptime - sent) * 1000])
+          observations.append([
+            "stage": "\(stage)-burst-\(Int(interval * 1000))ms",
+            "key": "?",
+            "at_ms": (sent - origin) * 1000,
+            "latency_ms": (ProcessInfo.processInfo.systemUptime - sent) * 1000,
+          ])
           t.key("\u{1B}")
           try t.wait("Normal · \(scope)")
         }
@@ -1523,20 +1573,24 @@ struct Smoke {
       for count in [8, 32, 64] {
         let start = ProcessInfo.processInfo.systemUptime
         let initialStatus = t.line(-2).trimmingCharacters(in: .whitespaces)
-        var frames: [[String: Any]] = []
+        var frames = [[String: Any]]()
         t.onCompletedFrame = { time in
-          let selected: Int? = if requestLog != nil {
-            t.selectedFixtureIndex(files: stage == "file")
-          } else if stage == "pr" {
-            itemNumbers.firstIndex { selectedPR($0) }
-          } else {
-            (0 ..< 2).first { t.selectedFileRow($0) }
-          }
-          frames.append(["at_ms": (time - start) * 1000,
-                         "selected_index": selected ?? -1])
+          let selected: Int? =
+            if requestLog != nil {
+              t.selectedFixtureIndex(files: stage == "file")
+            } else if stage == "pr" {
+              itemNumbers.firstIndex { selectedPR($0) }
+            } else {
+              (0 ..< 2).first { t.selectedFileRow($0) }
+            }
+          frames.append([
+            "at_ms": (time - start) * 1000,
+            "selected_index": selected ?? -1,
+          ])
         }
-        let keys = directional ? Array(repeating: "j", count: count) :
-          Array(repeating: ["j", "k"], count: count / 2).flatMap(\.self) + ["?"]
+        let keys = directional
+          ? Array(repeating: "j", count: count)
+          : Array(repeating: ["j", "k"], count: count / 2).flatMap(\.self) + ["?"]
         let sent = try t.replay(keys, interval: 0.025)
         if directional {
           try t.waitUntil("all \(count) navigation inputs reflected") { t.selectedFixtureIndex(files: stage == "file") == count }
@@ -1548,14 +1602,20 @@ struct Smoke {
         if directional {
           try t.requireSelectionContext(files: stage == "file", selected: count)
         }
-        observations.append(["stage": "\(stage)-loading-burst-\(count)", "key": directional ? "j" : "?",
-                             "at_ms": (start - origin) * 1000, "sent_uptime_ms": sent * 1000,
-                             "input_count": count, "interval_ms": 25,
-                             "input_sent_ms": t.lastReplayInputTimes.map { ($0 - start) * 1000 },
-                             "replay_ms": (sent - start) * 1000,
-                             "total_ms": (completed - start) * 1000,
-                             "latency_ms": (completed - sent) * 1000, "initial_status": initialStatus,
-                             "frames": frames])
+        observations.append([
+          "stage": "\(stage)-loading-burst-\(count)",
+          "key": directional ? "j" : "?",
+          "at_ms": (start - origin) * 1000,
+          "sent_uptime_ms": sent * 1000,
+          "input_count": count,
+          "interval_ms": 25,
+          "input_sent_ms": t.lastReplayInputTimes.map { ($0 - start) * 1000 },
+          "replay_ms": (sent - start) * 1000,
+          "total_ms": (completed - start) * 1000,
+          "latency_ms": (completed - sent) * 1000,
+          "initial_status": initialStatus,
+          "frames": frames,
+        ])
         if !directional {
           t.key("\u{1B}")
           try t.wait("Normal · \(scope)")
@@ -1714,12 +1774,17 @@ struct Smoke {
       sampler.waitUntilExit()
       try expect(sampler.terminationStatus == 0, "CPU sampling failed.")
     }
-    var result: [String: Any] = try ["samples": observations, "cpu_sampling": sampling, "columns": t.columns, "rows": t.rows,
-                                     "preview_recording": CommandLine.arguments.contains("--record-preview"),
-                                     "skipped_measurements": skippedMeasurements,
-                                     "renderer": ProcessInfo.processInfo.environment["TATARA_PROBE_RENDERER"] ?? "termloom",
-                                     "binary_sha256": SHA256.hash(data: Data(contentsOf: binary))
-                                       .map { String(format: "%02x", $0) }.joined()]
+    var result: [String: Any] = try [
+      "samples": observations,
+      "cpu_sampling": sampling,
+      "columns": t.columns,
+      "rows": t.rows,
+      "preview_recording": CommandLine.arguments.contains("--record-preview"),
+      "skipped_measurements": skippedMeasurements,
+      "renderer": ProcessInfo.processInfo.environment["TATARA_PROBE_RENDERER"] ?? "termloom",
+      "binary_sha256": SHA256.hash(data: Data(contentsOf: binary))
+        .map { String(format: "%02x", $0) }.joined(),
+    ]
     if let requestLog {
       let requests = try String(contentsOf: requestLog, encoding: .utf8)
       try requests.write(to: artifacts.appendingPathComponent("requests.log"), atomically: true, encoding: .utf8)
@@ -1774,7 +1839,7 @@ struct Smoke {
     let rows = try String(contentsOf: directory.appendingPathComponent("diagnostics.tsv"), encoding: .utf8)
       .split(separator: "\n").map { $0.split(separator: "\t", omittingEmptySubsequences: false).map(String.init) }
     guard let header = rows.first, rows.count > 1 else { throw SmokeError("No frame diagnostics were recorded.") }
-    var metrics: [String: Any] = [:]
+    var metrics = [String: Any]()
     for name in ["resolve_ms", "raster_ms", "pipeline_ms", "main_actor_blocked_ms", "input_to_commit_first_ms", "damage_rows"] {
       guard let index = header.firstIndex(of: name) else { throw SmokeError("Missing frame metric: \(name)") }
       let values = rows.dropFirst().compactMap { $0.indices.contains(index) ? Double($0[index]) : nil }.sorted()
@@ -1789,9 +1854,9 @@ struct Smoke {
       .write(to: directory.appendingPathComponent("frames-summary.json"))
   }
 
-  static func bounds(_ t: PTY) throws {
+  static func bounds(_ t: PTY, sidebar: String = "Files ·") throws {
     try expect(t.line(-1).contains("Help"), "Footer left the viewport.")
-    try expect(t.text.contains("Files ·"), "Files pane left the viewport.")
+    try expect(t.text.contains(sidebar), "Expected sidebar left the viewport: \(sidebar)")
   }
 
   static func fixtureTool(_ name: String) throws {
@@ -1821,7 +1886,7 @@ struct Smoke {
       let new = try String(contentsOfFile: args.last!, encoding: .utf8).split(separator: "\n", omittingEmptySubsequences: false)
         .dropLast().map(String.init)
       try expect(old.count == new.count, "Fixture sources must have equal row counts.")
-      var changes: [[String: Any]] = []
+      var changes = [[String: Any]]()
       for index in old.indices where old[index] != new[index] {
         changes.append([
           "lhs": [
@@ -1858,12 +1923,15 @@ struct Smoke {
       print("12345")
       return
     }
-    let body = stress ? String(repeating: "A large paragraph with source coordinates and searchable text. ", count: 40000) :
-      (0 ..< 400).map { "BODY \(String(format: "%04d", $0)) \(($0 == 250 || $0 == 350) ? "TARGET" : "") · 한국어 문서 😀 · " + String(
-        repeating: "Keep the viewport bounded. ",
-        count: 5,
-      ) }.joined(separator: "\n")
-    let base = String(repeating: "a", count: 40), head = String(repeating: "b", count: 40)
+    let body = stress
+      ? String(repeating: "A large paragraph with source coordinates and searchable text. ", count: 40000)
+      : (0 ..< 400).lazy
+        .map { "BODY \(String(format: "%04d", $0)) \(($0 == 250 || $0 == 350) ? "TARGET" : "") · 한국어 문서 😀 · " + String(
+          repeating: "Keep the viewport bounded. ",
+          count: 5,
+        ) }.joined(separator: "\n")
+    let base = String(repeating: "a", count: 40)
+    let head = String(repeating: "b", count: 40)
     let itemCount = env["TATARA_SMOKE_DENSE"] == "1" ? 100 : 2
     let fileCount = env["TATARA_SMOKE_DENSE"] == "1" ? 120 : 12
     let items: [[String: Any]] = (1 ... itemCount).map { [
@@ -1879,16 +1947,28 @@ struct Smoke {
     if endpoint == "graphql" {
       let input = try JSONSerialization.jsonObject(with: FileHandle.standardInput.readDataToEndOfFile()) as? [String: Any]
       let query = input?["query"] as? String ?? ""
-      var nodes: [String: Any] = [:]
+      var nodes = [String: Any]()
       for (index, item) in items.enumerated() where query.contains("p\(index + 1): pullRequest") {
         nodes["p\(index + 1)"] = [
-          "number": index + 1, "url": item["html_url"]!, "state": "OPEN", "isDraft": false,
-          "title": item["title"]!, "body": item["body"]!, "author": ["login": "author"],
-          "createdAt": "2026-09-08T00:00:00Z", "updatedAt": "2026-09-10T00:00:00Z",
-          "headRefOid": head, "headRefName": "feature", "baseRefName": "main",
-          "reviewDecision": "REVIEW_REQUIRED", "statusCheckRollup": ["state": "SUCCESS"],
-          "totalCommentsCount": 0, "additions": fileCount, "deletions": fileCount,
-          "changedFiles": fileCount, "commits": ["totalCount": 1],
+          "number": index + 1,
+          "url": item["html_url"]!,
+          "state": "OPEN",
+          "isDraft": false,
+          "title": item["title"]!,
+          "body": item["body"]!,
+          "author": ["login": "author"],
+          "createdAt": "2026-09-08T00:00:00Z",
+          "updatedAt": "2026-09-10T00:00:00Z",
+          "headRefOid": head,
+          "headRefName": "feature",
+          "baseRefName": "main",
+          "reviewDecision": "REVIEW_REQUIRED",
+          "statusCheckRollup": ["state": "SUCCESS"],
+          "totalCommentsCount": 0,
+          "additions": fileCount,
+          "deletions": fileCount,
+          "changedFiles": fileCount,
+          "commits": ["totalCount": 1],
         ]
       }
       try FileHandle.standardOutput.write(JSONSerialization.data(withJSONObject: ["data": ["repository": nodes]]))

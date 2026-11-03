@@ -6,6 +6,8 @@ import Foundation
 import SQLiteData
 import TataraKit
 
+// MARK: - CacheEntry
+
 @Table
 struct CacheEntry: Identifiable, Sendable {
   let id: String
@@ -15,15 +17,26 @@ struct CacheEntry: Identifiable, Sendable {
   var byteCount: Int
 }
 
+// MARK: - PersistentCache
+
 public actor PersistentCache {
-  private let database: any DatabaseWriter
-  private let maximumBytes: Int
-  private let now: @Sendable () -> Date
+
+  // MARK: Lifecycle
 
   private init(database: any DatabaseWriter, maximumBytes: Int, now: @escaping @Sendable () -> Date) {
     self.database = database
     self.maximumBytes = maximumBytes
     self.now = now
+  }
+
+  // MARK: Public
+
+  public nonisolated var client: CacheClient {
+    CacheClient(
+      read: { try await self.read(namespace: $0, key: $1, maximumAge: $2) },
+      write: { try await self.write(namespace: $0, key: $1, value: $2) },
+      invalidate: { try await self.invalidate(namespace: $0) },
+    )
   }
 
   @concurrent
@@ -44,27 +57,25 @@ public actor PersistentCache {
     var migrator = DatabaseMigrator()
     migrator.registerMigration("Create cache entries") { db in
       try #sql("""
-      CREATE TABLE "cacheEntries" (
-        "id" TEXT PRIMARY KEY NOT NULL,
-        "namespace" TEXT NOT NULL,
-        "payload" BLOB NOT NULL,
-        "createdAt" REAL NOT NULL,
-        "byteCount" INTEGER NOT NULL
-      ) STRICT;
-      """).execute(db)
+        CREATE TABLE "cacheEntries" (
+          "id" TEXT PRIMARY KEY NOT NULL,
+          "namespace" TEXT NOT NULL,
+          "payload" BLOB NOT NULL,
+          "createdAt" REAL NOT NULL,
+          "byteCount" INTEGER NOT NULL
+        ) STRICT;
+        """).execute(db)
       try #sql("CREATE INDEX \"cacheEntries_namespace\" ON \"cacheEntries\" (\"namespace\")").execute(db)
     }
     try migrator.migrate(database)
     return PersistentCache(database: database, maximumBytes: maximumBytes, now: now)
   }
 
-  public nonisolated var client: CacheClient {
-    CacheClient(
-      read: { try await self.read(namespace: $0, key: $1, maximumAge: $2) },
-      write: { try await self.write(namespace: $0, key: $1, value: $2) },
-      invalidate: { try await self.invalidate(namespace: $0) },
-    )
-  }
+  // MARK: Private
+
+  private let database: any DatabaseWriter
+  private let maximumBytes: Int
+  private let now: @Sendable () -> Date
 
   private func identifier(_ namespace: String, _ key: String) throws -> String {
     try SHA256.hash(data: JSONEncoder().encode([namespace, key])).map { String(format: "%02x", $0) }.joined()
@@ -112,4 +123,5 @@ public actor PersistentCache {
   private func invalidate(namespace: String) async throws {
     try await database.write { db in try CacheEntry.where { $0.namespace.eq(namespace) }.delete().execute(db) }
   }
+
 }

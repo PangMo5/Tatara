@@ -6,8 +6,8 @@ version heading. Generated projects, build products and local secrets are ignore
 
 ## One-time setup
 
-Create the public `PangMo5/Tatara` GitHub repository, configure main-branch rules and
-enable private vulnerability reporting. Configure Actions access to the existing
+The source repository is public; a signed and notarized binary release has not
+been published. Configure main-branch rules and Actions access to the existing
 `PangMo5/homebrew-tap` repository. Add these repository secrets:
 
 | Secret | Purpose |
@@ -20,8 +20,9 @@ enable private vulnerability reporting. Configure Actions access to the existing
 | `AC_API_KEY_P8` | App Store Connect private key |
 | `HOMEBREW_TAP_TOKEN` | Token permitted to update the Homebrew tap |
 
-CI selects Xcode 26.6 on `macos-26`. Check the current runner image and Swift 6.3+
-compiler availability when updating this selection. The local successful build
+CI selects Xcode 27.2 on `xcode-27` and validates Swift 6.4.2 and the macOS 27.2
+SDK before resolving dependencies. Check the current runner image when updating
+this selection; a stale runner image fails validation explicitly. The local successful build
 does not establish a successful hosted CI run.
 
 ## Release process

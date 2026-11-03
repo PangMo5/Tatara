@@ -12,7 +12,11 @@ import TermLoom
 import Testing
 
 struct CacheAndLoadingTests {
-  @Test func `replacing a pending request does not invalidate the unchanged preview currency`() throws {
+
+  // MARK: Internal
+
+  @Test
+  func `replacing a pending request does not invalidate the unchanged preview currency`() throws {
     var state = try WorkspaceFeature.State(repository: RepositoryID("example/reviews"))
     state.contentGeneration = 1
     state.isPreparingDocument = true
@@ -34,7 +38,8 @@ struct CacheAndLoadingTests {
     #expect(changes.withLock { $0 } == 1)
   }
 
-  @Test func `document currency invalidates on ownership changes without a preparing transition`() throws {
+  @Test
+  func `document currency invalidates on ownership changes without a preparing transition`() throws {
     var state = try WorkspaceFeature.State(repository: RepositoryID("example/reviews"))
     let changes = Mutex(0)
     withObservationTracking {
@@ -57,10 +62,11 @@ struct CacheAndLoadingTests {
     #expect(changes.withLock { $0 } == 2)
   }
 
-  @Test func `wide diff rows retain source and search with bounded presentation`() async throws {
+  @Test
+  func `wide diff rows retain source and search with bounded presentation`() async throws {
     let source = String(repeating: "한국어😀 source ", count: 10000) + "needle"
     let diff = ReviewDiff(path: "Source.swift", language: "Swift", status: "changed", rows: [
-      .init(left: nil, right: .init(number: 7, spans: [.init(text: source, color: 2)])),
+      .init(left: nil, right: .init(number: 7, spans: [.init(text: source, color: 2)]))
     ])
     let document = try await DocumentRenderer.prepareDiff(diff, 160)
     #expect(document.lines[0].map(\.text).joined().hasSuffix("needle"))
@@ -73,12 +79,13 @@ struct CacheAndLoadingTests {
     #expect(matches.membership == [0])
   }
 
-  @Test func `presentation clipping respects wide graphemes and style boundaries`() async throws {
+  @Test
+  func `presentation clipping respects wide graphemes and style boundaries`() async throws {
     let diff = ReviewDiff(path: "Source.swift", language: "Swift", status: "changed", rows: [
       .init(
         left: nil,
         right: .init(number: 3, spans: [.init(text: "ab한", color: 1), .init(text: "😀tail", color: 1, bold: true)]),
-      ),
+      )
     ])
     let document = try await DocumentRenderer.prepareDiff(diff, 16)
     #expect(document.displayLines[0].filter { $0.color == 1 } == [
@@ -88,7 +95,8 @@ struct CacheAndLoadingTests {
     #expect(document.lines[0].map(\.text).joined().hasSuffix("ab한😀tail"))
   }
 
-  @Test func `prepared documents use a bounded least recently used cache`() async {
+  @Test
+  func `prepared documents use a bounded least recently used cache`() async {
     let cache = PreparedDocumentCache(maximumCost: 10, maximumCount: 2)
     let document = ReviewDocument(lines: [[.init(text: "Prepared source")]])
     await cache.insert(document, for: "a", cost: 4)
@@ -103,7 +111,8 @@ struct CacheAndLoadingTests {
     #expect(await cache.value(for: "a") == document)
   }
 
-  @Test func `cancelled preparation cannot populate the document cache`() async {
+  @Test
+  func `cancelled preparation cannot populate the document cache`() async {
     let cache = PreparedDocumentCache()
     let task = Task {
       while !Task.isCancelled {
@@ -116,19 +125,8 @@ struct CacheAndLoadingTests {
     #expect(await cache.value(for: "obsolete") == nil)
   }
 
-  private actor RenderCalls {
-    var renders = 0
-    var cacheReads = 0
-    func record() {
-      renders += 1
-    }
-
-    func read() {
-      cacheReads += 1
-    }
-  }
-
-  @Test func `a new diff engine reuses persisted output without fetching files`() async throws {
+  @Test
+  func `a new diff engine reuses persisted output without fetching files`() async throws {
     let url = location()
     defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
     let storage = try await PersistentCache.bootstrapDatabase(at: url)
@@ -170,12 +168,8 @@ struct CacheAndLoadingTests {
     #expect(await calls.cacheReads == 1)
   }
 
-  private func location() -> URL {
-    FileManager.default.temporaryDirectory
-      .appendingPathComponent("tatara-cache-test-\(UUID())/cache.sqlite")
-  }
-
-  @Test func `persistent bytes survive reopening and stay account scoped`() async throws {
+  @Test
+  func `persistent bytes survive reopening and stay account scoped`() async throws {
     let url = location()
     defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
     let first = try await PersistentCache.bootstrapDatabase(at: url)
@@ -186,7 +180,8 @@ struct CacheAndLoadingTests {
     #expect(try await reopened.client.scoped(to: "account-b").read("snapshot:repo:sha", "File.swift", nil) == nil)
   }
 
-  @Test func `metadata expires but immutable snapshots remain`() async throws {
+  @Test
+  func `metadata expires but immutable snapshots remain`() async throws {
     let url = location()
     defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
     let writer = try await PersistentCache.bootstrapDatabase(at: url, now: { Date(timeIntervalSince1970: 100) })
@@ -200,7 +195,8 @@ struct CacheAndLoadingTests {
     #expect(try await reader.client.read("snapshot:one", "sha", nil) == Data([2]))
   }
 
-  @Test func `cache evicts to its byte budget`() async throws {
+  @Test
+  func `cache evicts to its byte budget`() async throws {
     let url = location()
     defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
     let cache = try await PersistentCache.bootstrapDatabase(at: url, maximumBytes: 10)
@@ -211,7 +207,8 @@ struct CacheAndLoadingTests {
     #expect((a?.count ?? 0) + (b?.count ?? 0) <= 10)
   }
 
-  @Test func `cancelling a running subprocess tears it down promptly`() async throws {
+  @Test
+  func `cancelling a running subprocess tears it down promptly`() async throws {
     let task = Task { try await CommandRunner.live.checked("sleep", ["30"]) }
     try await Task.sleep(for: .milliseconds(200))
     let clock = ContinuousClock()
@@ -226,7 +223,8 @@ struct CacheAndLoadingTests {
     #expect(start.duration(to: clock.now) < .seconds(2))
   }
 
-  @Test func `cancellation interrupts search index construction`() {
+  @Test
+  func `cancellation interrupts search index construction`() {
     let lines = (0 ..< 1024).map { [DiffSpan(text: "Line \($0)")] }
     var checks = 0
     #expect(throws: CancellationError.self) {
@@ -248,14 +246,16 @@ struct CacheAndLoadingTests {
       == source.split(whereSeparator: \.isWhitespace))
   }
 
-  @Test func `oversized tokens wrap without changing their text`() async throws {
+  @Test
+  func `oversized tokens wrap without changing their text`() async throws {
     let source = String(repeating: "word", count: 3000)
     let document = try await DocumentRenderer.prepare(source, 79)
     #expect(document.lines.flatMap { $0.map(\.text) }.joined() == source)
     #expect(document.lines.allSatisfy { $0.map(\.text).joined().count <= 79 })
   }
 
-  @Test func `scroll thumb covers boundaries and maps pointer positions`() {
+  @Test
+  func `scroll thumb covers boundaries and maps pointer positions`() {
     let top = ScrollMetrics(total: 1000, page: 20, offset: 0, track: 20)
     #expect(top.thumbStart == 0)
     #expect(top.offset(at: -100) == 0)
@@ -268,7 +268,8 @@ struct CacheAndLoadingTests {
     #expect(almostVisible.offset(at: 20) == 1)
   }
 
-  @Test func `indexed cursor navigation skips absent sides and preserves nearest ties`() {
+  @Test
+  func `indexed cursor navigation skips absent sides and preserves nearest ties`() {
     let rows: [ReviewDiffRow] = (0 ..< 10000).map { index in
       .init(
         left: index % 3 == 0 ? .init(number: index + 1, spans: []) : nil,
@@ -278,7 +279,7 @@ struct CacheAndLoadingTests {
     let document = ReviewDocument(
       lines: rows.map { _ in [] },
       diff: .init(path: "File.swift", language: "Swift", status: "changed", rows: rows),
-      checkingCancellation: {},
+      checkingCancellation: { },
     )
     #expect(document.diffRow(at: 5001, side: .right) == 5000)
     #expect(document.diffRow(at: 5001, side: .right, direction: 1) == 5002)
@@ -289,7 +290,8 @@ struct CacheAndLoadingTests {
     #expect(ReviewDocument().diffRow(at: 0, side: .left) == nil)
   }
 
-  @Test func `cancelling the last diff consumer cancels its producer`() async throws {
+  @Test
+  func `cancelling the last diff consumer cancels its producer`() async throws {
     let (started, start) = AsyncStream<Void>.makeStream()
     let (cancelled, cancellation) = AsyncStream<Void>.makeStream()
     var forge = ForgeClient()
@@ -327,7 +329,8 @@ struct CacheAndLoadingTests {
     start.finish()
   }
 
-  @Test func `concurrent diff consumers share production across widths and themes`() async throws {
+  @Test
+  func `concurrent diff consumers share production across widths and themes`() async throws {
     let calls = RenderCalls()
     var forge = ForgeClient()
     forge.content = { _, _, _ in Data("source".utf8) }
@@ -354,7 +357,7 @@ struct CacheAndLoadingTests {
         request.theme = index.isMultiple(of: 2) ? .latte : .mocha
         group.addTask { try await renderer.render(request) }
       }
-      var results: [ReviewDiff] = []
+      var results = [ReviewDiff]()
       for try await result in group {
         results.append(result)
       }
@@ -368,4 +371,25 @@ struct CacheAndLoadingTests {
     #expect(try await renderer.render(changed).revision == changed.revision)
     #expect(await calls.renders == 2)
   }
+
+  // MARK: Private
+
+  private actor RenderCalls {
+    var renders = 0
+    var cacheReads = 0
+
+    func record() {
+      renders += 1
+    }
+
+    func read() {
+      cacheReads += 1
+    }
+  }
+
+  private func location() -> URL {
+    FileManager.default.temporaryDirectory
+      .appendingPathComponent("tatara-cache-test-\(UUID())/cache.sqlite")
+  }
+
 }

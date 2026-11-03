@@ -24,36 +24,15 @@ private func unifiedFixture() -> ReviewDiff {
   ], revision: .init(mergeBase: "base", head: "head"))
 }
 
+// MARK: - UnifiedDiffTests
+
 @MainActor
 struct UnifiedDiffTests {
-  private func state() async throws -> WorkspaceFeature.State {
-    let repository = try RepositoryID("owner/repo")
-    let item = ForgeItem(
-      id: .init(repository: repository, number: 1),
-      kind: .pullRequest,
-      title: "Unified review",
-      author: "reviewer",
-      url: URL(string: "https://github.com/owner/repo/pull/1")!,
-    )
-    var state = WorkspaceFeature.State(repository: repository)
-    state.items = [item]
-    state.selectedItemID = item.id
-    state.selectedFilePath = "Example.swift"
-    state.detail = .init(item: item, revision: unifiedFixture().revision, files: [
-      .init(
-        path: "Example.swift",
-        patch: "@@ -1,4 +1,3 @@\n struct Example {\n-  let oldValue = 1\n-  obsolete()\n+  var newValue = 2\n }",
-      ),
-    ])
-    state.pane = .content
-    state.tab = .diff
-    state.contentWidth = 80
-    state.contentHeight = 4
-    state.document = try await DocumentRenderer.prepareDiff(unifiedFixture(), 80)
-    return state
-  }
 
-  @Test func `unified movement visits removed and added rows and reviews the selected source side`() async throws {
+  // MARK: Internal
+
+  @Test
+  func `unified movement visits removed and added rows and reviews the selected source side`() async throws {
     let initialState = try await state()
     let store = TestStore(initialState: initialState) { WorkspaceFeature() }
     await store.send(.commandPressed(.down)) { $0.diffCursor = 1
@@ -75,7 +54,8 @@ struct UnifiedDiffTests {
     await store.finish()
   }
 
-  @Test func `unified side switching keeps both sides visible without requesting another diff`() async throws {
+  @Test
+  func `unified side switching keeps both sides visible without requesting another diff`() async throws {
     var state = try await state()
     state.diffCursor = 1
     state.diffSide = .left
@@ -87,7 +67,8 @@ struct UnifiedDiffTests {
     await store.finish()
   }
 
-  @Test func `resizing preserves a removed line cursor and viewport through both layouts`() async throws {
+  @Test
+  func `resizing preserves a removed line cursor and viewport through both layouts`() async throws {
     var state = try await state()
     state.contentWidth = 120
     state.document = try await DocumentRenderer.prepareDiff(unifiedFixture(), 120)
@@ -110,32 +91,47 @@ struct UnifiedDiffTests {
       #expect(document.isUnifiedDiff == (width < 100))
     }
   }
-}
 
-@MainActor
-struct SearchWorkflowTests {
-  private func state() throws -> WorkspaceFeature.State {
+  // MARK: Private
+
+  private func state() async throws -> WorkspaceFeature.State {
     let repository = try RepositoryID("owner/repo")
     let item = ForgeItem(
       id: .init(repository: repository, number: 1),
       kind: .pullRequest,
-      title: "Navigation",
-      author: "author",
+      title: "Unified review",
+      author: "reviewer",
       url: URL(string: "https://github.com/owner/repo/pull/1")!,
     )
     var state = WorkspaceFeature.State(repository: repository)
     state.items = [item]
     state.selectedItemID = item.id
-    state.detail = .init(item: item, revision: .init(mergeBase: "base", head: "head"), files: [
-      .init(path: "Sources/A.swift", patch: "@@ -1,2 +1,2 @@\n-a\n-b\n+c\n+d"),
-      .init(path: "Sources/B.swift", patch: "@@ -1,2 +1,2 @@\n-a\n-b\n+c\n+d"),
-      .init(path: "Elsewhere/C.swift", status: "removed", patch: "@@ -1 +0,0 @@\n-old"),
+    state.selectedFilePath = "Example.swift"
+    state.detail = .init(item: item, revision: unifiedFixture().revision, files: [
+      .init(
+        path: "Example.swift",
+        patch: "@@ -1,4 +1,3 @@\n struct Example {\n-  let oldValue = 1\n-  obsolete()\n+  var newValue = 2\n }",
+      )
     ])
-    state.selectedFilePath = "Sources/A.swift"
+    state.pane = .content
+    state.tab = .diff
+    state.contentWidth = 80
+    state.contentHeight = 4
+    state.document = try await DocumentRenderer.prepareDiff(unifiedFixture(), 80)
     return state
   }
 
-  @Test func `PR slash search sends GitHub qualifiers only after Enter`() async throws {
+}
+
+// MARK: - SearchWorkflowTests
+
+@MainActor
+struct SearchWorkflowTests {
+
+  // MARK: Internal
+
+  @Test
+  func `PR slash search sends GitHub qualifiers only after Enter`() async throws {
     let calls = Mutex<[String]>([])
     let state = try state()
     let store = TestStore(initialState: state) { WorkspaceFeature() } withDependencies: {
@@ -162,7 +158,8 @@ struct SearchWorkflowTests {
     expectNoDifference(store.state.pane, .items)
   }
 
-  @Test func `Files search reads immutable content including unchanged context and deleted files`() async throws {
+  @Test
+  func `Files search reads immutable content including unchanged context and deleted files`() async throws {
     var state = try state()
     state.pane = .files
     state.searches[.files] = .init()
@@ -195,7 +192,8 @@ struct SearchWorkflowTests {
     expectNoDifference(store.state.visibleFiles.count, 3)
   }
 
-  @Test func `clearing Files search cancels reads and rejects stale responses`() async throws {
+  @Test
+  func `clearing Files search cancels reads and rejects stale responses`() async throws {
     var state = try state()
     state.pane = .files
     state.searches[.files] = .init()
@@ -211,7 +209,7 @@ struct SearchWorkflowTests {
       $0[ForgeClient.self].content = { _, _, _ in
         try await withTaskCancellationHandler {
           didStart.yield(())
-          for await _ in pending {}
+          for await _ in pending { }
           throw CancellationError()
         } onCancel: { cancelled.withLock { $0 = true } }
       }
@@ -230,7 +228,7 @@ struct SearchWorkflowTests {
 
   @Test(arguments: ["Sources", "/"])
   func `folder diff keeps file anchors and attaches current comments without assigning outdated ones to lines`(
-    directory: String,
+    directory: String
   ) async throws {
     var state = try state()
     let detail = try #require(state.detail)
@@ -265,10 +263,12 @@ struct SearchWorkflowTests {
     await store.finish()
     expectNoDifference(
       renderedPaths.withLock { $0 },
-      directory == "/" ? ["Sources/A.swift", "Sources/B.swift", "Elsewhere/C.swift", "Root.swift"] : [
-        "Sources/A.swift",
-        "Sources/B.swift",
-      ],
+      directory == "/"
+        ? ["Sources/A.swift", "Sources/B.swift", "Elsewhere/C.swift", "Root.swift"]
+        : [
+          "Sources/A.swift",
+          "Sources/B.swift",
+        ],
     )
     expectNoDifference(store.state.selectedDirectoryPath, directory)
     #expect(store.state.selectedFilePath == nil)
@@ -301,7 +301,8 @@ struct SearchWorkflowTests {
     expectNoDifference(store.state.error?.code, .invalidLine)
   }
 
-  @Test func `search navigation moves the exact cursor even when both matches are visible`() async throws {
+  @Test
+  func `search navigation moves the exact cursor even when both matches are visible`() async throws {
     var state = try state()
     state.pane = .content
     state.tab = .diff
@@ -326,7 +327,8 @@ struct SearchWorkflowTests {
     expectNoDifference(store.state.scroll, 0)
   }
 
-  @Test func `old revision drafts are not displayed as current comments and cannot be submitted`() async throws {
+  @Test
+  func `old revision drafts are not displayed as current comments and cannot be submitted`() async throws {
     var state = try state()
     let item = try #require(state.selectedItem)
     var draft = ReviewFeature.State(item: item, expectedHead: "old-head", expectedMergeBase: "base")
@@ -379,10 +381,37 @@ struct SearchWorkflowTests {
     await store.receive(\.commandPressed)
     expectNoDifference(store.state.pane, pane)
   }
+
+  // MARK: Private
+
+  private func state() throws -> WorkspaceFeature.State {
+    let repository = try RepositoryID("owner/repo")
+    let item = ForgeItem(
+      id: .init(repository: repository, number: 1),
+      kind: .pullRequest,
+      title: "Navigation",
+      author: "author",
+      url: URL(string: "https://github.com/owner/repo/pull/1")!,
+    )
+    var state = WorkspaceFeature.State(repository: repository)
+    state.items = [item]
+    state.selectedItemID = item.id
+    state.detail = .init(item: item, revision: .init(mergeBase: "base", head: "head"), files: [
+      .init(path: "Sources/A.swift", patch: "@@ -1,2 +1,2 @@\n-a\n-b\n+c\n+d"),
+      .init(path: "Sources/B.swift", patch: "@@ -1,2 +1,2 @@\n-a\n-b\n+c\n+d"),
+      .init(path: "Elsewhere/C.swift", status: "removed", patch: "@@ -1 +0,0 @@\n-old"),
+    ])
+    state.selectedFilePath = "Sources/A.swift"
+    return state
+  }
+
 }
 
+// MARK: - SearchProjectionTests
+
 struct SearchProjectionTests {
-  @Test func `unified comments stay directly below their actual old or new source row`() async throws {
+  @Test
+  func `unified comments stay directly below their actual old or new source row`() async throws {
     let old = SourceLocation(path: "A.swift", line: 1, side: .left)
     let new = SourceLocation(path: "A.swift", line: 1, side: .right)
     let source = ReviewDiff(path: "A.swift", language: "Swift", status: "changed", rows: [
@@ -408,7 +437,7 @@ struct SearchProjectionTests {
   func `every layout preserves deleted added and shared source identities`(_ width: Int) async throws {
     let source = unifiedFixture()
     let document = try await DocumentRenderer.prepareDiff(source, width)
-    let text = document.displayLines.map { $0.map(\.text).joined() }.joined(separator: "\n")
+    let text = document.displayLines.lazy.map { $0.map(\.text).joined() }.joined(separator: "\n")
     #expect(text.contains("oldValue") && text.contains("newValue") && text.contains("obsolete()"))
     for (side, count) in [(InlineComment.Side.left, 4), (.right, 3)] {
       for line in 1 ... count {
@@ -432,7 +461,8 @@ struct SearchProjectionTests {
     }
   }
 
-  @Test func `unified annotation rows do not acquire anchors and retain combined file provenance`() async throws {
+  @Test
+  func `unified annotation rows do not acquire anchors and retain combined file provenance`() async throws {
     let a = unifiedFixture()
     var rows = a.rows.map { ReviewDiffRow(left: $0.left, right: $0.right, path: "A.swift") }
     rows.append(.init(left: nil, right: nil, path: "A.swift", annotation: [.init(text: "Review note", role: .commentBody)]))
@@ -448,12 +478,13 @@ struct SearchProjectionTests {
     #expect(document.row(for: .init(path: "B.swift", line: 3, side: .left)) == 8)
   }
 
-  @Test func `unified long line search projection keeps removed rows and original alignment`() async throws {
+  @Test
+  func `unified long line search projection keeps removed rows and original alignment`() async throws {
     let diff = ReviewDiff(path: "A.swift", language: "Swift", status: "changed", rows: [
       .init(
         left: .init(number: 7, spans: [.init(text: String(repeating: "한글 ", count: 100) + "oldNeedle", role: .removed)]),
         right: .init(number: 8, spans: [.init(text: "newValue", role: .added)]),
-      ),
+      )
     ])
     let document = try await DocumentRenderer.prepareDiff(diff, 80)
     let matches = try await DocumentRenderer.search(document, "oldNeedle")
@@ -469,10 +500,11 @@ struct SearchProjectionTests {
     #expect(wide.diff?.rows.first?.left?.number == 7 && wide.diff?.rows.first?.right?.number == 8)
   }
 
-  @Test func `regex search is case sensitive and preserves Unicode offsets without matching line numbers`() async throws {
+  @Test
+  func `regex search is case sensitive and preserves Unicode offsets without matching line numbers`() async throws {
     let source = "\t한글 Hit hit1 hit22"
     let diff = ReviewDiff(path: "A.swift", language: "Swift", status: "changed", rows: [
-      .init(left: nil, right: .init(number: 22, spans: [.init(text: source)])),
+      .init(left: nil, right: .init(number: 22, spans: [.init(text: source)]))
     ])
     let document = try await DocumentRenderer.prepareDiff(diff, 80)
     let matches = try await DocumentRenderer.search(document, "hit[0-9]+")
@@ -488,10 +520,11 @@ struct SearchProjectionTests {
     await #expect(throws: TataraError.self) { try await DocumentRenderer.search(document, "[") }
   }
 
-  @Test func `offscreen search reveals long source text and preserves source identity`() async throws {
+  @Test
+  func `offscreen search reveals long source text and preserves source identity`() async throws {
     let source = String(repeating: "한글 ", count: 500) + "needle"
     let diff = ReviewDiff(path: "A.swift", language: "Swift", status: "changed", rows: [
-      .init(left: nil, right: .init(number: 7, spans: [.init(text: source)])),
+      .init(left: nil, right: .init(number: 7, spans: [.init(text: source)]))
     ])
     let document = try await DocumentRenderer.prepareDiff(diff, 80)
     let matches = try await DocumentRenderer.search(document, "needle")
@@ -505,7 +538,8 @@ struct SearchProjectionTests {
     expectNoDifference(revealed.diff?.rows.first?.right, document.diff?.rows.first?.right)
   }
 
-  @Test func `labels toggle quoted qualifiers without changing quoted body searches`() {
+  @Test
+  func `labels toggle quoted qualifiers without changing quoted body searches`() {
     let query = "is:open \"label:bug\" label:bug"
     expectNoDifference(LabelQuery.toggling("bug", in: query), "is:open \"label:bug\"")
     let label = "good \"first\" issue"
@@ -514,7 +548,8 @@ struct SearchProjectionTests {
     expectNoDifference(LabelQuery.toggling(label, in: added), "author:@me")
   }
 
-  @Test func `word search honors Unicode boundaries punctuation and source offsets`() async throws {
+  @Test
+  func `word search honors Unicode boundaries punctuation and source offsets`() async throws {
     let spans: [DiffSpan] = [.init(text: "  한글 value value_name")]
     let first = try #require(try await SearchPattern.word(in: spans, column: 0, whole: true))
     expectNoDifference(first.range, 2 ..< 4)
@@ -531,7 +566,8 @@ struct SearchProjectionTests {
 }
 
 extension SearchWorkflowTests {
-  @Test func `hash starts backward whole word search and n preserves that direction after manual motion`() async throws {
+  @Test
+  func `hash starts backward whole word search and n preserves that direction after manual motion`() async throws {
     var state = try state()
     state.pane = .content
     state.tab = .diff
@@ -539,7 +575,9 @@ extension SearchWorkflowTests {
     state.diffCursor = 3
     let texts = ["token", "tokenized", "token", "token", "token"]
     state.document = try await DocumentRenderer.prepareDiff(.init(
-      path: "Sources/A.swift", language: "Swift", status: "changed",
+      path: "Sources/A.swift",
+      language: "Swift",
+      status: "changed",
       rows: texts.enumerated().map { .init(left: nil, right: .init(number: $0.offset + 1, spans: [.init(text: $0.element)])) },
       revision: state.detail?.revision,
     ), 80)
@@ -585,7 +623,8 @@ extension SearchWorkflowTests {
     await store.send(.wordSearchResponse(generation: 2, row: 2, side: .right, column: 0, direction: -1, word))
   }
 
-  @Test func `multi key motions resolve through the keymap and keep pane focus`() async throws {
+  @Test
+  func `multi key motions resolve through the keymap and keep pane focus`() async throws {
     let initial = try state()
     let store = TestStore(initialState: initial) { WorkspaceFeature() }
     await store.send(.keyPressed("g")) { $0.pendingPrefix = "g" }
@@ -601,7 +640,8 @@ extension SearchWorkflowTests {
     expectNoDifference(overrides.command(for: "g#"), .searchWordBackward)
   }
 
-  @Test func `viewport placement keeps source cursor and visual anchor`() async throws {
+  @Test
+  func `viewport placement keeps source cursor and visual anchor`() async throws {
     var state = try state()
     state.pane = .content
     state.tab = .diff
@@ -609,7 +649,9 @@ extension SearchWorkflowTests {
     state.visualStart = 28
     state.contentHeight = 10
     state.document = try await DocumentRenderer.prepareDiff(.init(
-      path: "Sources/A.swift", language: "Swift", status: "changed",
+      path: "Sources/A.swift",
+      language: "Swift",
+      status: "changed",
       rows: (1 ... 60).map { .init(left: nil, right: .init(number: $0, spans: [.init(text: "source")])) },
       revision: state.detail?.revision,
     ), 80)

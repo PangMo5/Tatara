@@ -7,6 +7,16 @@ import TermLoom
 import TermLoomTextArea
 
 extension WorkspacePresentation {
+  static func anchor(_ comment: InlineComment) -> String {
+    "\(TerminalText.sanitize(comment.path)):\(comment.startLine.map { String($0) + "–" } ?? "")\(comment.line) · \(comment.side.rawValue)"
+  }
+
+  static func eventTitle(_ event: ReviewEvent) -> String {
+    switch event { case .comment: "Comment"
+    case .approve: "Approve"
+    case .requestChanges: "Request changes" }
+  }
+
   func field(_ id: String, value: String, placeholder: String, rect: Rect, into result: inout TerminalScreen) {
     let state = fields[id].flatMap { $0.text == value ? $0 : nil } ?? TextFieldState(text: value)
     result.operations.append(.field(rect, TextField(
@@ -55,7 +65,9 @@ extension WorkspacePresentation {
   }
 
   func filterScreen(_ filter: FilterFeature.State, into result: inout TerminalScreen) {
-    let rect = geometry.popup, x = rect.x + 2, width = rect.width - 4
+    let rect = geometry.popup
+    let x = rect.x + 2
+    let width = rect.width - 4
     let compact = rect.height < 22
     let listY = rect.y + (compact ? 5 : 8)
     let capacity = max(1, min(8, rect.height - (compact ? 11 : 17)))
@@ -151,11 +163,15 @@ extension WorkspacePresentation {
   }
 
   func inlineReview(_ review: ReviewFeature.State, rect: Rect, into result: inout TerminalScreen) {
-    let x = rect.x + 1, width = rect.width - 2, bottom = rect.bottom
+    let x = rect.x + 1
+    let width = rect.width - 2
+    let bottom = rect.bottom
     pane(rect, title: "\(l10n("Write your review")) · #\(review.item.id.number)", selected: true, into: &result)
     let location = review.selectedFile?.path ?? store.reviewLocation?.path ?? ""
-    let range = review.inlineLine.isEmpty ? store.reviewLocation.map { String($0.line) } ?? "" : review.inlineStartLine
-      .isEmpty ? review.inlineLine : review.inlineStartLine + "–" + review.inlineLine
+    let range = review.inlineLine.isEmpty
+      ? store.reviewLocation.map { String($0.line) } ?? ""
+      : review.inlineStartLine
+        .isEmpty ? review.inlineLine : review.inlineStartLine + "–" + review.inlineLine
     let status = review.error
       .map { l10n.error($0) } ??
       (review.isConfirming ? l10n("This will be posted to GitHub.") : "\(review.inlineSide.rawValue) · \(range) · \(location)")
@@ -282,7 +298,9 @@ extension WorkspacePresentation {
   }
 
   func reviewScreen(_ review: ReviewFeature.State, into result: inout TerminalScreen) {
-    let x = 2, width = max(1, size.width - 4), bottom = geometry.body.bottom - 1
+    let x = 2
+    let width = max(1, size.width - 4)
+    let bottom = geometry.body.bottom - 1
     result.text(
       "\(l10n("Write your review")) · #\(review.item.id.number)",
       in: Rect(x: x, y: 2, width: width, height: 1),
@@ -290,8 +308,9 @@ extension WorkspacePresentation {
       bold: true,
     )
     result.text(review.item.title, in: Rect(x: x, y: 3, width: width, height: 1), color: palette.text)
-    if let error = review
-      .error
+    if
+      let error = review
+        .error
     {
       result.text(l10n.error(error), in: Rect(x: x, y: 4, width: width, height: 1), color: palette.red)
     }
@@ -302,8 +321,9 @@ extension WorkspacePresentation {
     if review.isConfirming || review.revisionChanged {
       result.text(
         l10n(review
-          .revisionChanged ? "Keep the summary and remove old inline comments to review the latest revision." :
-          "This will be posted to GitHub."),
+          .revisionChanged
+          ? "Keep the summary and remove old inline comments to review the latest revision."
+          : "This will be posted to GitHub."),
         in: Rect(x: x, y: 6, width: width, height: 1),
         color: palette.yellow,
       )
@@ -452,15 +472,5 @@ extension WorkspacePresentation {
         color: palette.muted,
       )
     }
-  }
-
-  static func anchor(_ comment: InlineComment) -> String {
-    "\(TerminalText.sanitize(comment.path)):\(comment.startLine.map { String($0) + "–" } ?? "")\(comment.line) · \(comment.side.rawValue)"
-  }
-
-  static func eventTitle(_ event: ReviewEvent) -> String {
-    switch event { case .comment: "Comment"
-    case .approve: "Approve"
-    case .requestChanges: "Request changes" }
   }
 }

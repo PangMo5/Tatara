@@ -11,34 +11,18 @@ import TataraSystem
 import TermLoom
 import Testing
 
+// MARK: - CommentWriteCalls
+
 private final class CommentWriteCalls: Sendable {
   let values = Mutex<[(arguments: [String], input: String?)]>([])
 }
 
+// MARK: - ReadingWorkspaceTests
+
 @MainActor
 struct ReadingWorkspaceTests {
-  func item(_ number: Int = 1) throws -> ForgeItem {
-    try .init(
-      id: .init(repository: RepositoryID("owner/repo"), number: number),
-      kind: .pullRequest,
-      title: "Review \(number)",
-      author: "author",
-      url: URL(string: "https://github.com/owner/repo/pull/\(number)")!,
-    )
-  }
 
-  func diff() -> ReviewDiff {
-    .init(path: "Source.swift", language: "Swift", status: "changed", rows: [
-      .init(
-        left: nil,
-        right: .init(
-          number: 10,
-          spans: [.init(text: "\t" + String(repeating: "한글👩🏽‍💻 abc ", count: 15) + "needle boundary", role: .added)],
-        ),
-      ),
-      .init(left: nil, right: .init(number: 11, spans: [.init(text: "next source line", role: .added)])),
-    ], revision: .init(mergeBase: "base", head: "head"))
-  }
+  // MARK: Internal
 
   @Test(arguments: [64, 160])
   func `wrapping preserves Unicode and source coordinates while searching complete lines`(_ width: Int) async throws {
@@ -53,7 +37,7 @@ struct ReadingWorkspaceTests {
       let spans = document.displayLines[row].filter { $0.side == .right }
       return spans.dropFirst().dropLast().map(\.text).joined()
     }.joined()
-    #expect(visible == source.rows[0].right?.spans.map(\.text).joined().replacingOccurrences(of: "\t", with: "    "))
+    #expect(visible == source.rows[0].right?.spans.map(\.text).joined().replacing("\t", with: "    "))
     let matches = try await DocumentRenderer.search(document, "needle boundary")
     #expect(matches.lines.count == 1)
     #expect(matches.lines[0] > 0)
@@ -69,7 +53,8 @@ struct ReadingWorkspaceTests {
     #expect(revealed.location(at: 0, side: .right) == location)
   }
 
-  @Test func `Vim source and display motions differ on wrapped lines`() async throws {
+  @Test
+  func `Vim source and display motions differ on wrapped lines`() async throws {
     var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
     state.pane = .content
     state.tab = .diff
@@ -86,7 +71,8 @@ struct ReadingWorkspaceTests {
     #expect(store.state.document.location(at: 1, side: .right)?.line == 10)
   }
 
-  @Test func `paging content from Files moves the source cursor with the viewport`() async throws {
+  @Test
+  func `paging content from Files moves the source cursor with the viewport`() async throws {
     var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
     state.pane = .files
     state.tab = .diff
@@ -107,7 +93,8 @@ struct ReadingWorkspaceTests {
     #expect(store.state.scroll == 0 && store.state.diffCursor == 2)
   }
 
-  @Test func `manual horizontal scrolling refreshes search without moving the source cursor`() async throws {
+  @Test
+  func `manual horizontal scrolling refreshes search without moving the source cursor`() async throws {
     let diff = ReviewDiff(path: "A.swift", language: "Swift", status: "changed", rows: [
       .init(left: nil, right: .init(number: 1, spans: [.init(text: "needle " + String(repeating: "value ", count: 60))])),
       .init(left: nil, right: .init(number: 2, spans: [.init(text: "next line")])),
@@ -137,7 +124,8 @@ struct ReadingWorkspaceTests {
     #expect(store.state.searches[.content]?.result.ranges == [nil])
   }
 
-  @Test func `comment rows align to their source side without becoming review anchors`() async throws {
+  @Test
+  func `comment rows align to their source side without becoming review anchors`() async throws {
     let source = ReviewDiff(path: "A.swift", language: "Swift", status: "changed", rows: [
       .init(
         left: nil,
@@ -159,7 +147,8 @@ struct ReadingWorkspaceTests {
     #expect(try await DocumentRenderer.search(document, "right").lines == [1])
   }
 
-  @Test func `a comment search changes the action target to the matching comment`() async throws {
+  @Test
+  func `a comment search changes the action target to the matching comment`() async throws {
     let item = try item()
     let first = DiscussionComment(id: 1, author: "author", body: "first", anchor: .init(path: "A.swift", line: 1, side: .left))
     let second = DiscussionComment(id: 2, author: "author", body: "second", anchor: .init(path: "A.swift", line: 2, side: .right))
@@ -194,7 +183,8 @@ struct ReadingWorkspaceTests {
     #expect(store.state.commentEditor?.target.id == second.id)
   }
 
-  @Test func `picker Normal motions and Insert text never conflict`() async throws {
+  @Test
+  func `picker Normal motions and Insert text never conflict`() async throws {
     let items = try (1 ... 50).map { try item($0) }
     var state = WorkspaceFeature.State(repository: items[0].id.repository)
     state.items = items
@@ -243,7 +233,8 @@ struct ReadingWorkspaceTests {
     await store.finish()
   }
 
-  @Test func `picker navigation honors remaps and rejects previous dialog results`() async throws {
+  @Test
+  func `picker navigation honors remaps and rejects previous dialog results`() async throws {
     let items = try (1 ... 4).map { try item($0) }
     var state = try WorkspaceFeature.State(
       repository: items[0].id.repository,
@@ -264,8 +255,10 @@ struct ReadingWorkspaceTests {
     #expect(store.state.picker?.items == items)
   }
 
-  @Test func `quick picker keeps the current selection until an item is accepted`() async throws {
-    let first = try item(), second = try item(2)
+  @Test
+  func `quick picker keeps the current selection until an item is accepted`() async throws {
+    let first = try item()
+    let second = try item(2)
     var state = WorkspaceFeature.State(repository: first.id.repository)
     state.items = [first, second]
     state.selectedItemID = first.id
@@ -289,7 +282,8 @@ struct ReadingWorkspaceTests {
     #expect(store.state.pane == .files)
   }
 
-  @Test func `comment mutations require a completed preview and submit exactly once`() async throws {
+  @Test
+  func `comment mutations require a completed preview and submit exactly once`() async throws {
     let item = try item()
     let comment = DiscussionComment(id: 1, author: "author", body: "Original discussion")
     let writes = Mutex<[CommentMutation]>([])
@@ -334,20 +328,21 @@ struct ReadingWorkspaceTests {
     #expect(writes.withLock { $0.first?.body } == "@author\n\n**Reply**")
   }
 
-  @Test func `Markdown tables tasks references and quotes remain readable at narrow widths`() async throws {
+  @Test
+  func `Markdown tables tasks references and quotes remain readable at narrow widths`() async throws {
     let markdown = """
-    Reading notes
-    ===
-    - [x] Done
-    - [ ] Pending
-    >> **Nested quote**
-    | Name | Meaning |
-    | --- | --- |
-    | `alpha` | a long explanation of this value |
-    | beta | 한글 내용 |
-    [Guide][docs]
-    [docs]: https://example.com/guide
-    """
+      Reading notes
+      ===
+      - [x] Done
+      - [ ] Pending
+      >> **Nested quote**
+      | Name | Meaning |
+      | --- | --- |
+      | `alpha` | a long explanation of this value |
+      | beta | 한글 내용 |
+      [Guide][docs]
+      [docs]: https://example.com/guide
+      """
     for width in [32, 80] {
       let document = try await CommentRenderer.prepare(markdown, width)
       let text = document.searchableLines.joined(separator: "\n")
@@ -356,7 +351,7 @@ struct ReadingWorkspaceTests {
       #expect(text.contains("https://example.com/guide"))
       #expect(document.searchableLines.allSatisfy { TerminalWidth.of($0) <= width })
       #expect(document.lines.flatMap(\.self).contains { $0.bold && $0.text.contains("Reading notes") })
-      #expect(text.replacingOccurrences(of: "\n", with: "").contains("alpha"))
+      #expect(text.replacing("\n", with: "").contains("alpha"))
     }
   }
 
@@ -412,7 +407,8 @@ struct ReadingWorkspaceTests {
     #expect(writes.values.withLock { $0.isEmpty })
   }
 
-  @Test func `a failed comment write has no automatic retry`() async throws {
+  @Test
+  func `a failed comment write has no automatic retry`() async throws {
     let item = try item()
     let comment = DiscussionComment(
       id: 7,
@@ -429,6 +425,31 @@ struct ReadingWorkspaceTests {
     #expect(writes.values.withLock { $0.count } == 1)
   }
 
+  // MARK: Private
+
+  private func item(_ number: Int = 1) throws -> ForgeItem {
+    try .init(
+      id: .init(repository: RepositoryID("owner/repo"), number: number),
+      kind: .pullRequest,
+      title: "Review \(number)",
+      author: "author",
+      url: URL(string: "https://github.com/owner/repo/pull/\(number)")!,
+    )
+  }
+
+  private func diff() -> ReviewDiff {
+    .init(path: "Source.swift", language: "Swift", status: "changed", rows: [
+      .init(
+        left: nil,
+        right: .init(
+          number: 10,
+          spans: [.init(text: "\t" + String(repeating: "한글👩🏽‍💻 abc ", count: 15) + "needle boundary", role: .added)],
+        ),
+      ),
+      .init(left: nil, right: .init(number: 11, spans: [.init(text: "next source line", role: .added)])),
+    ], revision: .init(mergeBase: "base", head: "head"))
+  }
+
   private func commentRunner(writes: CommentWriteCalls, resolved: Bool = false, change: String = "") -> CommandRunner {
     CommandRunner { _, arguments, input in
       let query = input
@@ -439,8 +460,10 @@ struct ReadingWorkspaceTests {
           return .init(error: "fixture failed", status: 500)
         }
         if !query.isEmpty {
-          let operation = query.contains("unresolveReviewThread") ? "unresolveReviewThread" : query
-            .contains("resolveReviewThread") ? "resolveReviewThread" : "addReaction"
+          let operation = query.contains("unresolveReviewThread")
+            ? "unresolveReviewThread"
+            : query
+              .contains("resolveReviewThread") ? "resolveReviewThread" : "addReaction"
           let object = operation == "addReaction" ? "\"subject\":{\"id\":\"node7\"}" : "\"thread\":{\"id\":\"thread1\"}"
           return .init(output: Data("{\"data\":{\"\(operation)\":{\(object)}}}".utf8))
         }
@@ -448,28 +471,29 @@ struct ReadingWorkspaceTests {
       }
       if query.contains("reviewThreads") {
         return .init(output: Data("""
-        {"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"thread1","isResolved":\(resolved),"viewerCanResolve":true,"viewerCanUnresolve":true,"viewerCanReply":true,"comments":{"nodes":[{"id":"node7"}]}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}
-        """.utf8))
+          {"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"thread1","isResolved":\(resolved),"viewerCanResolve":true,"viewerCanUnresolve":true,"viewerCanReply":true,"comments":{"nodes":[{"id":"node7"}]}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}
+          """.utf8))
       }
       if !query.isEmpty {
         return .init(output: Data("""
-        {"data":{"viewer":{"login":"\(change == "account" ? "other" : "viewer")"},"node":{"id":"node7","body":"\(change == "body" ? "Changed" : "Existing")","updatedAt":"today","url":"https://github.com/owner/repo/pull/1#discussion_r7","viewerCanUpdate":\(change != "permission"),"viewerDidAuthor":\(change != "author"),"viewerCanDelete":true,"viewerCanReact":true,"reactionGroups":[],"parent":{"number":\(change == "owner" ? 2 : 1),"locked":false,"viewerCanUpdate":true,"repository":{"nameWithOwner":"owner/repo"}}}}}
-        """.utf8))
+          {"data":{"viewer":{"login":"\(change == "account" ? "other" : "viewer")"},"node":{"id":"node7","body":"\(change == "body" ? "Changed" : "Existing")","updatedAt":"today","url":"https://github.com/owner/repo/pull/1#discussion_r7","viewerCanUpdate":\(change != "permission"),"viewerDidAuthor":\(change != "author"),"viewerCanDelete":true,"viewerCanReact":true,"reactionGroups":[],"parent":{"number":\(change == "owner" ? 2 : 1),"locked":false,"viewerCanUpdate":true,"repository":{"nameWithOwner":"owner/repo"}}}}}
+          """.utf8))
       }
       if arguments.contains("repos/owner/repo/pulls/comments/7") {
         return .init(
           output: Data(
             #"{"id":7,"node_id":"node7","user":{"login":"author"},"body":"Existing","path":"A.swift","line":1,"side":"RIGHT","updated_at":"today"}"#
-              .utf8,
-          ),
+              .utf8
+          )
         )
       }
       if arguments.contains("repos/owner/repo/pulls/1") {
         return .init(output: Data("""
-        {"number":1,"title":"Review","html_url":"https://github.com/owner/repo/pull/1","state":"open","labels":[],"draft":false,"merged":false,"base":{"sha":"base","ref":"main","label":"main"},"head":{"sha":"\(change == "head" ? "changed" : "head")","ref":"feature","label":"feature"},"changed_files":1}
-        """.utf8))
+          {"number":1,"title":"Review","html_url":"https://github.com/owner/repo/pull/1","state":"open","labels":[],"draft":false,"merged":false,"base":{"sha":"base","ref":"main","label":"main"},"head":{"sha":"\(change == "head" ? "changed" : "head")","ref":"feature","label":"feature"},"changed_files":1}
+          """.utf8))
       }
       throw TataraError(.invalidResponse, detail: "Unexpected fixture request: \(arguments)")
     }
   }
+
 }

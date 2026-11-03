@@ -3,9 +3,26 @@
 
 import Foundation
 
+// MARK: - FilesView
+
 public enum FilesView: String, Codable, Sendable { case tree, list }
 
+// MARK: - FileTreeRow
+
 public struct FileTreeRow: Equatable, Sendable, Identifiable {
+
+  // MARK: Lifecycle
+
+  public init(path: String, name: String, depth: Int, isDirectory: Bool) {
+    self.path = path
+    self.name = name
+    self.depth = depth
+    self.isDirectory = isDirectory
+    id = (isDirectory ? "directory:" : "file:") + path
+  }
+
+  // MARK: Public
+
   public let path: String
   public let name: String
   public let depth: Int
@@ -18,20 +35,16 @@ public struct FileTreeRow: Equatable, Sendable, Identifiable {
     return "directory:" + path[..<slash]
   }
 
-  public init(path: String, name: String, depth: Int, isDirectory: Bool) {
-    self.path = path
-    self.name = name
-    self.depth = depth
-    self.isDirectory = isDirectory
-    id = (isDirectory ? "directory:" : "file:") + path
-  }
 }
 
+// MARK: - FileTree
+
 public struct FileTree: Equatable, Sendable {
-  public static let rootPath = "/"
-  public let rows: [FileTreeRow]
+
+  // MARK: Lifecycle
+
   public init(paths: [String]) {
-    var children: [String: [FileTreeRow]] = [:]
+    var children = [String: [FileTreeRow]]()
     var directories = Set<String>()
     for path in paths {
       let parts = path.split(separator: "/").map(String.init)
@@ -59,6 +72,12 @@ public struct FileTree: Equatable, Sendable {
     append("")
     rows = ordered
   }
+
+  // MARK: Public
+
+  public static let rootPath = "/"
+
+  public let rows: [FileTreeRow]
 
   public func visible(collapsed: Set<String>, matching paths: Set<String>? = nil) -> [FileTreeRow] {
     if collapsed.isEmpty, paths == nil {
@@ -94,4 +113,5 @@ public struct FileTree: Equatable, Sendable {
       return true
     }
   }
+
 }

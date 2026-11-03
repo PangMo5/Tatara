@@ -6,16 +6,22 @@ import TataraCore
 import TermLoom
 import TermLoomTextArea
 
+// MARK: - TerminalScreen
+
 /// One viewport-sized value snapshot; controls retain TermLoom interaction metadata.
 struct TerminalScreen: Widget {
   enum Operation {
-    case fill(Rect, Color), border(Rect, Color, Color), text(Rect, Text)
-    case field(Rect, TextField), editor(Rect, TextArea), button(Rect, Button)
+    case fill(Rect, Color)
+    case border(Rect, Color, Color)
+    case text(Rect, Text)
+    case field(Rect, TextField)
+    case editor(Rect, TextArea)
+    case button(Rect, Button)
   }
 
   var ascii = false
   var cursor: Position?
-  var operations: [Operation] = []
+  var operations = [Operation]()
 
   func render(in area: Rect, into frame: inout Frame) {
     if let cursor {
@@ -23,25 +29,35 @@ struct TerminalScreen: Widget {
     }
     for operation in operations {
       switch operation {
-      case let .fill(rect, color): frame.buffer.fill(
+      case .fill(let rect, let color): frame.buffer.fill(
           rect.intersection(area),
           with: Cell(symbol: " ", style: Style(background: color)),
         )
-      case let .border(rect, color, background): frame.render(
-          Block(borders: ascii ? BorderSet(
-            topLeft: "+",
-            topRight: "+",
-            bottomLeft: "+",
-            bottomRight: "+",
-            horizontal: "-",
-            vertical: "|",
-          ) : .rounded, borderStyle: Style(foreground: color, background: background)),
+
+      case .border(let rect, let color, let background): frame.render(
+          Block(
+            borders: ascii
+              ? BorderSet(
+                topLeft: "+",
+                topRight: "+",
+                bottomLeft: "+",
+                bottomRight: "+",
+                horizontal: "-",
+                vertical: "|",
+              )
+              : .rounded,
+            borderStyle: Style(foreground: color, background: background),
+          ),
           in: rect.intersection(area),
         )
-      case let .text(rect, text): frame.render(text, in: rect.intersection(area))
-      case let .field(rect, field): frame.render(field, in: rect.intersection(area))
-      case let .editor(rect, editor): frame.render(editor, in: rect.intersection(area))
-      case let .button(rect, button): frame.render(button, in: rect.intersection(area))
+
+      case .text(let rect, let text): frame.render(text, in: rect.intersection(area))
+
+      case .field(let rect, let field): frame.render(field, in: rect.intersection(area))
+
+      case .editor(let rect, let editor): frame.render(editor, in: rect.intersection(area))
+
+      case .button(let rect, let button): frame.render(button, in: rect.intersection(area))
       }
     }
   }
@@ -67,10 +83,13 @@ struct TerminalScreen: Widget {
   }
 }
 
+// MARK: - WorkspaceGeometry
+
 struct WorkspaceGeometry {
   let size: Size
   var preferredSidebarWidth = Preferences.defaultSidebarWidth
   var isSelectingItems = false
+
   var body: Rect {
     Rect(x: 0, y: 1, width: size.width, height: max(1, size.height - 3))
   }
@@ -83,12 +102,16 @@ struct WorkspaceGeometry {
   }
 
   var items: Rect {
-    size.width >= 100 ? Rect(
-      x: 0,
-      y: 1,
-      width: sidebarWidth,
-      height: isSelectingItems ? body.height : min(8, max(5, body.height / 4)),
-    ) : body
+    if size.width >= 100 {
+      Rect(
+        x: 0,
+        y: 1,
+        width: sidebarWidth,
+        height: isSelectingItems ? body.height : min(8, max(5, body.height / 4)),
+      )
+    } else {
+      body
+    }
   }
 
   var files: Rect {
@@ -104,7 +127,8 @@ struct WorkspaceGeometry {
   }
 
   var popup: Rect {
-    let width = min(96, max(20, size.width - 8)), height = max(8, min(26, body.height < 26 ? body.height : body.height - 4))
+    let width = min(96, max(20, size.width - 8))
+    let height = max(8, min(26, body.height < 26 ? body.height : body.height - 4))
     return Rect(x: max(0, (size.width - width) / 2), y: max(1, 1 + (body.height - height) / 2), width: width, height: height)
   }
 }

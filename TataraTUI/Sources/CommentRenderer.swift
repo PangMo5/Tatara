@@ -8,7 +8,8 @@ import TermLoom
 
 /// Markdown is prepared only for prose. Immutable diff source never enters this renderer.
 enum CommentRenderer {
-  private static let cache = PreparedDocumentCache(maximumCost: 8 * 1024 * 1024, maximumCount: 64)
+
+  // MARK: Internal
 
   @concurrent
   static func prepare(_ markdown: String, _ width: Int) async throws -> ReviewDocument {
@@ -18,17 +19,18 @@ enum CommentRenderer {
       try Task.checkCancellation()
       return result
     }
-    let clean = TerminalText.sanitize(markdown).replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(
-      of: "\t",
+    let clean = TerminalText.sanitize(markdown).replacing("\r\n", with: "\n").replacing(
+      "\t",
       with: "    ",
     )
     let sourceLines = clean.components(separatedBy: "\n")
-    var references: [String: String] = [:]
+    var references = [String: String]()
     let referencePattern = try NSRegularExpression(pattern: #"^\s*\[(?!\^)([^\]]+)\]:\s*<?([^ >]+)>?.*$"#)
     var inReferenceFence = false
     for line in sourceLines {
-      if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") || line.trimmingCharacters(in: .whitespaces)
-        .hasPrefix("~~~")
+      if
+        line.trimmingCharacters(in: .whitespaces).hasPrefix("```") || line.trimmingCharacters(in: .whitespaces)
+          .hasPrefix("~~~")
       {
         inReferenceFence.toggle()
       }
@@ -37,7 +39,9 @@ enum CommentRenderer {
         references[text.substring(with: match.range(at: 1)).lowercased()] = text.substring(with: match.range(at: 2))
       }
     }
-    var spans: [DiffSpan] = [], fence: (Character, Int)?, skipped = 0
+    var spans = [DiffSpan]()
+    var fence: (Character, Int)?
+    var skipped = 0
     for (index, line) in sourceLines.enumerated() {
       if skipped > 0 {
         skipped -= 1
@@ -54,8 +58,10 @@ enum CommentRenderer {
       let marker = trimmed.first
       let markerCount = marker.map { character in trimmed.prefix { $0 == character }.count } ?? 0
       if let active = fence {
-        if marker == active.0, markerCount >= active.1,
-           trimmed.dropFirst(markerCount).trimmingCharacters(in: .whitespaces).isEmpty
+        if
+          marker == active.0,
+          markerCount >= active.1,
+          trimmed.dropFirst(markerCount).trimmingCharacters(in: .whitespaces).isEmpty
         {
           fence = nil
         } else {
@@ -72,9 +78,12 @@ enum CommentRenderer {
         continue
       }
       if index + 1 < sourceLines.count, line.contains("|"), isTableDivider(sourceLines[index + 1]) {
-        var rows = [tableCells(line)], next = index + 2
-        while next < sourceLines.count, sourceLines[next].contains("|"),
-              !sourceLines[next].trimmingCharacters(in: .whitespaces).isEmpty
+        var rows = [tableCells(line)]
+        var next = index + 2
+        while
+          next < sourceLines.count,
+          sourceLines[next].contains("|"),
+          !sourceLines[next].trimmingCharacters(in: .whitespaces).isEmpty
         {
           rows.append(tableCells(sourceLines[next]))
           next += 1
@@ -128,16 +137,17 @@ enum CommentRenderer {
       if ["<details>", "</details>"].contains(trimmed) {
         continue
       }
-      source = source.replacingOccurrences(of: "<summary>", with: "▸ ").replacingOccurrences(of: "</summary>", with: "")
-        .replacingOccurrences(of: "<br>", with: "\n").replacingOccurrences(of: "<br/>", with: "\n").replacingOccurrences(
-          of: "<br />",
+      source = source.replacing("<summary>", with: "▸ ").replacing("</summary>", with: "")
+        .replacing("<br>", with: "\n").replacing("<br/>", with: "\n").replacing(
+          "<br />",
           with: "\n",
         )
-        .replacingOccurrences(of: "<kbd>", with: "`").replacingOccurrences(of: "</kbd>", with: "`")
+        .replacing("<kbd>", with: "`").replacing("</kbd>", with: "`")
       let referenceLinks = try NSRegularExpression(pattern: #"\[([^\]]+)\]\[([^\]]*)\]"#)
       for match in referenceLinks.matches(in: source, range: NSRange(source.startIndex..., in: source)).reversed() {
         let value = source as NSString
-        let label = value.substring(with: match.range(at: 1)), name = value.substring(with: match.range(at: 2))
+        let label = value.substring(with: match.range(at: 1))
+        let name = value.substring(with: match.range(at: 2))
         if let url = references[(name.isEmpty ? label : name).lowercased()], let range = Range(match.range, in: source) {
           source.replaceSubrange(range, with: "[\(label)](\(url))")
         }
@@ -148,9 +158,15 @@ enum CommentRenderer {
       for run in parsed.runs {
         let intent = run.inlinePresentationIntent ?? []
         let link = run.link ?? run.imageURL
-        let role: DiffRole = intent.contains(.code) ? .commentCode : link != nil ? .commentLink :
-          intent.contains(.strikethrough) ? .commentStrikethrough : intent.contains(.emphasized) ? .commentEmphasis :
-          quote ? .commentQuote : .commentBody
+        let role: DiffRole = intent.contains(.code)
+          ? .commentCode
+          : link != nil
+            ? .commentLink
+            : intent.contains(.strikethrough)
+              ? .commentStrikethrough
+              : intent.contains(.emphasized)
+                ? .commentEmphasis
+                : quote ? .commentQuote : .commentBody
         if let previous = lastLink, link != previous {
           if linkLabel != previous.absoluteString {
             spans.append(.init(text: " (\(TerminalText.sanitize(previous.absoluteString)))", role: .commentLink))
@@ -175,12 +191,15 @@ enum CommentRenderer {
     // Reuse word wrapping, then project its rows onto immutable styled UTF-16 runs.
     let source = spans.map(\.text).joined() as NSString
     let wrapped = try await DocumentRenderer.prepare(source as String, max(1, width))
-    var bounds: [Range<Int>] = [], length = 0
+    var bounds = [Range<Int>]()
+    var length = 0
     for span in spans {
       bounds.append(length ..< length + span.text.utf16.count)
       length += span.text.utf16.count
     }
-    var cursor = 0, styleIndex = 0, lines: [[DiffSpan]] = []
+    var cursor = 0
+    var styleIndex = 0
+    var lines = [[DiffSpan]]()
     for (index, row) in wrapped.lines.enumerated() {
       if index % 128 == 0 {
         try Task.checkCancellation()
@@ -200,9 +219,11 @@ enum CommentRenderer {
       while styleIndex < bounds.count, bounds[styleIndex].upperBound <= range.location {
         styleIndex += 1
       }
-      var projected: [DiffSpan] = [], position = styleIndex
+      var projected = [DiffSpan]()
+      var position = styleIndex
       while position < bounds.count, bounds[position].lowerBound < end {
-        let lower = max(range.location, bounds[position].lowerBound), upper = min(end, bounds[position].upperBound)
+        let lower = max(range.location, bounds[position].lowerBound)
+        let upper = min(end, bounds[position].upperBound)
         if lower < upper {
           var span = spans[position]
           span.text = source.substring(with: NSRange(location: lower, length: upper - lower))
@@ -219,8 +240,15 @@ enum CommentRenderer {
     return result
   }
 
+  // MARK: Private
+
+  private static let cache = PreparedDocumentCache(maximumCost: 8 * 1024 * 1024, maximumCount: 64)
+
   private static func tableCells(_ line: String) -> [String] {
-    var cells: [String] = [], cell = "", escaped = false, code = false
+    var cells = [String]()
+    var cell = ""
+    var escaped = false
+    var code = false
     for character in line.trimmingCharacters(in: .whitespaces) {
       if escaped {
         cell.append(character)
@@ -257,10 +285,11 @@ enum CommentRenderer {
     return !cells.isEmpty && cells.allSatisfy { $0.range(of: #"^:?-{3,}:?$"#, options: .regularExpression) != nil }
   }
 
-  @concurrent private static func renderTable(_ rows: [[String]], width: Int) async throws -> [[DiffSpan]] {
+  @concurrent
+  private static func renderTable(_ rows: [[String]], width: Int) async throws -> [[DiffSpan]] {
     let count = rows.map(\.count).max() ?? 0
     guard count > 0 else { return [] }
-    var result: [[DiffSpan]] = []
+    var result = [[DiffSpan]]()
     if width < count * 7 + 1 {
       if rows.count == 1 {
         return try await prepare(rows[0].joined(separator: " · "), width).displayLines
@@ -277,10 +306,10 @@ enum CommentRenderer {
     }
     let available = width - count * 3 - 1
     let widths = (0 ..< count).map { available / count + ($0 < available % count ? 1 : 0) }
-    let divider = "├" + widths.map { String(repeating: "─", count: $0 + 2) }.joined(separator: "┼") + "┤"
+    let divider = "├" + widths.lazy.map { String(repeating: "─", count: $0 + 2) }.joined(separator: "┼") + "┤"
     for (rowIndex, row) in rows.enumerated() {
       try Task.checkCancellation()
-      var cells: [[[DiffSpan]]] = []
+      var cells = [[[DiffSpan]]]()
       for column in 0 ..< count {
         let value = row.indices.contains(column) ? row[column] : ""
         let prepared = try await prepare(value, widths[column])
@@ -309,4 +338,5 @@ enum CommentRenderer {
     }
     return result
   }
+
 }

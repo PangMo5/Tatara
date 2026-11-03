@@ -13,3 +13,5 @@ test.log
 downloaded/
 
 __pycache__/
+
+.jj/

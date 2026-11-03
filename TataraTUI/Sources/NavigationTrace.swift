@@ -5,9 +5,11 @@ import Foundation
 import OSLog
 
 actor NavigationTrace {
+
+  // MARK: Internal
+
   static let shared = NavigationTrace()
   nonisolated static let destination = ProcessInfo.processInfo.environment["TATARA_INPUT_TRACE"]
-  private var file: FileHandle?
 
   func start() throws {
     guard let destination = Self.destination else { return }
@@ -28,4 +30,9 @@ actor NavigationTrace {
         .error("Input trace failed: \(String(describing: error), privacy: .public)")
     }
   }
+
+  // MARK: Private
+
+  private var file: FileHandle?
+
 }
