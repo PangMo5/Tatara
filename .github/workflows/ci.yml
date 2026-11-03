@@ -29,6 +29,8 @@ jobs:
         run: gitleaks git . --log-opts=--all --redact
       - name: Toolchain
         run: swift Scripts/Tatara.swift toolchain
+      - name: Toolchain contract
+        run: swift Scripts/Tests/Toolchain.swift
       - name: Resolve and generate
         run: swift Scripts/Tatara.swift generate --locked
       - name: Formatting, localization and notices

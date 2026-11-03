@@ -116,7 +116,8 @@ or compositor latency.
 The first [hosted CI run](https://github.com/PangMo5/Tatara/actions/runs/41574431318)
 stopped at the stable Xcode build check. GitHub's `xcode-27` image still lists the
 27B48 release candidate, while the required and locally validated release is
-27B52. The stable-build requirement remains enforced. Hosted tests and builds
-are not established until the runner image supplies the release build; no older
-Xcode or SDK is substituted. Secret scanning runs before this check so it still
-validates publication history while the hosted toolchain is unavailable.
+27B52. That app-build requirement was subsequently limited to signed binary
+releases. Ordinary CI validates Xcode 27.2, Swift 6.4.2 and macOS SDK 27.2 and logs
+the actual app build. It can verify the same compiler/SDK on the hosted RC without
+claiming the app is the stable release. `validate-release` and `release-build`
+still require 27B52. No older compiler or SDK is substituted.

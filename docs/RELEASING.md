@@ -20,9 +20,12 @@ Configure main-branch rules and add these repository secrets before a release:
 | `AC_API_ISSUER_ID` | App Store Connect issuer ID |
 | `AC_API_KEY_P8` | App Store Connect private key |
 
-CI selects Xcode 27.2 (27B52) on `xcode-27` and validates Swift 6.4.2 and the
-macOS 27.2 SDK before resolving dependencies. A stale runner image fails the
-validation explicitly. A local successful build does not establish hosted CI.
+CI selects Xcode 27.2 on `xcode-27` and validates Swift 6.4.2 and the macOS 27.2
+SDK before resolving dependencies. The runner's Xcode app build number is logged
+for diagnosis; matching compiler/SDK versions can be tested even when the hosted
+app is still the release candidate. Binary release validation and `release-build`
+additionally require the stable Xcode app build 27B52 before any signing work.
+A local successful build does not establish hosted CI.
 
 ## Release process
 

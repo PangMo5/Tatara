@@ -45,6 +45,8 @@ identify their dependency/UI/command descriptions as historical.
 No production app behavior or dependencies changed in this audit. It does not
 establish signed/notarized distribution, clean-Mac installation, a live forge
 write, native-language editorial review or macOS window-compositor fidelity.
-The hosted runner's Xcode 27.2 RC build remains separate from the locally
-validated stable 27B52 toolchain; its CI failure is still visible rather than
-being described as a successful hosted build.
+The initial CI failure came from applying the binary-release Xcode app build
+requirement to all verification. The follow-up now checks Xcode 27.2, Swift 6.4.2
+and SDK 27.2 for normal CI while retaining stable build 27B52 validation for signed
+binary releases. The hosted app build remains logged; it is not described as
+the stable release. Hosted pass/fail evidence is recorded by the workflow run.
