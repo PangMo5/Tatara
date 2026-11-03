@@ -984,8 +984,20 @@ struct Smoke {
   ) throws {
     let fm = FileManager.default
     let fixture = fm.temporaryDirectory.appendingPathComponent("tatara-smoke-\(UUID())")
+    let initialSnapshotGate = fixture.appendingPathComponent("initial-snapshot.gate")
     try fm.createDirectory(at: fixture, withIntermediateDirectories: false)
-    defer { try? fm.removeItem(at: fixture) }
+    defer {
+      do {
+        let log = fixture.appendingPathComponent("requests.log")
+        if fm.fileExists(atPath: log.path) {
+          try fm.createDirectory(at: artifacts, withIntermediateDirectories: true)
+          try Data(contentsOf: log).write(to: artifacts.appendingPathComponent("requests.log"), options: .atomic)
+        }
+      } catch {
+        FileHandle.standardError.write(Data("Could not preserve fixture request log: \(error)\n".utf8))
+      }
+      try? fm.removeItem(at: fixture)
+    }
     let executable = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
     try fm.createSymbolicLink(at: fixture.appendingPathComponent("gh"), withDestinationURL: executable)
     if stress {
@@ -995,6 +1007,7 @@ struct Smoke {
       "PATH": fixture.path + ":" + (ProcessInfo.processInfo.environment["PATH"] ?? ""),
       "TATARA_SMOKE_FIXTURE": fixture.path,
       "TATARA_SMOKE_STRESS": stress ? "1" : "0",
+      "TATARA_SMOKE_INITIAL_SNAPSHOT_GATE": stress ? "" : initialSnapshotGate.path,
       "TATARA_SMOKE_WIDE": CommandLine.arguments.contains("--wide-lines") ? "1" : "0",
       "TATARA_SMOKE_SHORT_SOURCE": CommandLine.arguments.contains("--wheel-boundary") ? "1" : "0",
       "TATARA_SMOKE_DENSE": CommandLine.arguments.contains("--dense-navigation") || CommandLine.arguments
@@ -1004,6 +1017,9 @@ struct Smoke {
     ]
     if profile {
       env.merge(profilingEnvironment(artifacts)) { _, new in new }
+    }
+    if !stress {
+      try fm.createDirectory(at: initialSnapshotGate, withIntermediateDirectories: false)
     }
     let t = try PTY(
       binary: binary,
@@ -1163,11 +1179,36 @@ struct Smoke {
     try t.wait("Filter · Pull requests")
     t.key("\u{1B}")
     try t.wait("Normal · Pull requests")
+    func waitForPreparedDiff(_ terminal: PTY, path: String) throws {
+      try terminal.waitUntil("prepared immutable diff for \(path)") {
+        String(terminal.line(2).dropFirst(terminal.sidebarWidth + 1)).contains(path)
+          && terminal.line(-2).contains("Ready") && terminal.text.contains("let value = 2")
+      }
+    }
     try t.focusPane(2)
+    try t.waitUntil("initial file row selected") { t.selectedFixtureIndex(files: true) == 0 }
+    t.key("\r")
+    try t.focusPane(2)
+    try t.waitUntil("initial snapshot request started") {
+      fm.fileExists(atPath: initialSnapshotGate.appendingPathComponent("waiting").path)
+    }
+    // Latch release before waking readers so a canceled/replaced producer cannot miss it.
+    try Data([1]).write(to: initialSnapshotGate.appendingPathComponent("released"), options: .atomic)
+    for pipe in try fm.contentsOfDirectory(at: initialSnapshotGate, includingPropertiesForKeys: nil)
+      where pipe.pathExtension == "fifo"
+    {
+      let release = Darwin.open(pipe.path, O_RDWR | O_NONBLOCK)
+      try expect(release >= 0, "Could not release initial snapshot response.")
+      var token: UInt8 = 1
+      let released = Darwin.write(release, &token, 1)
+      Darwin.close(release)
+      try expect(released == 1, "Initial snapshot response was not released.")
+    }
+    try waitForPreparedDiff(t, path: "Sources/File0.swift")
     t.key("/Tests\r")
     try t.wait("Filter · Files")
     try t.wait("6/12")
-    try t.wait("Ready")
+    try waitForPreparedDiff(t, path: "Tests/File1.swift")
     t.key("\u{1B}")
     try t.wait("Normal · Files")
     t.key("[")
@@ -1211,6 +1252,8 @@ struct Smoke {
       try String(contentsOf: log, encoding: .utf8).split(separator: "\n").count(where: { $0.hasPrefix("gh repos/") })
     }
     let before = try repositoryRequests()
+    let coldRequests = try String(contentsOf: log, encoding: .utf8)
+    try coldRequests.write(to: artifacts.appendingPathComponent("requests-cold.log"), atomically: true, encoding: .utf8)
     let warm = try PTY(
       binary: binary,
       arguments: ["--repo", "example/reviews", "--language", "en"],
@@ -1221,10 +1264,20 @@ struct Smoke {
     try warm.wait("BODY 0000")
     try warm.wait("Ready")
     try warm.focusPane(2)
+    try warm.waitUntil("warm initial file row selected") { warm.selectedFixtureIndex(files: true) == 0 }
+    warm.key("\r")
+    try warm.focusPane(2)
+    try waitForPreparedDiff(warm, path: "Sources/File0.swift")
     warm.key("/Tests\r")
     try warm.wait("Filter · Files")
-    try warm.wait("let value = 2")
-    try expect(try repositoryRequests() == before, "Warm restart repeated repository API calls.")
+    try waitForPreparedDiff(warm, path: "Tests/File1.swift")
+    let warmRequests = try String(contentsOf: log, encoding: .utf8)
+    try warmRequests.write(to: artifacts.appendingPathComponent("requests-warm.log"), atomically: true, encoding: .utf8)
+    let additional = warmRequests.dropFirst(coldRequests.count)
+    try expect(
+      try repositoryRequests() == before,
+      "Warm restart repeated repository API calls (before=\(before)):\n\(additional)",
+    )
     warm.key("q")
     try warm.finish()
     print("Swift PTY: pane search, popup, mouse wheel, scrollbar, paging, resize and Escape passed.")
@@ -1984,6 +2037,33 @@ struct Smoke {
     ] }
     let result: Any
     if endpoint.contains("/contents/") {
+      if
+        let gate = env["TATARA_SMOKE_INITIAL_SNAPSHOT_GATE"],
+        !gate.isEmpty,
+        endpoint.contains("Sources/File0%2Eswift"),
+        endpoint.contains(base)
+      {
+        let directory = URL(fileURLWithPath: gate)
+        let released = directory.appendingPathComponent("released")
+        if !FileManager.default.fileExists(atPath: released.path) {
+          // Each request owns a FIFO; the release latch also covers replacement requests.
+          let pipe = directory.appendingPathComponent("\(getpid()).fifo")
+          try expect(mkfifo(pipe.path, 0o600) == 0, "Could not create initial snapshot response pipe.")
+          let descriptor = Darwin.open(pipe.path, O_RDWR | O_NONBLOCK)
+          try expect(descriptor >= 0, "Could not open initial snapshot response pipe.")
+          defer { Darwin.close(descriptor) }
+          try Data().write(to: directory.appendingPathComponent("waiting"))
+          if !FileManager.default.fileExists(atPath: released.path) {
+            var event = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+            try expect(
+              Darwin.poll(&event, 1, 30_000) > 0 && event.revents & Int16(POLLIN) != 0,
+              "Initial snapshot response was not released before the fixture deadline.",
+            )
+            var token: UInt8 = 0
+            try expect(Darwin.read(descriptor, &token, 1) == 1, "Initial snapshot gate was not released.")
+          }
+        }
+      }
       print("// \(endpoint.components(separatedBy: "/contents/").last!.components(separatedBy: "?").first!)")
       let value = endpoint.contains(base) ? 1 : 2
       if stress, env["TATARA_SMOKE_WIDE"] == "1" {

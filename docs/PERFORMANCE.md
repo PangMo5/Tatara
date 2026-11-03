@@ -89,6 +89,20 @@ synchronized output timestamps for visible completion. Use `--no-diagnostics`
 for timing runs without tracing. `SWIFTTUI_DIAGNOSTICS` applies only to archived
 SwiftTUI executables; it is not a TermLoom setting.
 
+The functional `--workspace` case also checks cold-to-warm process reuse. Both
+processes explicitly open the same initial file and wait for its path, source
+content and completed Ready frame before filtering; the filtered target must
+also finish before navigation continues. The initial cold snapshot is held by a
+latched, per-request FIFO gate until the helper releases it. This makes the
+readiness requirement explicit without a settling timer. Canceled reads that
+never completed are not assumed to have populated persistent cache entries.
+
+The helper preserves `requests.log`, `requests-cold.log` and `requests-warm.log`
+under its artifact directory, including on failure. CI includes the hidden
+`.artifacts` directory in the validation upload. These are synthetic fixture
+requests; the gate is confined to the functional case and is not a performance
+measurement or production-cache behavior.
+
 The helper preserves mise's own data/cache directories while isolating Tatara's
 XDG state. Comparisons across ANSI and structured-renderer versions must use the
 matching helper fixture format; their payload sizes are not identical workloads.
