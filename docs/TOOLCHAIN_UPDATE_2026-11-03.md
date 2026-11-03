@@ -97,8 +97,9 @@ fetched history with Gitleaks. No signed binary release was published.
   wide-line PR/file navigation bursts. Four themes and all five locales passed.
 - Formatting, 182 localized strings across five locales, notices for 26 resolved
   packages plus Catppuccin, REUSE and whitespace checks passed.
-- Gitleaks found no credentials in the pre-publication history. The cleaned
-  public ancestry is checked again before publication.
+- Gitleaks found no credentials in the pre-publication history. A fresh bare
+  clone from GitHub also passed: five commits scanned, no credential findings,
+  no private-workspace/personal-path matches and no personal iCloud author email.
 
 The navigation run used a 320 × 64 PTY, synthetic delayed `gh`/`difft` processes,
 warm PR/file replacements and eight 21,000-character source rows. It recorded
@@ -110,4 +111,12 @@ Other builds were observed on the host, so these are functional timing evidence,
 not an isolated before/after performance comparison. Synchronous reducer tracing
 is saved separately from completed synchronized terminal output in
 `.artifacts/swift-pty/navigation-latest/`; this does not measure physical display
-or compositor latency. Hosted CI remains separate evidence.
+or compositor latency.
+
+The first [hosted CI run](https://github.com/PangMo5/Tatara/actions/runs/41574431318)
+stopped at the stable Xcode build check. GitHub's `xcode-27` image still lists the
+27B48 release candidate, while the required and locally validated release is
+27B52. The stable-build requirement remains enforced. Hosted tests and builds
+are not established until the runner image supplies the release build; no older
+Xcode or SDK is substituted. Secret scanning runs before this check so it still
+validates publication history while the hosted toolchain is unavailable.

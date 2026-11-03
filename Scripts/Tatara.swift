@@ -475,13 +475,13 @@ func toolchain() throws {
   let xcode = try run("xcodebuild", ["-version"], capture: true)
   let compiler = try run("swift", ["--version"], capture: true)
   let sdk = try run("xcrun", ["--sdk", "macosx", "--show-sdk-version"], capture: true)
+  print(xcode, terminator: "")
+  print(compiler, terminator: "")
+  print("macOS SDK: \(sdk)", terminator: "")
   try require(xcode.hasPrefix("Xcode 27.2\n"), "Tatara requires Xcode 27.2. Select it with DEVELOPER_DIR.")
   try require(xcode.contains("Build version 27B52"), "Tatara requires the stable Xcode 27.2 build 27B52.")
   try require(compiler.contains("Swift version 6.4.2"), "Tatara requires the Xcode 27.2 Swift 6.4.2 compiler.")
   try require(sdk.trimmingCharacters(in: .whitespacesAndNewlines) == "27.2", "Tatara requires the macOS 27.2 SDK.")
-  print(xcode, terminator: "")
-  print(compiler, terminator: "")
-  print("macOS SDK: \(sdk)", terminator: "")
 }
 
 func generate(locked: Bool = false) throws {

@@ -25,10 +25,10 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.3
         with:
           version: 0.13.7
-      - name: Toolchain
-        run: swift Scripts/Tatara.swift toolchain
       - name: Secret scan
         run: gitleaks git . --log-opts=--all --redact
+      - name: Toolchain
+        run: swift Scripts/Tatara.swift toolchain
       - name: Resolve and generate
         run: swift Scripts/Tatara.swift generate --locked
       - name: Formatting, localization and notices
