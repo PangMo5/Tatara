@@ -61,4 +61,4 @@
 - Run format, catalog, third-party notice and REUSE checks before release.
 - Write project automation in Swift. `Scripts/Tatara.swift` is the command entry point; `Scripts/Smoke` owns the SwiftTerm PTY test helper.
 - `Project.swift` owns the version. Release builds are signed command-line executables, notarized before publication, with corresponding source and notices.
-- mise is the recommended binary installation path. Homebrew installs a formula, not a cask. The package manager owns updates.
+- mise pins development and runtime tools. Document binary installation commands only after the corresponding release assets and distribution path have been published and verified.

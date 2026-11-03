@@ -262,8 +262,6 @@ func releaseNotes() throws -> String {
 
     Runtime tools: `mise use -g aqua:cli/cli aqua:Wilfred/difftastic`
 
-    Homebrew: `brew install PangMo5/tap/tatara`
-
     [Corresponding source](https://github.com/PangMo5/Tatara/releases/download/v\(value)/Tatara-\(
     value
     )-source.tar.gz) · [Licenses and notices](https://github.com/PangMo5/Tatara/blob/v\(value)/THIRD_PARTY_NOTICES.md)
@@ -362,47 +360,6 @@ func installLocal(products: URL, prefix: URL) throws {
   try JSONSerialization.data(withJSONObject: metadata, options: [.prettyPrinted, .sortedKeys])
     .write(to: share.appendingPathComponent("installation.json"), options: .atomic)
   try print("Installed \(version()) at \(bin.path). Restart any running Tatara process.")
-}
-
-func formula(artifacts: URL, output: URL) throws {
-  let value = try version()
-  func sha(_ arch: String) throws
-    -> String
-  {
-    try digest(artifacts.appendingPathComponent("tatara-\(value)-\(arch)-apple-darwin.tar.gz"))
-  }
-  try write("""
-    class Tatara < Formula
-      desc "Structural code review workspace for your terminal"
-      homepage "https://github.com/PangMo5/Tatara"
-      version "\(value)"
-      license "AGPL-3.0-only"
-
-    try   on_macos do
-        on_arm do
-          url "https://github.com/PangMo5/Tatara/releases/download/v\(value)/tatara-\(value)-aarch64-apple-darwin.tar.gz"
-          sha256 "\(sha("aarch64"))"
-        end
-        on_intel do
-          url "https://github.com/PangMo5/Tatara/releases/download/v\(value)/tatara-\(value)-x86_64-apple-darwin.tar.gz"
-          sha256 "\(sha("x86_64"))"
-        end
-      end
-
-      depends_on macos: :sequoia
-      depends_on "difftastic"
-      depends_on "gh"
-
-      def install
-        bin.install "bin/tatara"
-        (share/"tatara").install Dir["share/tatara/*"]
-      end
-
-      test do
-        assert_equal version.to_s, shell_output("#{bin}/tatara --version").strip
-      end
-    end
-    """ + "\n", output)
 }
 
 func patchWheelDirections(check: Bool) throws {
@@ -859,7 +816,6 @@ func release(_ command: String) throws {
         "HEAD",
       ],
     )
-    try formula(artifacts: dist, output: dist.appendingPathComponent("tatara.rb"))
     try write(releaseNotes(), dist.appendingPathComponent("release-notes.md"))
     let files = try fm.contentsOfDirectory(at: dist, includingPropertiesForKeys: nil)
       .filter { $0.lastPathComponent.hasSuffix(".tar.gz") }.sorted { $0.path < $1.path }
@@ -875,7 +831,6 @@ func release(_ command: String) throws {
       "gh",
       ["release", "create", tag] + assets + [
         dist.appendingPathComponent("SHA256SUMS").path,
-        dist.appendingPathComponent("tatara.rb").path,
         "--verify-tag",
         "--title",
         tag,
@@ -893,19 +848,6 @@ func release(_ command: String) throws {
       try require(fields.count == 2 && !fields[1].contains("/"), "Invalid checksum manifest entry.")
       try require(digest(download.appendingPathComponent(String(fields[1]))) == fields[0], "Published checksum mismatch.")
     }
-
-  case "update-tap":
-    _ = try required("GH_TOKEN")
-    let checkout = try temporary("tap")
-    defer { try? fm.removeItem(at: checkout) }
-    try run("gh", ["auth", "setup-git"])
-    try run("git", ["clone", "https://github.com/PangMo5/homebrew-tap.git", checkout.path])
-    try write(read(dist.appendingPathComponent("tatara.rb")), checkout.appendingPathComponent("Formula/tatara.rb"))
-    try run("git", ["config", "user.name", "github-actions[bot]"], cwd: checkout)
-    try run("git", ["config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"], cwd: checkout)
-    try run("git", ["add", "Formula/tatara.rb"], cwd: checkout)
-    try run("git", ["commit", "-m", "Update Tatara formula"], cwd: checkout)
-    try run("git", ["push"], cwd: checkout)
 
   default: throw ToolError("Unknown release operation.")
   }
@@ -943,9 +885,6 @@ do {
       architecture: arch,
       output: URL(fileURLWithPath: args.count > 2 ? args[2] : path("dist").path),
     )
-
-  case "formula": try require(args.count == 2, "Expected artifacts and output paths.")
-    try formula(artifacts: URL(fileURLWithPath: args[0]), output: URL(fileURLWithPath: args[1]))
 
   case "install-local":
     try installLocal(
@@ -990,6 +929,16 @@ do {
       ],
     )
 
+  case "readme-screenshot":
+    try smoke([
+      path("DerivedData/Build/Products/Release/tatara").path,
+      "--reading-workspace",
+      "--screenshot-style",
+      path("docs/images/readme-terminal.json").path,
+    ])
+    try Data(contentsOf: path(".artifacts/swift-pty/reading-workspace/review-root.png"))
+      .write(to: path("docs/images/tatara.png"), options: .atomic)
+
   case "smoke": try smoke(args)
 
   case "import-certificate",
@@ -1000,8 +949,7 @@ do {
   case "validate-release",
        "assemble-release",
        "publish",
-       "verify-release",
-       "update-tap": try release(command)
+       "verify-release": try release(command)
 
   default: throw ToolError("Unknown command: \(command)")
   }

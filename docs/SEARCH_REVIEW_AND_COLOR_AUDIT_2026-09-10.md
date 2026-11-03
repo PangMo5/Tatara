@@ -1,5 +1,10 @@
 # Search, inline review, and color audit — 2026-09-10
 
+> Historical investigation. Commands, dependencies and UI descriptions reflect the
+> date of this report. See the [README](../README.md) and [architecture](ARCHITECTURE.md)
+> for the current supported behavior.
+
+
 ## Result
 
 PR search now submits GitHub query syntax. The filter popup includes repository

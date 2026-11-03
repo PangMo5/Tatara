@@ -13,7 +13,7 @@ let package = Package(
     name: "TataraSmoke",
     dependencies: [.product(name: "SwiftTerm", package: "SwiftTerm")],
     path: ".",
-    sources: ["PTY.swift", "Smoke.swift"],
+    sources: ["PTY.swift", "Smoke.swift", "ScreenshotStyle.swift"],
   )],
   swiftLanguageModes: [.v6],
 )

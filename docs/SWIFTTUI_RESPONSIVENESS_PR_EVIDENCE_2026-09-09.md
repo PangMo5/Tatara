@@ -1,5 +1,10 @@
 # SwiftTUI responsiveness: maintainer review package
 
+> Historical investigation. Commands, dependencies and UI descriptions reflect the
+> date of this report. See the [README](../README.md) and [architecture](ARCHITECTURE.md)
+> for the current supported behavior.
+
+
 ## Review question
 
 Can an application process input against its committed interaction state while

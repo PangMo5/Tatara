@@ -1,5 +1,10 @@
 # Responsiveness isolation — September 8–9, 2026
 
+> Historical investigation. Commands, dependencies and UI descriptions reflect the
+> date of this report. See the [README](../README.md) and [architecture](ARCHITECTURE.md)
+> for the current supported behavior.
+
+
 This investigation follows the SwiftTUI 0.11.3 dependency update. It tests the
 reported slow scrolling and input during loading without migrating the renderer.
 

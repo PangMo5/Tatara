@@ -1,9 +1,11 @@
 # Changelog
 
+Version headings identify source versions, not published releases. No binary release has been published.
+
 ## 0.1.0
 
 - Browse GitHub pull requests and issues through `gh`, including Enterprise hosts.
-- Review immutable merge-base/head file snapshots with difftastic inside SwiftTUI.
+- Review immutable merge-base/head file snapshots with difftastic inside TermLoom.
 - Read conversation, inline discussion, check runs and submitted review states.
 - Compose review summaries and source-anchored inline comments with an explicit submission preview.
 - Navigate with Vim motions and configurable keys; mark files reviewed for the current revision.
@@ -18,4 +20,4 @@
 - Reuse account-scoped metadata, immutable snapshots and diffs across launches with a bounded SQLiteData cache.
 - Run development, release automation and PTY checks entirely through Swift tools.
 - Use Catppuccin Latte, Frappé, Macchiato and Mocha in five languages.
-- Prepare signed, notarized macOS arm64/x86_64 archives for mise and Homebrew.
+- Prepare signed, notarized macOS arm64/x86_64 archives for GitHub Releases; distribution remains unverified.

@@ -1,4 +1,9 @@
 <!-- SPDX-FileCopyrightText: 2026 PangMo5 and contributors -->
+
+> Historical investigation. Commands, dependencies and UI descriptions reflect the
+> date of this report. See the [README](../README.md) and [architecture](ARCHITECTURE.md)
+> for the current supported behavior.
+
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 
 # Review workspace verification — 2026-09-15

@@ -6,7 +6,8 @@ Vim motions, and a pane-based review workflow.
 
 ![Tatara's Catppuccin Mocha workspace with a side-by-side difftastic review](docs/images/tatara.png)
 
-Synthetic demo, rendered from an actual PTY capture.
+Synthetic demo rendered from actual PTY cells with Maple Mono NF KR 12pt and
+the Catppuccin Mocha terminal palette. See [screenshot reproduction](docs/SCREENSHOTS.md).
 
 Tatara currently supports **GitHub through `gh`**, including GitHub Enterprise.
 It runs on macOS 15 or newer. GitLab and other forges can be added behind the same
@@ -24,10 +25,10 @@ mise install
 mise run toolchain
 mise run generate
 mise run build
-DerivedData/Build/Products/Debug/tatara --demo
+mise exec -- DerivedData/Build/Products/Debug/tatara --demo
 
-gh auth login
-DerivedData/Build/Products/Debug/tatara --repo OWNER/REPO
+mise exec -- gh auth login
+mise exec -- DerivedData/Build/Products/Debug/tatara --repo OWNER/REPO
 ```
 
 Run without `--repo` inside a repository to use `gh repo view`'s repository
@@ -36,33 +37,20 @@ host; authenticate it first with `gh auth login --hostname github.example.com`.
 
 For a local optimized installation, run `mise exec -- swift Scripts/Tatara.swift build Release`
 and `mise exec -- swift Scripts/Tatara.swift install-local`. This installs into
-`~/.local/share/tatara/local/bin`; add that directory to your mise environment
+`~/.local/share/tatara/local/bin`; add that directory to your shell
 PATH. Re-run the installer after rebuilding, then restart Tatara.
 
-## Binary installation
+## Installation status
 
-Tatara is pre-release software. The first binary release and Homebrew tap
-publication have **not happened yet**.
-The release workflow prepares the following installation paths.
+Tatara currently installs from source. No binary release has been published,
+and Homebrew installation is not supported. mise installs the pinned development
+tools; its GitHub binary backend cannot install Tatara until release assets exist.
 
-Recommended, after publication:
-
-```sh
-mise use -g github:PangMo5/Tatara
-mise use -g aqua:cli/cli aqua:Wilfred/difftastic
-gh auth login
-tatara --repo OWNER/REPO
-```
-
-Homebrew, after publication:
-
-```sh
-brew install PangMo5/tap/tatara
-```
-
-Use `mise upgrade github:PangMo5/Tatara` or `brew upgrade tatara` for updates.
-Release archives include the executable, AGPL license, dependency notices and a
-corresponding-source reference. See [release setup](docs/RELEASING.md).
+For a locally installed build, keep `gh` and `difft` available on `PATH` outside
+this checkout. For example, `mise use -g aqua:cli/cli aqua:Wilfred/difftastic`
+installs those runtime tools. Rebuild and rerun `install-local` to update Tatara.
+See the [release checklist](docs/RELEASING.md) for the unverified binary distribution
+work that remains before the first release.
 
 ## Review workflow
 

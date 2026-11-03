@@ -1,5 +1,10 @@
 # SwiftTUI, TermLoom and Ratatui renderer comparison
 
+> Historical investigation. Commands, dependencies and UI descriptions reflect the
+> date of this report. See the [README](../README.md) and [architecture](ARCHITECTURE.md)
+> for the current supported behavior.
+
+
 September 9, 2026. **TermLoom is the most promising candidate for the next
 Tatara UI migration experiment.** It preserved Swift authoring and consistently
 reduced measured navigation and paging latency in this prototype. This is not
@@ -24,7 +29,7 @@ no such project exists anywhere.
 
 ## Measured implementation
 
-The [prototype](../Experiments/Ratatui/README.md) retains the actual
+The archived prototype (not included in the current source tree) retains the actual
 `WorkspaceFeature`, forge/cache clients, cancellation and ownership checks, and
 `DocumentRenderer`. The two experimental backends receive the same immutable
 Swift result-builder tree and use the same input/coalescing driver. TermLoom

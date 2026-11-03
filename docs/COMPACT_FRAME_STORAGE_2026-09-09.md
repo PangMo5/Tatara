@@ -1,5 +1,10 @@
 # Compact frame storage — September 9–10, 2026
 
+> Historical investigation. Commands, dependencies and UI descriptions reflect the
+> date of this report. See the [README](../README.md) and [architecture](ARCHITECTURE.md)
+> for the current supported behavior.
+
+
 The final SwiftTUI candidate passed all 73 framework gate steps and actual
 Tatara PTY checks. Work in this phase is local; no pull request or remote
 publication was made.

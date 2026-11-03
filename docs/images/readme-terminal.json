@@ -1,0 +1,18 @@
+{
+  "fonts": [
+    "MapleMono-NF-KR-Regular",
+    "MapleMono-NF-KR-Bold",
+    "MapleMono-NF-KR-Italic",
+    "MapleMono-NF-KR-BoldItalic"
+  ],
+  "fontSize": 12,
+  "extraLineHeight": 4,
+  "scale": 2,
+  "fontFeatures": ["calt", "ss01", "ss02", "ss03", "ss04", "ss05", "ss06", "ss07", "ss08", "ss09", "ss10", "ss11"],
+  "foreground": "cdd6f4",
+  "background": "1e1e2e",
+  "ansiPalette": [
+    "45475a", "f38ba8", "a6e3a1", "f9e2af", "89b4fa", "f5c2e7", "94e2d5", "a6adc8",
+    "585b70", "f38ba8", "a6e3a1", "f9e2af", "89b4fa", "f5c2e7", "94e2d5", "bac2de"
+  ]
+}

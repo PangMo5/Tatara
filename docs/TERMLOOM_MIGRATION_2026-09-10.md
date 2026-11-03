@@ -1,5 +1,10 @@
 # Production TermLoom migration — September 10, 2026
 
+> Historical investigation. Commands, dependencies and UI descriptions reflect the
+> date of this report. See the [README](../README.md) and [architecture](ARCHITECTURE.md)
+> for the current supported behavior.
+
+
 Tatara's production executable now uses TermLoom. The pinned upstream revision is
 `b746967794ad2753c39f695f5923c5cdf2f6425a`. SwiftTUI has been removed from the runtime
 package graph and the former SwiftTUI view definitions have been replaced.

@@ -394,16 +394,18 @@ final class PTY: TerminalDelegate {
 
   /// Render actual emulator cells; this is a visual artifact, never a timing sample.
   func screenshot(_ name: String) throws {
-    let cellWidth = 9
-    let cellHeight = 20
-    let padding = 16
-    let width = columns * cellWidth + padding * 2
-    let height = rows * cellHeight + padding * 2
+    let style = try ScreenshotStyle.load()
+    let regular = try style.font()
+    let cellWidth = ("M" as NSString).size(withAttributes: [.font: regular]).width
+    let cellHeight = ceil(regular.ascender - regular.descender + regular.leading) + style.extraLineHeight
+    let padding = 16.0
+    let width = Int(ceil(Double(columns) * cellWidth + padding * 2))
+    let height = Int(ceil(Double(rows) * cellHeight + padding * 2))
     guard
       let bitmap = NSBitmapImageRep(
         bitmapDataPlanes: nil,
-        pixelsWide: width,
-        pixelsHigh: height,
+        pixelsWide: Int(ceil(Double(width) * style.scale)),
+        pixelsHigh: Int(ceil(Double(height) * style.scale)),
         bitsPerSample: 8,
         samplesPerPixel: 4,
         hasAlpha: true,
@@ -415,75 +417,66 @@ final class PTY: TerminalDelegate {
       let context = NSGraphicsContext(bitmapImageRep: bitmap)
     else { throw SmokeError("Could not create terminal preview bitmap.") }
     func color(_ value: Attribute.Color, background: Bool = false) throws -> NSColor {
-      switch value {
-      case .trueColor(let red, let green, let blue): return NSColor(
-          srgbRed: Double(red) / 255,
-          green: Double(green) / 255,
-          blue: Double(blue) / 255,
-          alpha: 1,
-        )
-
-      case .defaultColor,
-           .defaultInvertedColor:
-        let source = (value == .defaultInvertedColor) != background ? terminal.backgroundColor : terminal.foregroundColor
-        return NSColor(
-          srgbRed: Double(source.red) / 65535,
-          green: Double(source.green) / 65535,
-          blue: Double(source.blue) / 65535,
-          alpha: 1,
-        )
-
-      case .ansi256(let code):
-        let colors = SwiftTerm.Color.defaultInstalledColors
-        guard colors.indices.contains(Int(code)) else { throw SmokeError("Unexpected extended ANSI palette index.") }
-        let value = colors[Int(code)]
-        return NSColor(
-          srgbRed: Double(value.red) / 65535,
-          green: Double(value.green) / 65535,
-          blue: Double(value.blue) / 65535,
-          alpha: 1,
-        )
-      }
+      try style.color(value, terminal: terminal, background: background)
     }
     NSGraphicsContext.saveGraphicsState()
     defer { NSGraphicsContext.restoreGraphicsState() }
     NSGraphicsContext.current = context
+    context.cgContext.scaleBy(x: style.scale, y: style.scale)
     try color(terminal.getCharData(col: 0, row: 0)?.attribute.bg ?? .defaultColor, background: true).setFill()
     NSRect(x: 0, y: 0, width: width, height: height).fill()
     for row in 0 ..< rows {
+      context.cgContext.setAlpha(1)
+      context.cgContext.setShouldAntialias(false)
       for column in 0 ..< columns {
         guard let cell = terminal.getCharData(col: column, row: row) else { continue }
-        let x = padding + column * cellWidth
-        let y = height - padding - (row + 1) * cellHeight
+        let x = padding + Double(column) * cellWidth
+        let y = Double(height) - padding - Double(row + 1) * cellHeight
         let inverted = cell.attribute.style.contains(.inverse)
         try color(inverted ? cell.attribute.fg : cell.attribute.bg, background: !inverted).setFill()
         NSRect(x: x, y: y, width: cellWidth, height: cellHeight).fill()
       }
-      for column in 0 ..< columns {
+      context.cgContext.setShouldAntialias(true)
+      var column = 0
+      while column < columns {
         guard
           let cell = terminal.getCharData(col: column, row: row),
           cell.width > 0,
           !cell.attribute.style.contains(.invisible)
-        else { continue }
-        let bold = cell.attribute.style.contains(.bold)
-        let italic = cell.attribute.style.contains(.italic)
-        let name = bold ? (italic ? "Menlo-BoldItalic" : "Menlo-Bold") : (italic ? "Menlo-Italic" : "Menlo-Regular")
-        guard let font = NSFont(name: name, size: 14) else { throw SmokeError("Missing preview font: \(name)") }
+        else { column += 1
+          continue
+        }
+        let start = column
+        let attribute = cell.attribute
+        var text = ""
+        // Shape equal-style runs together so contextual alternates and ligatures retain their neighbors.
+        while column < columns, let next = terminal.getCharData(col: column, row: row), next.attribute == attribute {
+          if next.width > 0 {
+            text.append(next.getCharacter())
+          }
+          column += max(1, Int(next.width))
+        }
+        let font = try style.font(bold: attribute.style.contains(.bold), italic: attribute.style.contains(.italic))
         var attributes: [NSAttributedString.Key: Any] = try [
           .font: font,
           .foregroundColor: color(
-            cell.attribute.style.contains(.inverse) ? cell.attribute.bg : cell.attribute.fg,
-            background: cell.attribute.style.contains(.inverse),
+            attribute.style.contains(.inverse) ? attribute.bg : attribute.fg,
+            background: attribute.style.contains(.inverse),
           ),
         ]
-        if cell.attribute.style.contains(.underline) {
+        if attribute.style.contains(.underline) {
           attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
         }
-        if cell.attribute.style.contains(.crossedOut) {
+        if attribute.style.contains(.crossedOut) {
           attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
         }
-        String(cell.getCharacter()).draw(
-          at: NSPoint(x: padding + column * cellWidth, y: height - padding - (row + 1) * cellHeight + 1),
+        context.cgContext.setAlpha(attribute.style.contains(.dim) ? 0.5 : 1)
+        text.draw(
+          at: NSPoint(
+            x: padding + Double(start) * cellWidth,
+            y: Double(height) - padding - Double(row + 1) * cellHeight +
+              (cellHeight - regular.ascender + regular.descender) / 2,
+          ),
           withAttributes: attributes,
         )
       }

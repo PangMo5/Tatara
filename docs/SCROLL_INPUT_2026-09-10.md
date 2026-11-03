@@ -1,5 +1,10 @@
 # Wheel axes and sidebar scroll margins
 
+> Historical investigation. Commands, dependencies and UI descriptions reflect the
+> date of this report. See the [README](../README.md) and [architecture](ARCHITECTURE.md)
+> for the current supported behavior.
+
+
 The previous installed Release (`726205ef7d94a988f867ca0e133bf43ee79a0323c1894607e8a91c58a0d56f90`)
 reproduced two independent defects in a 176×40 SwiftTerm PTY:
 

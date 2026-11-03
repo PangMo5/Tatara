@@ -26,8 +26,9 @@ the term “merge request.” Unsupported operations must remain explicit.
    filtering happens after pagination metadata is computed.
 2. Detail acquisition obtains immutable base/head commits and their merge base,
    all changed files, conversation, review comments, check runs and statuses.
-3. Only the selected file's two snapshots are acquired. Renames use the old path
-   at merge base; additions/deletions use an empty opposite side.
+3. A file selection acquires its two immutable snapshots. A folder or `/` selection
+   prepares the changed descendants as a combined diff with per-file identity.
+   Renames use the old path at merge base; additions/deletions use an empty opposite side.
 4. `difft --display json --strip-cr off` supplies aligned source rows and changed
    token byte ranges. Tatara validates those ranges against the exact snapshots,
    preserves zero-based-to-one-based source mapping, and retains the `highlight`
@@ -211,9 +212,11 @@ or Vim pattern compatibility.
 - Open items in one repository per process; repositories can be selected from any
   directory with `--repo`.
 - Drafts and viewed marks live for this process. Draft persistence, resumable sessions,
-  review-thread resolution and multi-repository inboxes remain future work.
-- Cursor motion and visual selection are line-based. Characterwise editing,
-  and hunk-level review marks remain future work.
+  and multi-repository inboxes remain future work. Published-thread resolution
+  and reopening are implemented through fresh GitHub permissions and a write preview.
+- Diff cursor motion and visual selection are line-based. Characterwise visual
+  selection and hunk-level review marks are not implemented. Review editors support
+  native character editing, Unicode paste and undo/redo.
 - GitHub caps its changed-file endpoint at 3,000 files. Tatara checks the reported
   count and reports incompleteness instead of showing a falsely complete review.
 - TermLoom is pinned to an immutable upstream revision in the committed lockfile.

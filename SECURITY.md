@@ -1,9 +1,9 @@
 # Security
 
-For a security issue, use GitHub's private vulnerability reporting on this
-repository once public reporting is enabled. Avoid publishing tokens, private
-source, terminal recordings containing secrets, or active exploit details in a
-public issue.
+Report a security issue privately through
+[GitHub vulnerability reporting](https://github.com/PangMo5/Tatara/security/advisories/new).
+Private vulnerability reporting is enabled. Do not publish tokens, private source,
+terminal recordings containing secrets or active exploit details in a public issue.
 
 Tatara delegates authentication to `gh` and does not copy tokens into its config.
 Remote code is compared as bytes, not executed. Temporary snapshots are scoped

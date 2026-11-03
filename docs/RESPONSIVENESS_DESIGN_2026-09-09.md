@@ -1,5 +1,10 @@
 # Responsive PR and file selection
 
+> Historical investigation. Commands, dependencies and UI descriptions reflect the
+> date of this report. See the [README](../README.md) and [architecture](ARCHITECTURE.md)
+> for the current supported behavior.
+
+
 Design proposal, September 9, 2026. The original proposal is preserved below;
 implementation evidence is tracked in
 [the implementation report](RESPONSIVENESS_IMPLEMENTATION_2026-09-09.md).

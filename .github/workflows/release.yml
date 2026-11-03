@@ -68,7 +68,7 @@ jobs:
           pattern: release-*
           merge-multiple: true
           path: dist
-      - name: Assemble source, checksums and formula
+      - name: Assemble source and checksums
         run: swift Scripts/Tatara.swift assemble-release
       - name: Publish immutable release assets
         env:
@@ -78,7 +78,3 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: swift Scripts/Tatara.swift verify-release
-      - name: Update Homebrew formula
-        env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        run: swift Scripts/Tatara.swift update-tap

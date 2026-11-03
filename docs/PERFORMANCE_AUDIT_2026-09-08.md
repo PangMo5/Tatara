@@ -1,5 +1,10 @@
 # Responsiveness audit — September 8, 2026
 
+> Historical investigation. Commands, dependencies and UI descriptions reflect the
+> date of this report. See the [README](../README.md) and [architecture](ARCHITECTURE.md)
+> for the current supported behavior.
+
+
 The measurements below use SwiftTUI 0.10.1 and precede the subsequent dependency
 update to SwiftTUI 0.11.3 and difftastic 0.70.0. The recorded executable hashes
 identify those measured builds; these timings do not describe later builds.

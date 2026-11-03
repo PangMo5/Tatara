@@ -1,5 +1,10 @@
 # SwiftTUI frame publication experiment
 
+> Historical investigation. Commands, dependencies and UI descriptions reflect the
+> date of this report. See the [README](../README.md) and [architecture](ARCHITECTURE.md)
+> for the current supported behavior.
+
+
 ## Decision
 
 Moving immutable frame preparation ahead of main-actor publication is feasible
