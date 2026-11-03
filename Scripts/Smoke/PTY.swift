@@ -448,9 +448,34 @@ final class PTY: TerminalDelegate {
         }
         let start = column
         let attribute = cell.attribute
+        context.cgContext.setAlpha(attribute.style.contains(.dim) ? 0.5 : 1)
+        if ScreenshotCellGraphic.characters.contains(cell.getCharacter()) {
+          ScreenshotCellGraphic.draw(
+            cell.getCharacter(),
+            in: CGRect(
+              x: padding + Double(column) * cellWidth,
+              y: Double(height) - padding - Double(row + 1) * cellHeight,
+              width: cellWidth,
+              height: cellHeight,
+            ),
+            context: context.cgContext,
+            scale: style.scale,
+            color: try color(
+              attribute.style.contains(.inverse) ? attribute.bg : attribute.fg,
+              background: attribute.style.contains(.inverse),
+            ),
+          )
+          column += 1
+          continue
+        }
         var text = ""
         // Shape equal-style runs together so contextual alternates and ligatures retain their neighbors.
-        while column < columns, let next = terminal.getCharData(col: column, row: row), next.attribute == attribute {
+        while
+          column < columns,
+          let next = terminal.getCharData(col: column, row: row),
+          next.attribute == attribute,
+          !ScreenshotCellGraphic.characters.contains(next.getCharacter())
+        {
           if next.width > 0 {
             text.append(next.getCharacter())
           }
@@ -485,6 +510,12 @@ final class PTY: TerminalDelegate {
     else { throw SmokeError("Could not encode terminal preview.") }
     try data.write(to: artifacts.appendingPathComponent(name + ".png"))
     try snapshot(name)
+  }
+
+  func verifyScreenshotBorders(_ name: String) throws {
+    guard let bitmap = NSBitmapImageRep(data: try Data(contentsOf: artifacts.appendingPathComponent(name + ".png")))
+    else { throw SmokeError("Could not load screenshot for border validation.") }
+    try ScreenshotStyle.load().verifyBorders(in: bitmap, text: text)
   }
 
   func finish() throws {

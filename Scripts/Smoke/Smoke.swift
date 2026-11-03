@@ -311,6 +311,7 @@ struct Smoke {
     try t.wait("Sources/Selection.swift")
     try t.wait("Ready")
     try t.screenshot("review-root")
+    try t.verifyScreenshotBorders("review-root")
     let beforePage = position(t)
     t.key("\u{6}")
     try t.waitUntil("Files page controls content") { position(t) > beforePage }

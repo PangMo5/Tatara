@@ -6,6 +6,8 @@ import CoreText
 import Foundation
 import SwiftTerm
 
+// MARK: - ScreenshotStyle
+
 struct ScreenshotStyle: Decodable {
 
   // MARK: Internal
@@ -89,4 +91,156 @@ struct ScreenshotStyle: Decodable {
     )
   }
 
+}
+
+// MARK: - ScreenshotCellGraphic
+
+/// Terminal graphics occupy the entire cell, independently of the text baseline.
+enum ScreenshotCellGraphic {
+  static let characters = Set("─│┌┐└┘├┤┬┴┼╭╮╰╯█▀▄▌▐")
+
+  static func draw(_ character: Character, in frame: CGRect, context: CGContext, scale: Double, color: NSColor) {
+    precondition(characters.contains(character), "Unsupported screenshot cell graphic.")
+    func snap(_ value: Double) -> Double {
+      (value * scale).rounded() / scale
+    }
+    let rect = CGRect(
+      x: snap(frame.minX),
+      y: snap(frame.minY),
+      width: snap(frame.maxX) - snap(frame.minX),
+      height: snap(frame.maxY) - snap(frame.minY),
+    )
+    let center = CGPoint(x: snap(frame.midX), y: snap(frame.midY))
+    context.saveGState()
+    defer { context.restoreGState() }
+    context.setFillColor(color.cgColor)
+    context.setStrokeColor(color.cgColor)
+    context.setShouldAntialias(false)
+    switch character {
+    case "█": context.fill(rect)
+      return
+
+    case "▀": context.fill(CGRect(x: rect.minX, y: center.y, width: rect.width, height: rect.maxY - center.y))
+      return
+
+    case "▄": context.fill(CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: center.y - rect.minY))
+      return
+
+    case "▌": context.fill(CGRect(x: rect.minX, y: rect.minY, width: center.x - rect.minX, height: rect.height))
+      return
+
+    case "▐": context.fill(CGRect(x: center.x, y: rect.minY, width: rect.maxX - center.x, height: rect.height))
+      return
+
+    default: break
+    }
+    let path = CGMutablePath()
+    let up = CGPoint(x: center.x, y: rect.maxY)
+    let down = CGPoint(x: center.x, y: rect.minY)
+    let left = CGPoint(x: rect.minX, y: center.y)
+    let right = CGPoint(x: rect.maxX, y: center.y)
+    if "╭╮╰╯".contains(character) {
+      let start = "╭╮".contains(character) ? down : up
+      let end = "╭╰".contains(character) ? right : left
+      path.move(to: start)
+      path.addArc(tangent1End: center, tangent2End: end, radius: min(rect.width, rect.height) / 2)
+      path.addLine(to: end)
+      context.setShouldAntialias(true)
+    } else {
+      let ends: [CGPoint]
+      switch character {
+      case "─": ends = [left, right]
+      case "│": ends = [down, up]
+      case "┌": ends = [down, right]
+      case "┐": ends = [down, left]
+      case "└": ends = [up, right]
+      case "┘": ends = [up, left]
+      case "├": ends = [up, down, right]
+      case "┤": ends = [up, down, left]
+      case "┬": ends = [left, right, down]
+      case "┴": ends = [left, right, up]
+      case "┼": ends = [left, right, up, down]
+      default: preconditionFailure("Unsupported screenshot border.")
+      }
+      for end in ends { path.move(to: center)
+        path.addLine(to: end)
+      }
+    }
+    context.addPath(path)
+    context.setLineWidth(max(1, scale.rounded()) / scale)
+    context.setLineCap(.butt)
+    context.setLineJoin(.round)
+    context.strokePath()
+  }
+}
+
+extension ScreenshotStyle {
+  /// Inspect the rendered PNG, independently of the glyph paths, for missing border pixels.
+  func verifyBorders(in bitmap: NSBitmapImageRep, text: String) throws {
+    let rows = text.components(separatedBy: "\n").map(Array.init)
+    var vertical = 0 ..< 0
+    var start: Int?
+    for row in 0 ... rows.count {
+      let connects = row < rows.count && rows[row].first == "│"
+      if connects, start == nil {
+        start = row
+      }
+      if !connects, let first = start {
+        if row - first > vertical.count {
+          vertical = first ..< row
+        }
+        start = nil
+      }
+    }
+    var horizontal = (row: 0, start: 0, end: 0)
+    for (row, characters) in rows.enumerated() {
+      var start: Int?
+      for column in 0 ... characters.count {
+        let connects = column < characters.count && characters[column] == "─"
+        if connects, start == nil {
+          start = column
+        }
+        if !connects, let first = start {
+          if column - first > horizontal.end - horizontal.start {
+            horizontal = (row, first, column)
+          }
+          start = nil
+        }
+      }
+    }
+    try expect(vertical.count > 1 && horizontal.end - horizontal.start > 1, "Missing connected screenshot borders.")
+    guard let background = bitmap.colorAt(x: 0, y: 0)?.usingColorSpace(.sRGB) else {
+      throw SmokeError("Could not inspect screenshot background.")
+    }
+    func ink(_ x: Int, _ y: Int) throws -> Bool {
+      guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else {
+        throw SmokeError("Could not inspect screenshot pixel.")
+      }
+      return abs(color.redComponent - background.redComponent) + abs(color.greenComponent - background.greenComponent)
+        + abs(color.blueComponent - background.blueComponent) > 0.04
+    }
+    let padding = 16.0
+    let cellWidth = ("M" as NSString).size(withAttributes: [.font: try font()]).width
+    let cellHeight = (Double(bitmap.pixelsHigh) / scale - padding * 2) / Double(rows.count)
+    let x = Int(((padding + cellWidth / 2) * scale).rounded())
+    let top = Int((padding + Double(vertical.lowerBound) * cellHeight) * scale)
+    let bottom = Int((padding + Double(vertical.upperBound) * cellHeight) * scale)
+    let verticalGaps = try ((top - 1) ... bottom).count { y in try !(x - 1 ... x + 1).contains { try ink($0, y) } }
+    let left = Int(((padding + Double(horizontal.start) * cellWidth) * scale).rounded())
+    let right = Int(((padding + Double(horizontal.end) * cellWidth) * scale).rounded())
+    let rowTop = Int((padding + Double(horizontal.row) * cellHeight) * scale)
+    let rowBottom = Int((padding + Double(horizontal.row + 1) * cellHeight) * scale)
+    // One-pixel strokes may occupy either neighboring pixel after raster rounding.
+    // Require a continuous scanline within the source border row, independently of that phase.
+    var horizontalGaps = right - left + 2
+    for y in rowTop ..< rowBottom {
+      let gaps = try ((left - 1) ... right).count { x in try !ink(x, y) }
+      horizontalGaps = min(horizontalGaps, gaps)
+    }
+    try expect(
+      verticalGaps == 0 && horizontalGaps == 0,
+      "Screenshot borders contain gaps: vertical=\(verticalGaps), horizontal=\(horizontalGaps).",
+    )
+    print("Screenshot border pixels: vertical \(bottom - top), horizontal \(right - left); no gaps, including corner joins.")
+  }
 }
