@@ -105,7 +105,7 @@ extension WorkspacePresentation {
       }
       if filter.labels.isEmpty {
         result.text(
-          filter.labelsError.map { l10n.error($0) } ?? l10n(filter.isLoadingLabels ? "Loading…" : "No labels."),
+          filter.labelsError.map { l10n.error($0) } ?? (filter.isLoadingLabels ? loadingLabel() : l10n("No labels.")),
           in: Rect(x: x, y: listY, width: width, height: 1),
           color: filter.labelsError == nil ? palette.muted : palette.red,
         )
@@ -154,7 +154,7 @@ extension WorkspacePresentation {
       }
     }
     let message = filter.error.map { l10n.error($0) } ?? filter.message
-      .map { l10n($0) } ?? (filter.isSaving ? l10n("Loading…") : "")
+      .map { l10n($0) } ?? (filter.isSaving ? loadingLabel() : "")
     result.text(
       message,
       in: Rect(x: x, y: nameY + 4, width: width, height: 1),
@@ -205,7 +205,7 @@ extension WorkspacePresentation {
           palette: palette,
         )
       } else {
-        result.text(l10n("Loading…"), in: Rect(x: x, y: rect.y + 4, width: width, height: 1), color: palette.muted)
+        result.text(loadingLabel(), in: Rect(x: x, y: rect.y + 4, width: width, height: 1), color: palette.muted)
       }
       if review.revisionChanged {
         button(
@@ -268,7 +268,7 @@ extension WorkspacePresentation {
         let y = bottom - 3 - count + offset
         result.text(Self.anchor(comment), in: Rect(x: x, y: y, width: width - 12, height: 1), color: palette.blue)
         button(
-          "remove:\(start + offset)",
+          "remove:\(review.commentIdentities[start + offset])",
           title: l10n("Remove"),
           rect: Rect(x: x + width - 12, y: y, width: 12, height: 1),
           into: &result,
@@ -298,11 +298,13 @@ extension WorkspacePresentation {
   }
 
   func reviewScreen(_ review: ReviewFeature.State, into result: inout TerminalScreen) {
-    let x = 2
-    let width = max(1, size.width - 4)
-    let bottom = geometry.body.bottom - 1
+    let rect = geometry.review
+    pane(rect, title: l10n("Finish review"), selected: true, into: &result)
+    let x = rect.x + 2
+    let width = max(1, rect.width - 4)
+    let bottom = rect.bottom - 1
     result.text(
-      "\(l10n("Write your review")) · #\(review.item.id.number)",
+      "\(l10n("Write your review")) · #\(review.item.id.number) · " + String(review.expectedHead?.prefix(8) ?? ""),
       in: Rect(x: x, y: 2, width: width, height: 1),
       color: palette.text,
       bold: true,
@@ -338,14 +340,14 @@ extension WorkspacePresentation {
           result.text(spans.map(\.text).joined(), in: Rect(x: x, y: 9 + index, width: width, height: 1), color: palette.text)
         }
         result.scrollbar(
-          Rect(x: 0, y: 8, width: size.width, height: height + 2),
+          Rect(x: rect.x, y: 8, width: rect.width, height: height + 2),
           total: reviewPreview.lines.count,
           page: height,
           offset: reviewScroll,
           palette: palette,
         )
       } else {
-        result.text(l10n("Loading…"), in: Rect(x: x, y: 9, width: width, height: 1), color: palette.muted)
+        result.text(loadingLabel(), in: Rect(x: x, y: 9, width: width, height: 1), color: palette.muted)
       }
       if review.revisionChanged {
         button(
@@ -461,9 +463,26 @@ extension WorkspacePresentation {
         .prefix(count).enumerated()
       {
         let index = min(commentScroll, max(0, review.comments.count - count)) + visibleIndex
+        let identity = review.commentIdentities[index]
         let y = bottom - 3 - count + visibleIndex
-        result.text(Self.anchor(comment), in: Rect(x: x, y: y, width: max(1, width - 16), height: 1), color: palette.blue)
-        button("remove:\(index)", title: l10n("Remove"), rect: Rect(x: x + width - 15, y: y, width: 15, height: 1), into: &result)
+        button(
+          "draft-open:\(identity)",
+          title: compactFileName(Self.anchor(comment), width: max(1, width - 28)),
+          rect: Rect(x: x, y: y, width: max(1, width - 28), height: 1),
+          into: &result,
+        )
+        button(
+          "draft-edit:\(identity)",
+          title: l10n("Edit"),
+          rect: Rect(x: x + width - 27, y: y, width: 11, height: 1),
+          into: &result,
+        )
+        button(
+          "remove:\(identity)",
+          title: l10n("Remove"),
+          rect: Rect(x: x + width - 15, y: y, width: 15, height: 1),
+          into: &result,
+        )
       }
       button("review-preview", title: l10n("Preview"), rect: Rect(x: x, y: bottom - 2, width: width, height: 1), into: &result)
       result.text(

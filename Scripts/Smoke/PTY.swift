@@ -38,6 +38,7 @@ final class PTY: TerminalDelegate {
     cwd: URL? = nil,
     artifacts: URL,
     recordPreview: Bool = false,
+    animated: Bool = false,
   ) throws {
     self.columns = columns
     self.rows = rows
@@ -52,12 +53,14 @@ final class PTY: TerminalDelegate {
     _ = fcntl(master, F_SETFL, flags | O_NONBLOCK)
     let input = FileHandle(fileDescriptor: slave, closeOnDealloc: true)
     process.executableURL = binary
-    process.arguments = ["--stable-output", "--force-color"] + arguments + (arguments.contains("--files-view")
-      ? []
-      : [
-        "--files-view",
-        "list",
-      ])
+    let animate = animated || CommandLine.arguments.contains("--animated")
+    process
+      .arguments = (animate ? [] : ["--stable-output"]) + ["--force-color"] + arguments + (arguments.contains("--files-view")
+        ? []
+        : [
+          "--files-view",
+          "list",
+        ])
     process.standardInput = input
     process.standardOutput = input
     process.standardError = input
@@ -123,7 +126,8 @@ final class PTY: TerminalDelegate {
 
   func focusPane(_ pane: Int) throws {
     try waitUntil("keyboard pane status") { self.keyboardPane != nil }
-    let selecting = line(2).prefix(sidebarWidth).contains("Pull requests") || line(2).prefix(sidebarWidth).contains("Issues")
+    let titleWidth = columns < 100 ? columns : sidebarWidth
+    let selecting = line(1).prefix(titleWidth).contains("Pull requests") || line(1).prefix(titleWidth).contains("Issues")
     if pane == 1, !selecting {
       key("\u{1B}")
       try wait("Normal · Pull requests")
@@ -332,8 +336,10 @@ final class PTY: TerminalDelegate {
   }
 
   func activeBorder(_ pane: Int, color: UInt32 = 0xB4BEFE) -> Bool {
-    let files = (0 ..< rows).first { line($0).prefix(sidebarWidth).contains("Files ·") }.map { $0 - 1 } ?? 1
-    let position = pane == 1 ? (0, 1) : pane == 2 ? (0, files) : (sidebarWidth, 1)
+    let paneWidth = columns < 100 ? columns : sidebarWidth
+    let files = (0 ..< rows).first { line($0).prefix(paneWidth).contains("Files ·") } ?? 1
+    let content = columns < 100 ? ((0 ..< rows).first { line($0).contains("Overview") && line($0).contains("Diff") } ?? 1) : 1
+    let position = pane == 1 ? (0, 1) : pane == 2 ? (0, files) : (columns < 100 ? 0 : sidebarWidth, content)
     return terminal.getCharData(col: position.0, row: position.1)?.attribute.fg == .trueColor(
       red: UInt8(truncatingIfNeeded: color >> 16),
       green: UInt8(truncatingIfNeeded: color >> 8),

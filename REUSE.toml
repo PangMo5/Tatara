@@ -7,7 +7,19 @@ SPDX-FileCopyrightText = "2026 PangMo5 and contributors"
 SPDX-License-Identifier = "AGPL-3.0-only"
 
 [[annotations]]
-path = ["Tuist/Package.resolved", "Scripts/Smoke/Package.resolved"]
+path = ["Package.resolved", "Scripts/Smoke/Package.resolved"]
 precedence = "override"
 SPDX-FileCopyrightText = "NONE"
 SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+path = ["ThirdParty/TermLoom/Sources/**", "ThirdParty/TermLoom/LICENSE"]
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Frank Wang"
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = ["ThirdParty/TermLoom/Sources/TermLoom/Input.swift", "ThirdParty/TermLoom/Sources/TermLoom/Application.swift", "ThirdParty/TermLoom/Sources/TermLoom/TerminalSession.swift"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 PangMo5 and contributors"
+SPDX-License-Identifier = "MIT"

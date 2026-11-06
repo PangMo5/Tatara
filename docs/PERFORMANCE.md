@@ -39,11 +39,26 @@ For search and review behavior, run:
 swift Scripts/Tatara.swift smoke PATH_TO_BINARY --search-review
 ```
 
-This checks GitHub query submission, label toggles, immutable file-content search,
+This checks loaded-item search, label toggles, immutable file-content results and exact source jumps,
 combined folder diffs, existing and outdated comments, regex highlighting and n/N,
 all four palettes, and an inline range editor/preview across terminal resizes.
 It uses demo fixtures and performs no forge writes. `--features`, `--editors`, and
 `--workspace` cover the remaining navigation, editor, mouse, cache and popup flows.
+
+For the loaded-list search sequence, run a Release executable:
+
+```sh
+swift Scripts/Tatara.swift smoke PATH_TO_BINARY --list-search --dense-navigation --animated
+```
+
+This uses 100 PRs and 120 files in fresh fixture storage, types incremental regexes
+without provider reads, cancels to the original PR, resizes an active Files query,
+and repeats wrapping n/N motions. `list-search/latency.json` records synchronized
+terminal-frame feedback for query input and selected-row movement; `input.tsv`
+records synchronous Store.send work separately. Screenshot capture occurs outside
+input samples. The first file is prepared before search; subsequent matched-file
+preparation uses normal cancellation and caches. This does not measure real GitHub
+latency or guarantee compositor paint time.
 
 The live navigation mode uses the first two open PRs and first two files,
 with no forge writes. Confirm that these are the items that reproduce a report;
@@ -84,10 +99,39 @@ Real API timings vary and may hit the persistent cache. Treat this as runtime
 verification, not a controlled before/after benchmark. Captures can contain
 private source text; `.artifacts` is ignored by Git.
 
+## Loading animation
+
+`swift Scripts/Tatara.swift smoke PATH_TO_BINARY --loading` holds real fixture
+responses behind a FIFO and checks animated poses, bootstrap cancellation,
+reduced-motion/stable/accessibility flags, ASCII/no-color output, resizing,
+immediate keyboard feedback and idle redraw shutdown. Screenshots and input
+samples are recorded under `.artifacts/swift-pty/loading/`. Its input samples
+measure query-entry feedback while the initial item-list request remains blocked.
+Screenshot capture is separate from those input samples.
+
+The PTY helper normally passes `--stable-output`. Add `--animated` to an existing
+navigation or profile command to exercise normal loading animation. Compare
+older/newer Release binaries sequentially, with identical flags and fresh fixture
+caches; do not include compilation or screenshot recording in timing runs.
+
 Current TermLoom runs use `TATARA_INPUT_TRACE` for reducer timing and the PTY's
 synchronized output timestamps for visible completion. Use `--no-diagnostics`
 for timing runs without tracing. `SWIFTTUI_DIAGNOSTICS` applies only to archived
 SwiftTUI executables; it is not a TermLoom setting.
+
+To separate initial metadata readiness, two cold immutable file reads and a
+memory-cache revisit on the same live PR, use:
+
+```sh
+swift Scripts/Tatara.swift smoke PATH_TO_BINARY --read-probe PATH_TO_REPOSITORY --repo OWNER/REPO --item NUMBER --label current
+```
+
+This creates isolated application data/cache directories and performs no writes
+to the forge. Compare older/newer Release executables sequentially; provider data
+can still change between runs. Results live in `read-probe-LABEL/latency.json`.
+The initial list/overview events are relative to process launch; file events
+measure selection through the completed current document. Failed probes may
+capture private terminal text in ignored artifacts; keep it out of public reports.
 
 The functional `--workspace` case also checks cold-to-warm process reuse. Both
 processes explicitly open the same initial file and wait for its path, source

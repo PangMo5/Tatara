@@ -20,7 +20,7 @@ struct TataraCommand: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     commandName: "tatara",
     abstract: "A structural code review workspace for your terminal.",
-    version: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "development",
+    version: TataraVersion.current,
   )
 
   @Option(name: .shortAndLong, help: "Repository in OWNER/REPO format.")
@@ -39,6 +39,8 @@ struct TataraCommand: AsyncParsableCommand {
   var sidebarWidth: Int?
   @Option(help: "Wrap diff lines: on or off (toggle with w).")
   var wrap: String?
+  @Flag(help: "Open the pull request associated with the current directory's Git branch.")
+  var current = false
   @Flag(help: "Explore synthetic review data without a GitHub account.")
   var demo = false
 
@@ -52,10 +54,16 @@ struct TataraCommand: AsyncParsableCommand {
   var accessible = false
   @Flag(help: "Follow pane focus with the terminal cursor.")
   var cursorFollowsFocus = false
-  @Flag(help: "Suppress motion (Tatara uses no animated transitions).")
+  @Flag(help: "Keep loading artwork still and suppress motion.")
   var reduceMotion = false
-  @Flag(help: "Suppress motion for captures (Tatara uses no animated transitions).")
+  @Flag(help: "Keep loading artwork still for stable captures.")
   var stableOutput = false
+
+  mutating func validate() throws {
+    if current, repo != nil {
+      throw ValidationError("--current uses the repository in the current directory; omit --repo.")
+    }
+  }
 
   mutating func run() async throws {
     let workspace = try await TerminalWorkspace(options: self)
@@ -66,7 +74,7 @@ struct TataraCommand: AsyncParsableCommand {
 // MARK: - TerminalWorkspace
 
 @MainActor @Observable
-final class TerminalWorkspace: TerminalApplication {
+final class TerminalWorkspace: TerminalApplication, PeriodicallyRedrawingTerminalApplication {
 
   // MARK: Lifecycle
 
@@ -83,6 +91,7 @@ final class TerminalWorkspace: TerminalApplication {
   let options: TataraCommand
   var store: StoreOf<WorkspaceFeature>?
   var failure: String?
+  var bootstrapPreferences = Preferences()
   var size: Size
   var focusedControl: ControlID?
   var fields = [String: TextFieldState]()
@@ -94,10 +103,34 @@ final class TerminalWorkspace: TerminalApplication {
   @ObservationIgnored var previewTask: Task<Void, Never>?
   @ObservationIgnored var previewGeneration = 0
 
+  var needsPeriodicRedraw: Bool {
+    guard !options.reduceMotion, !options.stableOutput, !options.accessible, failure == nil else { return false }
+    return store.map(ForgeLoading.isActive) ?? true
+  }
+
+  var loadingFrame: Int {
+    needsPeriodicRedraw ? ForgeLoading.frame(elapsed: ProcessInfo.processInfo.systemUptime - loadingOrigin) : 0
+  }
+
   var body: TerminalScreen {
     guard let store else {
-      var screen = TerminalScreen()
-      screen.text(failure ?? "Tatara · Loading…", in: Rect(origin: .init(x: 1, y: 1), size: size))
+      var screen = TerminalScreen(ascii: options.ascii)
+      if let failure {
+        screen.text(failure, in: Rect(origin: .init(x: 1, y: 1), size: size))
+      } else {
+        ForgeLoading.draw(
+          in: Rect(size: size),
+          message: Localization(language: bootstrapPreferences.language)("Loading…"),
+          frame: loadingFrame,
+          ascii: options.ascii,
+          palette: Palette(
+            bootstrapPreferences.theme,
+            noColor: options.noColor || (!options.forceColor && ProcessInfo.processInfo.environment["NO_COLOR"] != nil),
+          ),
+          brand: true,
+          into: &screen,
+        )
+      }
       return screen
     }
     return WorkspacePresentation(
@@ -119,6 +152,7 @@ final class TerminalWorkspace: TerminalApplication {
         store.preferences.theme,
         noColor: options.noColor || (!options.forceColor && ProcessInfo.processInfo.environment["NO_COLOR"] != nil),
       ),
+      loadingFrame: loadingFrame,
     )
     .screen()
   }
@@ -131,12 +165,16 @@ final class TerminalWorkspace: TerminalApplication {
     )
   }
 
+  var usesInlineReview: Bool {
+    store?.reviewLocation != nil && geometry.canShowInlineReview
+  }
+
   var reviewPreviewHeight: Int {
-    store?.reviewLocation == nil ? max(1, size.height - 14) : max(1, (store?.reviewPanelHeight ?? 9) - 7)
+    usesInlineReview ? max(1, (store?.reviewPanelHeight ?? 9) - 7) : max(1, size.height - 14)
   }
 
   var reviewCommentCapacity: Int {
-    if store?.reviewLocation == nil {
+    if !usesInlineReview {
       geometry.reviewCommentCapacity
     } else {
       max(
@@ -198,8 +236,9 @@ final class TerminalWorkspace: TerminalApplication {
   func updateViewport() {
     guard let store else { return }
     store.send(.viewportChanged(width: geometry.content.width - 2, height: max(1, geometry.content.height - 3)))
+    store.send(.popupViewportChanged(width: max(1, geometry.popup.width - 4), height: max(1, geometry.popup.height - 9)))
     store.send(.helpViewportChanged(max(1, geometry.popup.height - 5)))
-    store.send(.sidebarViewportChanged(items: max(1, geometry.items.height - 3), files: max(1, geometry.files.height - 3)))
+    store.send(.sidebarViewportChanged(items: max(1, geometry.items.height - 2), files: max(1, geometry.files.height - 2)))
   }
 
   func update(_ event: TerminalEvent) async -> ApplicationUpdate {
@@ -226,6 +265,16 @@ final class TerminalWorkspace: TerminalApplication {
     }
     if store.filterEditor != nil || store.review != nil || store.commentEditor != nil {
       return handleEditor(event)
+    }
+    if let search = store.fileSearch {
+      if case .key(let press) = event {
+        store.send(.fileSearch(.keyPressed(Self.keyName(press))))
+      }
+      if case .paste(let text) = event, search.isEditing {
+        for character in TerminalText.sanitize(text)
+          .replacing("\n", with: " ") { store.send(.fileSearch(.keyPressed(String(character)))) }
+      }
+      return .redraw
     }
     if case .mouse(let mouse) = event {
       handleMouse(mouse)
@@ -280,10 +329,13 @@ final class TerminalWorkspace: TerminalApplication {
     reviewPreview = nil
     guard let review = store?.review else { return }
     let generation = previewGeneration
-    let width = max(1, store?.reviewLocation == nil ? size.width - 4 : geometry.content.width - 4)
+    let width = max(1, usesInlineReview ? geometry.content.width - 4 : geometry.review.width - 4)
     let body = review.body
     let comments = review.comments
     let item = review.item.id
+    let head = review.expectedHead
+    let mergeBase = review.expectedMergeBase
+    let event = review.event
     previewTask = Task {
       do {
         let document = try await Self.preparePreview(body: body, comments: comments, width: width)
@@ -292,6 +344,10 @@ final class TerminalWorkspace: TerminalApplication {
           generation == previewGeneration,
           let current = store?.review,
           current.item.id == item,
+          current.expectedHead == head,
+          current.expectedMergeBase == mergeBase,
+          current.event == event,
+          current.isConfirming || current.revisionChanged,
           current.body == body,
           current.comments == comments
         else { return }
@@ -302,6 +358,8 @@ final class TerminalWorkspace: TerminalApplication {
   }
 
   // MARK: Private
+
+  @ObservationIgnored private let loadingOrigin = ProcessInfo.processInfo.systemUptime
 
   @ObservationIgnored private var appearance: StoreTask?
 
@@ -355,6 +413,7 @@ final class TerminalWorkspace: TerminalApplication {
         guard let value = Language(rawValue: raw) else { throw TataraError(.configuration, detail: "Unknown language: \(raw)") }
         preferences.language = value
       }
+      bootstrapPreferences = preferences
       let adapter = GitHubAdapter()
       let repository: RepositoryID =
         if options.demo {
@@ -365,6 +424,9 @@ final class TerminalWorkspace: TerminalApplication {
           try await adapter.detectRepository(host: options.host)
         }
       let cache: CacheClient
+      async let discoveredGit: LocalGitReader = options.demo
+        ? .disabled
+        : LocalGitReader.discover(repository: repository)
       if options.demo {
         cache = .disabled
       } else {
@@ -372,7 +434,8 @@ final class TerminalWorkspace: TerminalApplication {
         let storage = try await PersistentCache.bootstrapDatabase()
         cache = storage.client.scoped(to: "\(repository.forge.rawValue):\(repository.host):\(account)")
       }
-      let forge = options.demo ? DemoData.client(repository) : GitHubAdapter(cache: cache).client
+      let localGit = try await discoveredGit
+      let forge = options.demo ? DemoData.client(repository) : GitHubAdapter(cache: cache, localGit: localGit).client
       let diff = Difftastic(forge: forge, cache: cache).client
       let presets = try await FilterPresetStore.open()
       try Task.checkCancellation()
@@ -381,7 +444,20 @@ final class TerminalWorkspace: TerminalApplication {
         preferences: preferences,
         strings: LocalizedStrings.values[preferences.language.rawValue] ?? [:],
       )
-      initialState.isSelectingItems = true
+      initialState.isSelectingItems = !options.current
+      if options.current {
+        let item: ForgeItem
+        if options.demo {
+          guard let demoItem = try await forge.list(repository, .pullRequest, 1).items.first else { throw TataraError(
+            .unavailable,
+            detail: "Demo has no PR.",
+          ) }
+          item = demoItem
+        } else {
+          item = try await adapter.currentPullRequest(repository)
+        }
+        initialState.initialItem = item
+      }
       let workspace = Store(initialState: initialState) { WorkspaceFeature() } withDependencies: {
         $0[ForgeClient.self] = forge
         $0[DiffClient.self] = diff

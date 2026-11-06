@@ -10,6 +10,7 @@ import TataraKit
 import TataraSystem
 import TermLoom
 import Testing
+@testable import TataraTUI
 
 // MARK: - CommentWriteCalls
 

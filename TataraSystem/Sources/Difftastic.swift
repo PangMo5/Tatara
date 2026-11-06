@@ -45,6 +45,7 @@ public actor Difftastic {
       request.file.previousPath ?? "",
       request.file.status,
       "json:context-3:strip-cr-off",
+      request.revealing.map { "reveal:\($0.side.rawValue):\($0.line)" } ?? "",
       engineVersion ?? "",
     ]), as: UTF8.self)
     if var cached = renders[key] {
@@ -132,7 +133,13 @@ public actor Difftastic {
         oldURL.path,
         newURL.path,
       ])
-      let parsed = try ReviewDiff.decode(output.output, before: beforeText, after: afterText, path: file.path)
+      let parsed = try ReviewDiff.decode(
+        output.output,
+        before: beforeText,
+        after: afterText,
+        path: file.path,
+        revealing: request.revealing,
+      )
       document = ReviewDiff(
         path: file.path,
         language: parsed.language,

@@ -44,8 +44,9 @@ public struct CommandRunner: Sendable {
         options.createSession = true
         options.qualityOfService = .utility
         options.teardownSequence = [.gracefulShutDown(toProcessGroup: true, allowedDurationToNextStep: .milliseconds(250))]
+        let command: Executable = executable.contains("/") ? .path(.init(executable)) : .name(executable)
         let result = try await Subprocess.run(
-          .name(executable),
+          command,
           arguments: Arguments(arguments),
           environment: .inherit.updating([
             "GH_PROMPT_DISABLED": "1",

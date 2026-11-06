@@ -24,7 +24,20 @@ struct Smoke {
         guard let i = args.firstIndex(of: flag), args.indices.contains(i + 1) else { return fallback }
         return Int(args[i + 1]) ?? fallback
       }
-      if let index = args.firstIndex(of: "--metadata-live"), args.indices.contains(index + 1) {
+      if
+        let index = args.firstIndex(of: "--read-probe"),
+        args.indices.contains(index + 1),
+        let repoIndex = args.firstIndex(of: "--repo"),
+        args.indices.contains(repoIndex + 1)
+      {
+        let label = args.firstIndex(of: "--label").map { args.indices.contains($0 + 1) ? args[$0 + 1] : "current" } ?? "current"
+        try readProbe(
+          binary,
+          directory: URL(fileURLWithPath: args[index + 1]),
+          repository: args[repoIndex + 1],
+          artifacts: artifacts.appendingPathComponent("read-probe-" + label),
+        )
+      } else if let index = args.firstIndex(of: "--metadata-live"), args.indices.contains(index + 1) {
         let t = try PTY(
           binary: binary,
           arguments: ["--repo", args[index + 1], "--language", "en"],
@@ -44,6 +57,8 @@ struct Smoke {
         t.key("q")
         try t.finish()
         print("Swift PTY: live GitHub list and rich detail metadata passed; no forge writes.")
+      } else if args.contains("--loading") {
+        try loading(binary, artifacts: artifacts.appendingPathComponent("loading"))
       } else if args.contains("--picker-benchmark") {
         try pickerBenchmark(binary, artifacts: artifacts.appendingPathComponent("picker-benchmark"))
       } else if args.contains("--reading-workspace") {
@@ -76,6 +91,12 @@ struct Smoke {
         try searchReview(binary, artifacts: artifacts.appendingPathComponent("search-review"))
       } else if args.contains("--editors") {
         try editors(binary, artifacts: artifacts.appendingPathComponent("editors"))
+      } else if args.contains("--stacked") {
+        try stackedWorkspace(binary, artifacts: artifacts.appendingPathComponent("stacked"))
+      } else if args.contains("--draft-review") {
+        try draftReview(binary, artifacts: artifacts.appendingPathComponent("draft-review"))
+      } else if args.contains("--review-experience") {
+        try reviewExperience(binary, artifacts: artifacts.appendingPathComponent("review-experience"))
       } else if args.contains("--features") {
         try features(binary, artifacts: artifacts.appendingPathComponent("features"))
       } else if let index = args.firstIndex(of: "--live-navigation"), args.indices.contains(index + 1) {
@@ -123,6 +144,15 @@ struct Smoke {
           columns: size("--columns", 176),
           rows: size("--rows", 40),
         )
+      } else if args.contains("--list-search") {
+        try workspace(
+          binary,
+          stress: true,
+          artifacts: artifacts.appendingPathComponent("list-search"),
+          profile: true,
+          columns: 320,
+          rows: 64,
+        )
       } else if let index = args.firstIndex(of: "--navigation"), args.indices.contains(index + 1) {
         try workspace(
           binary,
@@ -155,6 +185,177 @@ struct Smoke {
       FileHandle.standardError.write(Data("\(error)\n".utf8))
       exit(1)
     }
+  }
+
+  static func waitForFixtureResponse(in directory: URL) throws {
+    let released = directory.appendingPathComponent("released")
+    if FileManager.default.fileExists(atPath: released.path) {
+      return
+    }
+    // Each request owns a FIFO; the release latch also covers replacement requests.
+    let pipe = directory.appendingPathComponent("\(getpid()).fifo")
+    try expect(mkfifo(pipe.path, 0o600) == 0, "Could not create fixture response pipe.")
+    let descriptor = Darwin.open(pipe.path, O_RDWR | O_NONBLOCK)
+    try expect(descriptor >= 0, "Could not open fixture response pipe.")
+    defer { Darwin.close(descriptor) }
+    try Data().write(to: directory.appendingPathComponent("waiting"))
+    if !FileManager.default.fileExists(atPath: released.path) {
+      var event = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+      try expect(
+        Darwin.poll(&event, 1, 30_000) > 0 && event.revents & Int16(POLLIN) != 0,
+        "Fixture response was not released before its deadline.",
+      )
+      var token: UInt8 = 0
+      try expect(Darwin.read(descriptor, &token, 1) == 1, "Fixture response gate was not released.")
+    }
+  }
+
+  static func loading(_ binary: URL, artifacts: URL) throws {
+    let fm = FileManager.default
+    let fixture = fm.temporaryDirectory.appendingPathComponent("tatara-loading-\(UUID())")
+    try fm.createDirectory(at: fixture, withIntermediateDirectories: false)
+    defer { try? fm.removeItem(at: fixture) }
+    try fm.createSymbolicLink(
+      at: fixture.appendingPathComponent("gh"),
+      withDestinationURL: URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL,
+    )
+    try fm.createSymbolicLink(
+      at: fixture.appendingPathComponent("difft"),
+      withDestinationURL: URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL,
+    )
+    let variants: [(name: String, arguments: [String], stage: String, animated: Bool)] = [
+      ("bootstrap", [], "bootstrap", true),
+      ("items", [], "items", true),
+      ("diff", [], "diff", true),
+      ("reduce-motion", ["--reduce-motion"], "items", false),
+      ("stable", ["--stable-output"], "items", false),
+      ("accessible", ["--accessible"], "items", false),
+      ("ascii", ["--ascii", "--no-color"], "items", true),
+    ]
+    var inputTimes = [Double]()
+    for variant in variants {
+      let gate = fixture.appendingPathComponent(variant.name)
+      try fm.createDirectory(at: gate, withIntermediateDirectories: false)
+      let t = try PTY(
+        binary: binary,
+        arguments: ["--repo", "example/reviews", "--language", "en"] + variant.arguments,
+        columns: variant.stage == "diff" ? 176 : 90,
+        rows: variant.stage == "diff" ? 40 : 28,
+        environment: [
+          "PATH": fixture.path + ":" + (ProcessInfo.processInfo.environment["PATH"] ?? ""),
+          "TATARA_SMOKE_FIXTURE": fixture.path,
+          "TATARA_SMOKE_LOADING_GATE": gate.path,
+          "TATARA_SMOKE_LOADING_STAGE": variant.stage,
+          "XDG_DATA_HOME": gate.appendingPathComponent("data").path,
+          "XDG_CACHE_HOME": gate.appendingPathComponent("cache").path,
+        ],
+        artifacts: artifacts.appendingPathComponent(variant.name),
+        animated: true,
+      )
+      defer { t.close() }
+      let hasArtwork: (String) -> Bool = { text in
+        if variant.stage != "diff", !text.contains("t a t a r a") {
+          return false
+        }
+        if variant.name == "ascii" {
+          return text.contains("#####")
+        }
+        let range = 0x2580 ... 0x259F
+        let artwork = variant.stage == "diff"
+          ? (2 ..< 9).map { String(t.line($0).dropFirst(t.columns - 1 - 18).prefix(18)) }.joined()
+          : text
+        return artwork.unicodeScalars.contains { range.contains(Int($0.value)) }
+      }
+      if variant.stage == "diff" {
+        try t.wait("Long overview")
+        try t.wait("Ready")
+        t.key("\r")
+        try t.wait("Normal · Files")
+      }
+      try t.waitUntil("held loading request") { fm.fileExists(atPath: gate.appendingPathComponent("waiting").path) }
+      try t.waitUntil("forge artwork") { hasArtwork(t.text) }
+      try t.wait("Loading")
+      if variant.stage == "diff" {
+        try expect(
+          t.text.contains("Preview") && t.text.contains("Created"),
+          "Diff loading replaced its identified overview preview.",
+        )
+      }
+      if variant.animated {
+        var pictures = Set<String>()
+        var previous = ""
+        var captures = [[String: Any]]()
+        for index in 0 ..< 8 {
+          try t.waitUntil("hammer pose \(index)") { t.text != previous }
+          previous = t.text
+          pictures.insert(t.text)
+          if variant.name == "items" || variant.stage == "diff" {
+            try t.screenshot("frame-\(index)")
+            captures.append(["file": "frame-\(index).png", "uptime": ProcessInfo.processInfo.systemUptime])
+          }
+        }
+        try expect(pictures.count >= (variant.stage == "diff" ? 4 : 5), "Loading hammer did not animate.")
+        if !captures.isEmpty {
+          try JSONSerialization.data(withJSONObject: captures, options: [.prettyPrinted, .sortedKeys])
+            .write(to: artifacts.appendingPathComponent(variant.name).appendingPathComponent("frames.json"), options: .atomic)
+        }
+      } else {
+        let picture = t.text
+        t.read(for: 0.6)
+        try expect(t.text == picture, "Motion suppression did not hold the hammer still.")
+      }
+      try t.screenshot("loading")
+      if variant.stage == "bootstrap" {
+        t.key("q")
+        try t.finish()
+        continue
+      }
+      if variant.animated {
+        for _ in 0 ..< 12 {
+          let start = ProcessInfo.processInfo.systemUptime
+          t.key(variant.stage == "diff" ? "\t" : "/")
+          try t.wait(variant.stage == "diff" ? "Normal · Diff" : "Find loaded items (regex)")
+          inputTimes.append((ProcessInfo.processInfo.systemUptime - start) * 1000)
+          t.key(variant.stage == "diff" ? "\u{1B}[Z" : "\u{1B}")
+          try t.wait(variant.stage == "diff" ? "Normal · Files" : "Normal · Pull requests")
+        }
+        t.resize(columns: variant.stage == "diff" ? 180 : 104, rows: 32)
+        try t.waitUntil("forge artwork") { hasArtwork(t.text) }
+      }
+      try Data([1]).write(to: gate.appendingPathComponent("released"), options: .atomic)
+      for pipe in try fm.contentsOfDirectory(at: gate, includingPropertiesForKeys: nil) where pipe.pathExtension == "fifo" {
+        let descriptor = Darwin.open(pipe.path, O_RDWR | O_NONBLOCK)
+        try expect(descriptor >= 0, "Could not open loading response pipe.")
+        var token: UInt8 = 1
+        let count = Darwin.write(descriptor, &token, 1)
+        Darwin.close(descriptor)
+        try expect(count == 1, "Could not release loading response.")
+      }
+      try t.wait("Long overview")
+      try t.wait("Ready")
+      try expect(!hasArtwork(t.text), "Loading artwork outlived its request.")
+      var idleFrames = 0
+      t.onCompletedFrame = { _ in idleFrames += 1 }
+      t.read(for: 0.6)
+      t.onCompletedFrame = nil
+      try expect(idleFrames == 0, "Loading animation continued redrawing while idle.")
+      try t.screenshot("ready")
+      t.key("q")
+      try t.finish()
+    }
+    let sorted = inputTimes.sorted()
+    let latency: [String: Any] = [
+      "samples": sorted.count,
+      "median_ms": sorted[sorted.count / 2],
+      "p95_ms": sorted[min(sorted.count - 1, Int(Double(sorted.count) * 0.95))],
+      "max_ms": sorted.last!,
+      "fixture": "Held PR-list and diff responses; query entry/tab focus, Unicode/ASCII/no-color, 90x28 and 176x40.",
+    ]
+    try JSONSerialization.data(withJSONObject: latency, options: [.prettyPrinted, .sortedKeys])
+      .write(to: artifacts.appendingPathComponent("latency.json"), options: .atomic)
+    print(
+      "Swift PTY: forge loading animation, bootstrap cancellation, motion suppression, ASCII, completion and idle redraw stop passed."
+    )
   }
 
   static func demo(_ binary: URL, artifacts: URL) throws {
@@ -643,8 +844,9 @@ struct Smoke {
     try t.wait("Ready")
     t.key("/label:bug\r")
     try t.wait("No matches.")
-    try t.wait("Filter · Pull requests")
+    try t.wait("Find · Pull requests")
     t.key("\u{1B}")
+    try t.wait("Normal · Pull requests")
     try t.wait("Keep review navigation")
     try t.wait("Ready")
     t.key("f")
@@ -662,13 +864,24 @@ struct Smoke {
     t.key("\u{1B}")
     try t.wait("Normal · Pull requests")
     try t.focusPane(2)
-    t.key("/^struct Selection\r")
-    try t.wait("Selection.swift:1")
-    try t.wait("Files · 1/2")
-    try t.wait("Ready")
+    t.key("g/^struct Selection\r")
+    try t.wait("Search file contents")
+    try t.wait("Sources/Selection.swift:1")
+    try t.wait("1/1")
+    try expect(t.text.contains("Files · 2/2"), "Content search filtered the Files tree.")
     try t.snapshot("file-content-search")
-    t.key("\u{1B}")
-    try t.wait("Normal · Files")
+    try t.screenshot("file-content-search")
+    t.resize(columns: 96, rows: 28)
+    try t.wait("Sources/Selection.swift:1")
+    try t.wait("Open match")
+    try t.screenshot("file-content-search-narrow")
+    t.resize(columns: 176, rows: 40)
+    try t.wait("Sources/Selection.swift:1")
+    t.key("\r")
+    try t.wait("Normal · Diff")
+    try t.wait("Ready")
+    try expect(t.cursorLine() == 1, "Content search opened the wrong source line.")
+    try t.focusPane(2)
     t.key("h")
     try t.wait("Sources/ReviewQueue.swift")
     t.wheel(column: 100, row: 15, down: true, count: 8)
@@ -720,21 +933,24 @@ struct Smoke {
     try t.wait("RIGHT · 5–6")
     try t.wait("Ready")
     try t.click("Add comment to review")
-    try t.wait("Preview · 1")
+    try t.wait("Normal · Diff")
+    try t.wait("Pending review · RIGHT:5–6")
+    t.key("R")
+    try t.wait("Write your review")
     try t.click("Preview")
     try t.wait("This will be posted to GitHub.")
     try t.wait("In-place draft.")
-    try expect(t.text.contains("return files[index + 1]"), "Preview replaced the source pane.")
+    try expect(t.text.contains("Files") && t.text.contains("Current pull request"), "Review preview lost the workspace context.")
     try t.snapshot("inline-preview")
     t.key("\u{1B}")
     try t.wait("Normal · Diff")
     try t.wait("Ready")
-    try t.wait("@Draft · RIGHT:5–6")
+    try t.wait("Pending review · RIGHT:5–6")
     try expect(t.cursorLine() == 6, "Adding a comment changed the source cursor.")
     t.key("q")
     try t.finish()
     print(
-      "Swift PTY: GitHub query, label toggles, source-content grep, folder diff, existing comments, regex n/N, four palettes, inline editing and resized preview passed; no forge writes."
+      "Swift PTY: loaded-item search, label toggles, content results with exact-line jump, folder diff, existing comments, regex n/N, four palettes, inline editing and resized preview passed; no forge writes."
     )
   }
 
@@ -801,6 +1017,261 @@ struct Smoke {
     )
   }
 
+  static func stackedWorkspace(_ binary: URL, artifacts: URL) throws {
+    let t = try PTY(
+      binary: binary,
+      arguments: ["--demo", "--language", "en", "--theme", "mocha", "--files-view", "tree"],
+      columns: 80,
+      rows: 30,
+      environment: profilingEnvironment(artifacts),
+      artifacts: artifacts,
+    )
+    defer { t.close() }
+    try t.wait("Normal · Pull requests")
+    try t.wait("Ready")
+    let preparationStart = ProcessInfo.processInfo.systemUptime
+    try t.focusPane(2)
+    try t.wait("Normal · Files")
+    try t.wait("Ready")
+    let firstFileReady = (ProcessInfo.processInfo.systemUptime - preparationStart) * 1000
+    var focusTimes = [Double]()
+    func contentTop() -> Int {
+      1 + (t.rows - 3) / 2
+    }
+    func bothPanels() -> Bool {
+      t.line(1).contains("Files") && t.line(contentTop()).contains("Diff")
+    }
+    for (columns, rows) in [(80, 30), (96, 28), (60, 16), (99, 40)] {
+      t.resize(columns: columns, rows: rows)
+      try t.waitUntil("equal stacked panels") { bothPanels() }
+      try t.focusPane(2)
+      try expect(t.activeBorder(2), "Files focus is missing from the upper panel.")
+      try t.focusPane(3)
+      try expect(t.activeBorder(3) && bothPanels(), "Changing focus replaced a stacked panel.")
+      try t.click("ReviewQueue.swift")
+      try t.wait("Normal · Files")
+      try expect(bothPanels(), "Clicking Files replaced the Diff panel.")
+      t.key("\r")
+      try t.wait("Normal · Diff")
+      try t.wait("Ready")
+      try expect(bothPanels(), "Opening a file hid the Files panel.")
+      try t.screenshot("\(columns)x\(rows)")
+    }
+    for _ in 0..<24 {
+      let next = t.keyboardPane == 3 ? 2 : 3
+      let start = ProcessInfo.processInfo.systemUptime
+      t.key("\t")
+      try t.waitUntil("stacked focus feedback") { t.keyboardPane == next && bothPanels() }
+      focusTimes.append((ProcessInfo.processInfo.systemUptime - start) * 1000)
+    }
+    t.resize(columns: 96, rows: 28)
+    try t.waitUntil("resized stacked content") { bothPanels() }
+    try t.wait("Ready")
+    t.key("gg")
+    try t.waitUntil("first source line") { t.cursorLine() == 2 }
+    func sourceIdentity() -> String? {
+      let text = t.line(-2)
+      let pattern = try! NSRegularExpression(pattern: #"(?:LEFT|RIGHT) · [0-9]+"#)
+      guard let match = pattern.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)), let range = Range(
+        match.range,
+        in: text,
+      ) else { return nil }
+      return String(text[range])
+    }
+    let source = sourceIdentity()
+    try expect(source != nil, "Source identity is missing before the wheel input.")
+    t.wheel(column: 20, row: contentTop() + 4, down: true, count: 4)
+    try t.waitUntil("Diff wheel moved its viewport") { position(t) > 1 }
+    try t.snapshot("after-diff-wheel")
+    try expect(sourceIdentity() == source && t.keyboardPane == 3 && bothPanels(), "Diff wheel changed source identity or focus.")
+    t.wheel(column: 20, row: 4, down: true, count: 2)
+    t.read(for: 0.1)
+    try expect(
+      sourceIdentity() == source && t.keyboardPane == 3 && bothPanels(),
+      "Files wheel changed Diff focus or source cursor.",
+    )
+    t.key("gg")
+    try t.waitUntil("source cursor restored") { t.cursorLine() == 2 }
+    for _ in 0..<6 {
+      guard let line = t.cursorLine(), line != 4 else { break }
+      t.key("j")
+      try t.waitUntil("review line") { t.cursorLine() != line }
+    }
+    try expect(t.cursorLine() == 4, "Could not reach the reviewable context line.")
+    t.key("c")
+    try t.wait("Write your review")
+    t.key("Stacked layout draft.")
+    try t.wait("Stacked layout draft.")
+    t.resize(columns: 80, rows: 20)
+    try t.wait("Stacked layout draft.")
+    try t.wait("Add comment to review")
+    try t.screenshot("small-composer")
+    try t.click("Add comment to review")
+    try t.wait("Normal · Diff")
+    try t.waitUntil("stacked workspace restored") { bothPanels() }
+    t.resize(columns: 176, rows: 40)
+    try t.wait("Current pull request")
+    try t.wait("Ready")
+    try expect(t.cursorLine() == 4, "Wide resize changed the source cursor.")
+    t.key("q")
+    try t.finish()
+    let sorted = focusTimes.sorted()
+    let report: [String: Any] = try [
+      "samples_ms": focusTimes,
+      "p95_ms": sorted[Int(ceil(Double(sorted.count) * 0.95)) - 1],
+      "max_ms": sorted.last!,
+      "first_file_ready_ms": firstFileReady,
+      "binary_sha256": SHA256.hash(data: Data(contentsOf: binary)).map { String(format: "%02x", $0) }.joined(),
+    ]
+    try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(
+      to: artifacts.appendingPathComponent("latency.json"),
+      options: .atomic,
+    )
+    print(
+      "Swift PTY: equal stacked Files/Diff, focus, mouse, wheel ownership, minimum size, composer resize and wide restoration passed; no forge writes."
+    )
+  }
+
+  static func draftReview(_ binary: URL, artifacts: URL) throws {
+    let fm = FileManager.default
+    let fixture = fm.temporaryDirectory.appendingPathComponent("tatara-draft-review-\(UUID())")
+    try fm.createDirectory(at: fixture, withIntermediateDirectories: false)
+    defer { try? fm.removeItem(at: fixture) }
+    let tool = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
+    for name in ["gh", "difft"] { try fm.createSymbolicLink(at: fixture.appendingPathComponent(name), withDestinationURL: tool) }
+    let t = try PTY(
+      binary: binary,
+      arguments: ["--repo", "example/reviews", "--files-view", "tree", "--language", "en"],
+      environment: [
+        "PATH": fixture.path + ":" + (ProcessInfo.processInfo.environment["PATH"] ?? ""),
+        "TATARA_SMOKE_FIXTURE": fixture.path,
+        "TATARA_SMOKE_DRAFT": "1",
+        "XDG_DATA_HOME": fixture.appendingPathComponent("data").path,
+        "XDG_CACHE_HOME": fixture.appendingPathComponent("cache").path,
+      ],
+      artifacts: artifacts,
+    )
+    defer { t.close() }
+    try t.wait("Ready")
+    try t.focusPane(2)
+    t.key("gg")
+    try t.waitUntil("root cursor") { t.line(-2).contains("Normal · Files") }
+    t.key("c")
+    try t.wait("Select a file and press Enter to open Diff.")
+    t.key("G")
+    try t.wait("File11.swift")
+    t.key("\r")
+    try t.wait("Normal · Diff")
+    try t.wait("Ready")
+    for _ in 0..<4 {
+      guard let line = t.cursorLine(), line != 2 else { break }
+      t.key(line < 2 ? "j" : "k")
+      try t.waitUntil("review source line") { t.cursorLine() != line }
+    }
+    try expect(t.cursorLine() == 2, "Draft fixture did not select its forge patch line.")
+    t.key("c")
+    try t.wait("Write your review")
+    t.key("Draft PR inline comment.")
+    try t.wait("Draft PR inline comment.")
+    try t.screenshot("composer")
+    try t.click("Add comment to review")
+    try t.wait("Normal · Diff")
+    try t.wait("Draft PR inline comment.")
+    t.key("R")
+    try t.wait("Write your review")
+    try t.click("Preview")
+    try t.wait("This will be posted to GitHub.")
+    try t.wait("Draft PR inline comment.")
+    try t.screenshot("preview")
+    t.key("\u{1B}")
+    try t.wait("Normal · Diff")
+    t.key("q")
+    try t.finish()
+    print("Swift PTY: draft PR inline entry, pending comment, review preview and visible folder hint passed; no forge writes.")
+  }
+
+  static func reviewExperience(_ binary: URL, artifacts: URL) throws {
+    let t = try PTY(
+      binary: binary,
+      arguments: ["--demo", "--current", "--language", "en", "--theme", "mocha"],
+      artifacts: artifacts,
+    )
+    defer { t.close() }
+    try t.wait("Normal · Files")
+    try t.wait("Ready")
+    try t.screenshot("summary")
+    try expect(!t.text.contains("Pull requests ·"), "Current PR startup remained on the selection screen.")
+    try t.focusPane(3)
+    t.key("gc")
+    try t.wait("Comment")
+    t.key("\r")
+    try t.waitUntil("conversation reader") { t.line(-2).contains("Conversation · #") }
+    try t.wait("Reply")
+    try t.wait("Previous implementation discussion.")
+    try t.screenshot("conversation")
+    t.key("c")
+    try t.waitUntil("reply composer") { t.line(-2).contains("Reply · #") }
+    t.key("A reply still in progress.")
+    try t.wait("A reply still in progress.")
+    t.key("\u{1B}")
+    try t.waitUntil("conversation reader") { t.line(-2).contains("Conversation · #") }
+    t.key("c")
+    try t.waitUntil("reply composer") { t.line(-2).contains("Reply · #") }
+    try t.wait("A reply still in progress.")
+    t.key("\u{1B}")
+    try t.waitUntil("conversation reader") { t.line(-2).contains("Conversation · #") }
+    t.key("\u{1B}")
+    try t.wait("Normal · Diff")
+    t.key("gc")
+    try t.waitUntil("returned to source") { !t.line(-2).contains("@reviewer") }
+    t.key("l")
+    try t.wait("RIGHT ·")
+    for _ in 0..<20 {
+      guard let line = t.cursorLine(), line != 5 else { break }
+      t.key(line < 5 ? "j" : "k")
+      try t.waitUntil("source cursor") { t.cursorLine() != line }
+    }
+    try t.wait("RIGHT · 5")
+    t.key("c")
+    try t.wait("Write your review")
+    t.key("Pending review comment.")
+    try t.wait("Pending review comment.")
+    try t.click("Add comment to review")
+    try t.wait("Normal · Diff")
+    try t.wait("Pending review · RIGHT:5")
+    try t.wait("Finish review (1)")
+    try t.screenshot("pending-comment")
+    t.key("R")
+    try t.wait("Write your review")
+    try t.click("Edit")
+    try t.wait("Pending review comment.")
+    t.key(" Updated draft.")
+    try t.wait("Updated draft.")
+    try t.click("Add comment to review")
+    try t.wait("Normal · Diff")
+    try t.wait("Finish review (1)")
+    try t.wait("Updated draft.")
+    t.resize(columns: 96, rows: 28)
+    try t.wait("ReviewQueue.swift")
+    try t.screenshot("sticky-narrow")
+    t.resize(columns: 176, rows: 40)
+    try t.wait("Ready")
+    t.key("R")
+    try t.wait("Write your review")
+    try t.click("Preview")
+    try t.wait("This will be posted to GitHub.")
+    try t.wait("Updated draft.")
+    try expect(t.text.contains("Files"), "Final review hid the file context.")
+    try t.screenshot("finish-review")
+    t.key("\u{1B}")
+    try t.wait("Normal · Diff")
+    t.key("q")
+    try t.finish()
+    print(
+      "Swift PTY: current-PR startup, comment reader/reply draft, pending edit, sticky header, compact borders and final review preview passed; no forge writes."
+    )
+  }
+
   static func features(_ binary: URL, artifacts: URL) throws {
     let state = FileManager.default.temporaryDirectory.appendingPathComponent("tatara-feature-state-\(UUID())")
     defer { try? FileManager.default.removeItem(at: state) }
@@ -849,6 +1320,9 @@ struct Smoke {
     t.key("Check this range.")
     try t.wait("Check this range.")
     try t.click("Add comment to review")
+    try t.wait("Normal · Diff")
+    try t.wait("Pending review · RIGHT:5–6")
+    t.key("R")
     try t.wait("ReviewQueue.swift:5–6")
     try t.click("Preview")
     try t.wait("This will be posted to GitHub.")
@@ -865,8 +1339,8 @@ struct Smoke {
     t.key("Old source context.")
     try t.wait("Old source context.")
     try t.click("Add comment to review")
-    try t.wait("ReviewQueue.swift:5")
-    t.key("\u{1B}")
+    try t.wait("Normal · Diff")
+    try t.wait("Pending review · LEFT:5")
     try t.wait("Normal · Diff")
     t.key("f")
     try t.wait("Filters and presets")
@@ -889,6 +1363,8 @@ struct Smoke {
       artifacts: artifacts.appendingPathComponent("reopened"),
     )
     defer { reopened.close() }
+    try reopened.wait("Normal · Pull requests")
+    try reopened.wait("Ready")
     try reopened.focusPane(2)
     try reopened.wait("Sources/ReviewQueue.swift")
     try expect(!reopened.text.contains("▾ Sources"), "List configuration still rendered a directory tree.")
@@ -898,12 +1374,87 @@ struct Smoke {
     try reopened.click("My review queue")
     try reopened.wait("▸ My review queue")
     try reopened.click("Apply")
-    try reopened.wait("Filter · Pull requests")
+    try reopened.wait("Normal · Pull requests")
     reopened.key("q")
     try reopened.finish()
     print(
       "Swift PTY: tree/list configuration, active borders, Shift-V ranges, both source sides, review preview and persistent presets passed; no forge writes."
     )
+  }
+
+  static func readProbe(_ binary: URL, directory: URL, repository: String, artifacts: URL) throws {
+    let fm = FileManager.default
+    let isolated = fm.temporaryDirectory.appendingPathComponent("tatara-read-probe-\(UUID())")
+    try fm.createDirectory(at: isolated, withIntermediateDirectories: false)
+    defer { try? fm.removeItem(at: isolated) }
+    let start = ProcessInfo.processInfo.systemUptime
+    let t = try PTY(
+      binary: binary,
+      arguments: ["--repo", repository, "--language", "en", "--wrap", "on"],
+      columns: 176,
+      rows: 40,
+      environment: [
+        "XDG_DATA_HOME": isolated.appendingPathComponent("data").path,
+        "XDG_CACHE_HOME": isolated.appendingPathComponent("cache").path,
+      ],
+      cwd: directory,
+      artifacts: artifacts,
+      animated: true,
+    )
+    defer { t.close() }
+    var events = [[String: Any]]()
+    try t.waitUntil("populated live PR list", timeout: 60) {
+      t.line(2).contains("Pull requests ·") && !t.line(2).contains("0/0")
+    }
+    events.append(["stage": "list", "ms": (ProcessInfo.processInfo.systemUptime - start) * 1000])
+    try t.waitUntil("initial live overview", timeout: 60) { t.line(-2).contains("Ready") || t.line(-2).contains("L · Load more") }
+    events.append(["stage": "overview", "ms": (ProcessInfo.processInfo.systemUptime - start) * 1000])
+    if
+      let index = CommandLine.arguments.firstIndex(of: "--item"),
+      CommandLine.arguments.indices.contains(index + 1),
+      let number = Int(CommandLine.arguments[index + 1])
+    {
+      t.key("gg")
+      for _ in 0 ..< 100 {
+        if t.selectedFixtureIndex(files: false) == number - 1 {
+          break
+        }
+        let previous = t.selectedFixtureIndex(files: false)
+        t.key("j")
+        try t.waitUntil("next live PR selection") { t.selectedFixtureIndex(files: false) != previous }
+      }
+      try expect(t.selectedFixtureIndex(files: false) == number - 1, "The pinned live PR was not in the loaded page.")
+      try t.waitUntil("pinned live PR overview", timeout: 60) {
+        t.line(-2).contains("Ready") || t.line(-2).contains("L · Load more")
+      }
+    }
+    func select(_ key: String, name: String, expectedRow: Int?) throws {
+      let previous = t.line(2)
+      let sent = ProcessInfo.processInfo.systemUptime
+      t.key(key)
+      try t.waitUntil(name, timeout: 90) {
+        t.line(2) != previous && (t.line(-2).contains("Ready") || t.line(-2).contains("L · Load more"))
+          && t.line(-2).contains("· Wrap")
+          && (expectedRow.map(t.selectedFileRow) ?? true)
+      }
+      events.append(["stage": name, "ms": (ProcessInfo.processInfo.systemUptime - sent) * 1000])
+    }
+    try select("\r", name: "first-diff", expectedRow: nil)
+    try select("j", name: "second-diff", expectedRow: 1)
+    try select("k", name: "cached-first-diff", expectedRow: 0)
+    t.key("q")
+    try t.finish()
+    let report: [String: Any] = try [
+      "binary_sha256": SHA256.hash(data: Data(contentsOf: binary)).map { String(format: "%02x", $0) }.joined(),
+      "events": events,
+      "isolated_cache": true,
+      "columns": 176,
+      "rows": 40,
+    ]
+    try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+      .write(to: artifacts.appendingPathComponent("latency.json"), options: .atomic)
+    print(String(decoding: try JSONSerialization.data(withJSONObject: events, options: [.sortedKeys]), as: UTF8.self))
+    print("Swift PTY: live cold-cache list, overview, two immutable file diffs and cached revisit passed; no forge writes.")
   }
 
   static func live(_ binary: URL, directory: URL, item: String, artifacts: URL, columns: Int = 176, rows: Int = 40) throws {
@@ -973,6 +1524,92 @@ struct Smoke {
     print("Swift PTY: live repository detection, overview, diff, focus, paging and help passed; no writes.")
   }
 
+  static func listSearch(_ t: PTY, artifacts: URL, requests: URL) throws {
+    try t.wait("Ready")
+    var samples = [[String: Any]]()
+    func typeQuery(_ query: String, files: Bool, expected: Int) throws {
+      let before = try String(contentsOf: requests, encoding: .utf8)
+      t.key("/")
+      try t.wait(files ? "Find file paths (regex)" : "Find loaded items (regex)")
+      var typed = ""
+      var lastInputAt = ProcessInfo.processInfo.systemUptime
+      for character in query {
+        typed.append(character)
+        let start = ProcessInfo.processInfo.systemUptime
+        lastInputAt = start
+        t.key(String(character))
+        try t.waitUntil("incremental query feedback") { t.line(-2).contains("/" + typed + "▏") }
+        samples.append([
+          "stage": files ? "file-query" : "pr-query",
+          "latency_ms": (ProcessInfo.processInfo.systemUptime - start) * 1000,
+        ])
+      }
+      try t
+        .waitUntil("incremental match selection") { t.selectedFixtureIndex(files: files) == expected && t.line(-2).contains("/3")
+        }
+      samples.append([
+        "stage": files ? "file-result-ready" : "pr-result-ready",
+        "latency_ms": (ProcessInfo.processInfo.systemUptime - lastInputAt) * 1000,
+      ])
+      try expect(try String(contentsOf: requests, encoding: .utf8) == before, "Incremental list search started provider work.")
+      try expect(t.text.contains(files ? "Files · 120/120" : "Pull requests · 100/100"), "Incremental search filtered its list.")
+      try t.screenshot(files ? "file-preview" : "pr-preview")
+    }
+    try typeQuery("#(10|30|50) ", files: false, expected: 9)
+    t.key("\u{1B}")
+    try t.waitUntil("cancel restores PR cursor") { t.selectedFixtureIndex(files: false) == 0 && t.line(-2).contains("Normal") }
+    try t.focusPane(2)
+    let preparationStart = ProcessInfo.processInfo.systemUptime
+    t.key("\r")
+    try t.wait("Normal · Diff")
+    try t.focusPane(2)
+    try t.wait("Ready", timeout: 60)
+    samples.append(["stage": "first-file-ready", "latency_ms": (ProcessInfo.processInfo.systemUptime - preparationStart) * 1000])
+    try typeQuery("File(10|30|50)[.]swift$", files: true, expected: 10)
+    t.resize(columns: 240, rows: 48)
+    try t.waitUntil("search survives resize") { t.selectedFixtureIndex(files: true) == 10 && t.line(-2).contains("/3") }
+    t.key("\r")
+    try t.waitUntil("search confirmed") { !t.line(-2).contains("▏") && t.line(-2).contains("Find · Files") }
+    try t.wait("Ready", timeout: 60)
+    for _ in 0..<8 {
+      for (key, expected) in [("n", 30), ("n", 50), ("n", 10), ("N", 50), ("N", 30), ("N", 10)] {
+        let start = ProcessInfo.processInfo.systemUptime
+        t.key(key)
+        try t.waitUntil("search navigation") { t.selectedFixtureIndex(files: true) == expected }
+        samples.append(["stage": "file-next-previous", "latency_ms": (ProcessInfo.processInfo.systemUptime - start) * 1000])
+      }
+    }
+    let finalPreparationStart = ProcessInfo.processInfo.systemUptime
+    try t.wait("Ready", timeout: 60)
+    samples.append([
+      "stage": "final-file-ready-tail",
+      "latency_ms": (ProcessInfo.processInfo.systemUptime - finalPreparationStart) * 1000,
+    ])
+    t.key("\u{1B}")
+    try t.wait("Normal · Files")
+    t.key("q")
+    try t.finish()
+    var report: [String: Any] = [
+      "samples": samples,
+      "fixture": "100 loaded PRs, 120 files, 320x64 then 240x48; no preview requests during incremental typing; repeated file n/N with normal provider preparation and caches.",
+    ]
+    for stage in Set(samples.compactMap { $0["stage"] as? String }) {
+      let values = samples.filter { $0["stage"] as? String == stage }.compactMap { $0["latency_ms"] as? Double }.sorted()
+      report[stage] = [
+        "count": values.count,
+        "p95_ms": values[Int(ceil(Double(values.count) * 0.95)) - 1],
+        "max_ms": values.last!,
+      ]
+    }
+    try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(
+      to: artifacts.appendingPathComponent("latency.json"),
+      options: .atomic,
+    )
+    print(
+      "Swift PTY: incremental PR/file search, complete lists, cancellation, resize, wrapping n/N and provider isolation passed."
+    )
+  }
+
   static func workspace(
     _ binary: URL,
     stress: Bool,
@@ -1033,6 +1670,10 @@ struct Smoke {
     defer { t.close() }
     try t.wait("Pull requests")
     try t.wait("Long overview")
+    if CommandLine.arguments.contains("--list-search") {
+      try listSearch(t, artifacts: artifacts, requests: fixture.appendingPathComponent("requests.log"))
+      return
+    }
     if CommandLine.arguments.contains("--wheel-boundary") {
       try wheelBoundary(t, binary: binary, artifacts: artifacts)
       return
@@ -1176,7 +1817,7 @@ struct Smoke {
     t.key("\u{2}")
     try t.waitUntil("first page") { position(t) == 1 }
     t.key("/Long\r")
-    try t.wait("Filter · Pull requests")
+    try t.wait("Find · Pull requests")
     t.key("\u{1B}")
     try t.wait("Normal · Pull requests")
     func waitForPreparedDiff(_ terminal: PTY, path: String) throws {
@@ -1205,9 +1846,9 @@ struct Smoke {
       try expect(released == 1, "Initial snapshot response was not released.")
     }
     try waitForPreparedDiff(t, path: "Sources/File0.swift")
-    t.key("/Tests\r")
-    try t.wait("Filter · Files")
-    try t.wait("6/12")
+    t.key("/Tests/File1[.]swift$\r")
+    try t.wait("Find · Files")
+    try t.wait("Files · 12/12")
     try waitForPreparedDiff(t, path: "Tests/File1.swift")
     t.key("\u{1B}")
     try t.wait("Normal · Files")
@@ -1268,8 +1909,8 @@ struct Smoke {
     warm.key("\r")
     try warm.focusPane(2)
     try waitForPreparedDiff(warm, path: "Sources/File0.swift")
-    warm.key("/Tests\r")
-    try warm.wait("Filter · Files")
+    warm.key("/Tests/File1[.]swift$\r")
+    try warm.wait("Find · Files")
     try waitForPreparedDiff(warm, path: "Tests/File1.swift")
     let warmRequests = try String(contentsOf: log, encoding: .utf8)
     try warmRequests.write(to: artifacts.appendingPathComponent("requests-warm.log"), atomically: true, encoding: .utf8)
@@ -1927,6 +2568,14 @@ struct Smoke {
       text.withUnsafeBytes { _ = Darwin.write(fd, $0.baseAddress, $0.count) }
       _ = Darwin.close(fd)
     }
+    if
+      let gate = env["TATARA_SMOKE_LOADING_GATE"],
+      (env["TATARA_SMOKE_LOADING_STAGE"] == "bootstrap" && name == "gh" && endpoint == "user")
+      || (env["TATARA_SMOKE_LOADING_STAGE"] == "items" && endpoint.contains("/pulls?"))
+      || (env["TATARA_SMOKE_LOADING_STAGE"] == "diff" && name == "difft" && !args.contains("--version"))
+    {
+      try waitForFixtureResponse(in: URL(fileURLWithPath: gate))
+    }
     if name == "difft" {
       if args.contains("--version") {
         print("difft-smoke 1")
@@ -1988,6 +2637,7 @@ struct Smoke {
     let head = String(repeating: "b", count: 40)
     let itemCount = env["TATARA_SMOKE_DENSE"] == "1" ? 100 : 2
     let fileCount = env["TATARA_SMOKE_DENSE"] == "1" ? 120 : 12
+    let draft = env["TATARA_SMOKE_DRAFT"] == "1"
     let items: [[String: Any]] = (1 ... itemCount).map { [
       "number": $0,
       "title": $0 == 1 ? "Long overview" : "Short overview",
@@ -1996,18 +2646,22 @@ struct Smoke {
       "html_url": "https://github.com/example/reviews/pull/\($0)",
       "state": "open",
       "labels": [],
-      "draft": false,
+      "draft": draft,
     ] }
     if endpoint == "graphql" {
       let input = try JSONSerialization.jsonObject(with: FileHandle.standardInput.readDataToEndOfFile()) as? [String: Any]
       let query = input?["query"] as? String ?? ""
+      let firstPage = query.contains("pullRequests(first:")
+      if firstPage, env["TATARA_SMOKE_LOADING_STAGE"] == "items", let gate = env["TATARA_SMOKE_LOADING_GATE"] {
+        try waitForFixtureResponse(in: URL(fileURLWithPath: gate))
+      }
       var nodes = [String: Any]()
-      for (index, item) in items.enumerated() where query.contains("p\(index + 1): pullRequest") {
+      for (index, item) in items.enumerated() where firstPage || query.contains("p\(index + 1): pullRequest") {
         nodes["p\(index + 1)"] = [
           "number": index + 1,
           "url": item["html_url"]!,
           "state": "OPEN",
-          "isDraft": false,
+          "isDraft": draft,
           "title": item["title"]!,
           "body": item["body"]!,
           "author": ["login": "author"],
@@ -2025,7 +2679,22 @@ struct Smoke {
           "commits": ["totalCount": 1],
         ]
       }
-      try FileHandle.standardOutput.write(JSONSerialization.data(withJSONObject: ["data": ["repository": nodes]]))
+      if firstPage {
+        let values = items.indices.map { index -> [String: Any] in
+          var value = nodes["p\(index + 1)"] as! [String: Any]
+          value["author"] = ["login": "author"]
+          value["labels"] = ["nodes": [], "pageInfo": ["hasNextPage": false]]
+          value["assignees"] = ["nodes": [], "pageInfo": ["hasNextPage": false]]
+          value["reviewRequests"] = ["nodes": [], "pageInfo": ["hasNextPage": false]]
+          return value
+        }
+        try FileHandle.standardOutput.write(JSONSerialization.data(withJSONObject: ["data": ["repository": ["pullRequests": [
+          "nodes": values,
+          "pageInfo": ["hasNextPage": false],
+        ]]]]))
+      } else {
+        try FileHandle.standardOutput.write(JSONSerialization.data(withJSONObject: ["data": ["repository": nodes]]))
+      }
       return
     }
     let files: [[String: Any]] = (0 ..< fileCount).map { [
@@ -2033,7 +2702,7 @@ struct Smoke {
       "status": "modified",
       "additions": 1,
       "deletions": 1,
-      "patch": "@@ -1 +1 @@\n-let value = 1\n+let value = 2",
+      "patch": draft ? "@@ -2 +2 @@\n-let value = 1\n+let value = 2" : "@@ -1 +1 @@\n-let value = 1\n+let value = 2",
     ] }
     let result: Any
     if endpoint.contains("/contents/") {
@@ -2043,26 +2712,7 @@ struct Smoke {
         endpoint.contains("Sources/File0%2Eswift"),
         endpoint.contains(base)
       {
-        let directory = URL(fileURLWithPath: gate)
-        let released = directory.appendingPathComponent("released")
-        if !FileManager.default.fileExists(atPath: released.path) {
-          // Each request owns a FIFO; the release latch also covers replacement requests.
-          let pipe = directory.appendingPathComponent("\(getpid()).fifo")
-          try expect(mkfifo(pipe.path, 0o600) == 0, "Could not create initial snapshot response pipe.")
-          let descriptor = Darwin.open(pipe.path, O_RDWR | O_NONBLOCK)
-          try expect(descriptor >= 0, "Could not open initial snapshot response pipe.")
-          defer { Darwin.close(descriptor) }
-          try Data().write(to: directory.appendingPathComponent("waiting"))
-          if !FileManager.default.fileExists(atPath: released.path) {
-            var event = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
-            try expect(
-              Darwin.poll(&event, 1, 30_000) > 0 && event.revents & Int16(POLLIN) != 0,
-              "Initial snapshot response was not released before the fixture deadline.",
-            )
-            var token: UInt8 = 0
-            try expect(Darwin.read(descriptor, &token, 1) == 1, "Initial snapshot gate was not released.")
-          }
-        }
+        try waitForFixtureResponse(in: URL(fileURLWithPath: gate))
       }
       print("// \(endpoint.components(separatedBy: "/contents/").last!.components(separatedBy: "?").first!)")
       let value = endpoint.contains(base) ? 1 : 2

@@ -2,9 +2,15 @@
 
 Use the pinned mise tools and Xcode 27.2 (Swift 6.4.2 and macOS 27.2 SDK).
 Run `mise run toolchain` to validate the selected compiler and SDK. `DEVELOPER_DIR`
-can override the local Xcode installation path. Generate the workspace
-with `mise run generate`; build and test the `Tatara` scheme. Source directories
-and Tuist manifests are authoritative.
+can override the local Xcode installation path. Resolve packages with
+`mise run resolve`, build with `mise run build` and test with `mise run test`.
+`Package.swift`, `Package.resolved` and source directories are authoritative;
+there is no generated Xcode project. Open `Package.swift` in Xcode for IDE support.
+Direct `swift build`, `swift test` and `swift run tatara` work through `mise exec`.
+
+TermLoom core and TextArea are a local source package in `ThirdParty/TermLoom`.
+Preserve its provenance and license when updating it. Runtime changes belong in
+tracked source and must not be applied to SwiftPM's dependency caches.
 
 Write commit subjects, commit bodies and source code comments in English.
 User-facing strings remain localized in the String Catalog.

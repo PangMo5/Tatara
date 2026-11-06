@@ -5,6 +5,7 @@ import Foundation
 import TataraCore
 import TermLoom
 import Testing
+@testable import TataraTUI
 
 struct CommentRenderingTests {
   @Test

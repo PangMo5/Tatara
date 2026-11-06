@@ -4,7 +4,7 @@ Derived/
 DerivedData/
 *.xcodeproj/
 *.xcworkspace/
-Tuist/.build/
+.swiftpm/
 .mise.local.toml
 dist/
 .artifacts/

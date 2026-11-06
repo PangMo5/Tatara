@@ -65,6 +65,8 @@ public struct ReviewDocument: Equatable, Sendable {
     self.wrapsLines = wrapsLines
     self.maximumHorizontalOffset = maximumHorizontalOffset
     precondition(self.displayLines.count == lines.count, "Display rows must preserve source row indices.")
+    var filePaths = [String?]()
+    var currentFile: String?
     var indexLines = [String]()
     var left = [Int]()
     var right = [Int]()
@@ -81,6 +83,10 @@ public struct ReviewDocument: Equatable, Sendable {
       if index % 128 == 0 {
         try checkingCancellation()
       }
+      if let diff, diff.rows.indices.contains(index) {
+        currentFile = diff.rows[index].path ?? diff.path
+      }
+      filePaths.append(currentFile)
       indexLines.append(line.map(\.text).joined())
       if let key = line.first(where: { $0.commentKey != nil })?.commentKey, commentRows[key] == nil {
         commentRows[key] = index
@@ -115,6 +121,7 @@ public struct ReviewDocument: Equatable, Sendable {
         }
       }
     }
+    self.filePaths = filePaths
     wrappedRows = wrapped
     self.commentRows = commentRows
     self.commentKeys = commentKeys
@@ -161,6 +168,10 @@ public struct ReviewDocument: Equatable, Sendable {
   public let commentKeys: [String]
   public let isUnifiedDiff: Bool
   public let diffPrefixWidth: Int
+
+  public func filePath(at row: Int) -> String? {
+    filePaths.indices.contains(row) ? filePaths[row] : nil
+  }
 
   public func row(for location: SourceLocation, column: Int = 0) -> Int? {
     guard column > 0, let candidates = wrappedRows[location], let diff else { return sourceRows[location] }
@@ -251,6 +262,8 @@ public struct ReviewDocument: Equatable, Sendable {
   }
 
   // MARK: Private
+
+  private let filePaths: [String?]
 
   private let commentRows: [String: Int]
   private let commentIndices: [String: Int]

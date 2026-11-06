@@ -10,6 +10,7 @@ import TataraPersistence
 import TataraSystem
 import TermLoom
 import Testing
+@testable import TataraTUI
 
 struct CacheAndLoadingTests {
 

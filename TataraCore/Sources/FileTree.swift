@@ -71,6 +71,7 @@ public struct FileTree: Equatable, Sendable {
     }
     append("")
     rows = ordered
+    indices = Dictionary(uniqueKeysWithValues: ordered.enumerated().map { ($0.element.id, $0.offset) })
   }
 
   // MARK: Public
@@ -79,23 +80,12 @@ public struct FileTree: Equatable, Sendable {
 
   public let rows: [FileTreeRow]
 
-  public func visible(collapsed: Set<String>, matching paths: Set<String>? = nil) -> [FileTreeRow] {
-    if collapsed.isEmpty, paths == nil {
-      return rows
-    }
-    var included = paths ?? []
-    if let paths {
-      if !paths.isEmpty {
-        included.insert(Self.rootPath)
-      }
-      for path in paths {
-        var parent = (path as NSString).deletingLastPathComponent
-        while !parent.isEmpty, parent != "." {
-          included.insert(parent)
-          parent = (parent as NSString).deletingLastPathComponent
-        }
-      }
-    }
+  public func index(for id: String) -> Int? {
+    indices[id]
+  }
+
+  public func visible(collapsed: Set<String>) -> [FileTreeRow] {
+    guard !collapsed.isEmpty else { return rows }
     var hiddenDepth: Int?
     return rows.filter { row in
       if let depth = hiddenDepth {
@@ -104,14 +94,15 @@ public struct FileTree: Equatable, Sendable {
         }
         hiddenDepth = nil
       }
-      if paths != nil {
-        return included.contains(row.path)
-      }
       if row.isDirectory, collapsed.contains(row.path) {
         hiddenDepth = row.depth
       }
       return true
     }
   }
+
+  // MARK: Private
+
+  private let indices: [String: Int]
 
 }

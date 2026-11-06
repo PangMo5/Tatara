@@ -18,7 +18,7 @@ struct ToolError: Error, CustomStringConvertible {
 
 let fm = FileManager.default
 let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-let environment = ProcessInfo.processInfo.environment
+var environment = ProcessInfo.processInfo.environment
 let arguments = Array(CommandLine.arguments.dropFirst())
 
 func require(_ condition: Bool, _ message: String) throws {
@@ -65,11 +65,13 @@ func run(
   capture: Bool = false,
   output: URL? = nil,
   secret: Bool = false,
+  mergeStandardError: Bool = false,
 ) throws -> String {
   let process = Process()
   process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
   process.arguments = [command] + args
   process.currentDirectoryURL = cwd
+  process.environment = environment
   // A temporary file avoids pipe-capacity deadlocks for large command output.
   let directory = try temporary("command")
   defer { try? fm.removeItem(at: directory) }
@@ -80,6 +82,9 @@ func run(
     fm.createFile(atPath: destination.path, contents: nil)
     handle = try FileHandle(forWritingTo: destination)
     process.standardOutput = handle
+    if mergeStandardError {
+      process.standardError = handle
+    }
   }
   defer { try? handle?.close() }
   try process.run()
@@ -92,12 +97,12 @@ func run(
 }
 
 func version() throws -> String {
-  let source = try read(path("Project.swift"))
-  let regex = try NSRegularExpression(pattern: #"(?m)^let appVersion = "(\d+\.\d+\.\d+)"$"#)
+  let source = try read(path("TataraCore/Sources/TataraVersion.swift"))
+  let regex = try NSRegularExpression(pattern: #"(?m)^  public static let current = "(\d+\.\d+\.\d+)"$"#)
   guard let match = regex.firstMatch(in: source, range: NSRange(source.startIndex..., in: source)), let range = Range(
     match.range(at: 1),
     in: source,
-  ) else { throw ToolError("Project.swift must declare appVersion.") }
+  ) else { throw ToolError("TataraVersion.current must declare a semantic version.") }
   return String(source[range])
 }
 
@@ -156,9 +161,17 @@ func localizations(check: Bool) throws {
 }
 
 func notices(check: Bool) throws {
-  guard let pins = try json(path("Tuist/Package.resolved"))["pins"] as? [[String: Any]]
+  guard let pins = try json(path("Package.resolved"))["pins"] as? [[String: Any]]
   else { throw ToolError("Missing package pins.") }
-  var sources = pins.map { ($0, path("Tuist/.build/checkouts/\($0["identity"] as? String ?? "")")) }
+  var sources = pins.map { ($0, path(".build/checkouts/\($0["identity"] as? String ?? "")")) }
+  let termloom = try json(path("ThirdParty/TermLoom/upstream.json"))
+  guard let repository = termloom["repository"] as? String, let revision = termloom["revision"] as? String
+  else { throw ToolError("Missing vendored TermLoom provenance.") }
+  sources.append(([
+    "identity": "termloom",
+    "location": repository,
+    "state": ["revision": revision],
+  ], path("ThirdParty/TermLoom")))
   if let toolPins = try json(path("Scripts/Smoke/Package.resolved"))["pins"] as? [[String: Any]] {
     for pin in toolPins {
       let revision = (pin["state"] as? [String: String])?["revision"]
@@ -178,7 +191,7 @@ func notices(check: Bool) throws {
     "# Third-Party Notices",
     "",
     "Tatara is licensed under AGPL-3.0-only. Dependencies retain their own licenses.",
-    "Versions below come from Tuist/Package.resolved and Scripts/Smoke/Package.resolved. Notices include build dependencies and vendored components.",
+    "Versions below come from Package.resolved, Scripts/Smoke/Package.resolved and ThirdParty/TermLoom/upstream.json. Notices include build dependencies and vendored components.",
     "",
     "<!-- REUSE-IgnoreStart -->",
     "",
@@ -192,7 +205,7 @@ func notices(check: Bool) throws {
     else { throw ToolError("Invalid dependency pin.") }
     let directory = sourceDirectory.resolvingSymlinksInPath()
     guard let enumerator = fm.enumerator(at: directory, includingPropertiesForKeys: [.isRegularFileKey])
-    else { throw ToolError("Run tuist install first.") }
+    else { throw ToolError("Run swift Scripts/Tatara.swift resolve first.") }
     var files = [URL]()
     for case let file as URL in enumerator {
       if file.pathComponents.contains(".git") {
@@ -233,6 +246,16 @@ func notices(check: Bool) throws {
     }
   }
   try parts += [
+    "## Swift compatibility runtime",
+    "",
+    "Source: https://github.com/swiftlang/swift/blob/swift-6.4.2-RELEASE/LICENSE.txt",
+    "",
+    "The pinned Swift 6.4.2 toolchain supplies libswiftCompatibilitySpan.dylib. Installation and release archives include it alongside the executable when required.",
+    "",
+    "~~~~text",
+    read(path("ThirdParty/SwiftRuntime.txt")).trimmingCharacters(in: .whitespacesAndNewlines),
+    "~~~~",
+    "",
     "## Catppuccin palette",
     "",
     "Source: https://github.com/catppuccin/catppuccin",
@@ -245,7 +268,7 @@ func notices(check: Bool) throws {
     "",
   ]
   try generated(parts.joined(separator: "\n"), at: path("THIRD_PARTY_NOTICES.md"), check: check)
-  print("Validated notices for \(sources.count) resolved packages and Catppuccin.")
+  print("Validated notices for \(sources.count) packages, the Swift runtime and Catppuccin.")
 }
 
 func releaseNotes() throws -> String {
@@ -280,6 +303,73 @@ func checkTests(_ url: URL) throws {
   print("Confirmed \(count) executed Swift Testing tests.")
 }
 
+func runtimeLibraries(for binary: URL, architecture: String? = nil) throws -> [String] {
+  let flags = architecture.map { ["-arch", $0] } ?? []
+  let dependencies = try run("otool", flags + ["-L", binary.path], capture: true)
+    .components(separatedBy: "\n").dropFirst()
+    .compactMap { $0.split(whereSeparator: \.isWhitespace).first.map(String.init) }
+  var libraries = [String]()
+  for dependency in dependencies {
+    if dependency.hasPrefix("/usr/lib/") || dependency.hasPrefix("/System/Library/") {
+      continue
+    }
+    try require(
+      dependency == "@rpath/libswiftCompatibilitySpan.dylib",
+      "Unexpected non-system dynamic dependency: \(dependency)",
+    )
+    libraries.append(URL(fileURLWithPath: dependency).lastPathComponent)
+  }
+  return libraries
+}
+
+func runtimeFiles(in directory: URL, architecture: String? = nil) throws -> [URL] {
+  let binary = directory.appendingPathComponent("tatara")
+  let files = try [binary] + runtimeLibraries(for: binary, architecture: architecture)
+    .map { directory.appendingPathComponent($0) }
+  for file in files {
+    try require(
+      fm.fileExists(atPath: file.path),
+      "Missing runtime file: \(file.path). Run swift Scripts/Tatara.swift build Release.",
+    )
+  }
+  return files
+}
+
+func prepareRuntime(in directory: URL) throws {
+  let binary = directory.appendingPathComponent("tatara")
+  let libraries = try runtimeLibraries(for: binary)
+  if !libraries.isEmpty {
+    try run("xcrun", [
+      "swift-stdlib-tool",
+      "--copy",
+      "--scan-executable",
+      binary.path,
+      "--platform",
+      "macosx",
+      "--destination",
+      directory.path,
+      "--sign",
+      "-",
+    ])
+  }
+  for file in try runtimeFiles(in: directory).dropFirst() {
+    try run("codesign", ["--verify", "--strict", file.path])
+    let original = file.appendingPathExtension("original")
+    if fm.fileExists(atPath: original.path) {
+      try fm.removeItem(at: original)
+    }
+  }
+  let commands = try run("otool", ["-l", binary.path], capture: true)
+  let regex = try NSRegularExpression(pattern: #"cmd LC_RPATH\n\s+cmdsize \d+\n\s+path (.+) \(offset \d+\)"#)
+  let paths = regex.matches(in: commands, range: NSRange(commands.startIndex..., in: commands)).compactMap { match in
+    Range(match.range(at: 1), in: commands).map { String(commands[$0]) }
+  }
+  try require(libraries.isEmpty || paths.contains("@loader_path"), "Swift runtime requires a loader-relative search path.")
+  for path in paths where path != "/usr/lib/swift" && path != "@loader_path" {
+    try run("install_name_tool", ["-delete_rpath", path, binary.path])
+  }
+}
+
 func package(products: URL, architecture: String, output: URL) throws {
   let triple: String
   switch architecture { case "arm64": triple = "aarch64-apple-darwin"
@@ -287,12 +377,7 @@ func package(products: URL, architecture: String, output: URL) throws {
   default: throw ToolError("Unsupported architecture: \(architecture)") }
   let binary = products.appendingPathComponent("tatara")
   try run("lipo", [binary.path, "-verify_arch", architecture])
-  let libraries = try run("otool", ["-arch", architecture, "-L", binary.path], capture: true).components(separatedBy: "\n")
-    .dropFirst().map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-  try require(
-    libraries.allSatisfy { $0.hasPrefix("/usr/lib/") || $0.hasPrefix("/System/Library/") },
-    "Unexpected non-system dynamic dependency.",
-  )
+  let runtime = try runtimeFiles(in: products, architecture: architecture)
   let stage = try temporary("package")
   defer { try? fm.removeItem(at: stage) }
   try fm.createDirectory(at: stage.appendingPathComponent("bin"), withIntermediateDirectories: true)
@@ -306,6 +391,10 @@ func package(products: URL, architecture: String, output: URL) throws {
     )
   } else {
     try fm.copyItem(at: binary, to: stage.appendingPathComponent("bin/tatara"))
+  }
+  for file in runtime.dropFirst() {
+    try run("lipo", [file.path, "-verify_arch", architecture])
+    try fm.copyItem(at: file, to: stage.appendingPathComponent("bin/\(file.lastPathComponent)"))
   }
   for name in ["LICENSE", "THIRD_PARTY_NOTICES.md", "LICENSES"] {
     try fm.copyItem(
@@ -325,10 +414,13 @@ func package(products: URL, architecture: String, output: URL) throws {
 
 func installLocal(products: URL, prefix: URL) throws {
   let source = products.appendingPathComponent("tatara")
-  try run("codesign", ["--verify", "--strict", source.path])
+  let runtime = try runtimeFiles(in: products)
+  for file in runtime {
+    try run("codesign", ["--verify", "--strict", file.path])
+  }
   try require(
     run(source.path, ["--version"], capture: true).trimmingCharacters(in: .whitespacesAndNewlines) == version(),
-    "Built version does not match Project.swift.",
+    "Built version does not match TataraVersion.current.",
   )
   let bin = prefix.appendingPathComponent("bin")
   let share = prefix.appendingPathComponent("share/tatara")
@@ -337,6 +429,15 @@ func installLocal(products: URL, prefix: URL) throws {
   let staged = bin.appendingPathComponent(".tatara-\(UUID())")
   defer { try? fm.removeItem(at: staged) }
   try fm.copyItem(at: source, to: staged)
+  for file in runtime.dropFirst() {
+    let stagedLibrary = bin.appendingPathComponent(".\(file.lastPathComponent)-\(UUID())")
+    defer { try? fm.removeItem(at: stagedLibrary) }
+    try fm.copyItem(at: file, to: stagedLibrary)
+    try require(
+      rename(stagedLibrary.path, bin.appendingPathComponent(file.lastPathComponent).path) == 0,
+      "Atomic runtime library replacement failed: \(errno)",
+    )
+  }
   for name in ["LICENSE", "LICENSES", "THIRD_PARTY_NOTICES.md", "README.md", "CONTRIBUTING.md", "docs"] {
     let destination = share.appendingPathComponent(name)
     if fm.fileExists(atPath: destination.path) {
@@ -351,6 +452,7 @@ func installLocal(products: URL, prefix: URL) throws {
     "version": version(),
     "kind": "local-release-build",
     "sha256": digest(staged),
+    "runtime_libraries": runtime.dropFirst().map { try ["name": $0.lastPathComponent, "sha256": digest($0)] },
     "updated_at": ISO8601DateFormatter().string(from: Date()),
   ]
   try require(
@@ -360,72 +462,6 @@ func installLocal(products: URL, prefix: URL) throws {
   try JSONSerialization.data(withJSONObject: metadata, options: [.prettyPrinted, .sortedKeys])
     .write(to: share.appendingPathComponent("installation.json"), options: .atomic)
   try print("Installed \(version()) at \(bin.path). Restart any running Tatara process.")
-}
-
-func patchWheelDirections(check: Bool) throws {
-  // Remove this patch when TermLoom supports all four SGR wheel directions.
-  let input = path("Tuist/.build/checkouts/termloom/Sources/TermLoom/Input.swift")
-  let originalHash = "38389821bd7474ba8cea85b953a4db43b17d8295ece626429da9ff957c9b5272"
-  let patchedHash = "75f73d4196ff3235746bb12fde6afdc976468a10e126f00373fe6f595b68d5ca"
-  func hash(_ text: String) -> String {
-    SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
-  }
-  let source = try read(input)
-  if hash(source) == patchedHash {
-    return
-  }
-  try require(!check, "TermLoom wheel-axis patch is missing. Run swift Scripts/Tatara.swift generate.")
-  try require(hash(source) == originalHash, "TermLoom Input.swift changed. Re-evaluate the wheel-axis patch before upgrading.")
-  let patched = source
-    .replacing("  case scrollDown\n", with: "  case scrollDown\n  case scrollLeft\n  case scrollRight\n")
-    .replacing("      kind = code & 1 == 0 ? .scrollUp : .scrollDown", with: [
-      "      switch code & 3 {",
-      "      case 0: kind = .scrollUp",
-      "      case 1: kind = .scrollDown",
-      "      case 2: kind = .scrollLeft",
-      "      default: kind = .scrollRight",
-      "      }",
-    ].joined(separator: "\n"))
-  try require(hash(patched) == patchedHash, "TermLoom wheel-axis patch produced unexpected content.")
-  try write(patched, input)
-  print("Applied TermLoom wheel-axis patch.")
-}
-
-func patchDependencies(check: Bool = false) throws {
-  try patchWheelDirections(check: check)
-  // Remove this patch when the pinned TermLoom runtime supports bounded scroll presentation batches.
-  let checkout = path("Tuist/.build/checkouts/termloom")
-  let files = [
-    (
-      "Application.swift",
-      "fc8d5506f6b69b60e62e904b594cb615899e0a591b6d895b1a05c05a29fd0476",
-      "dc04b2721071aa24063de9129eba1b6273ef6292629dc776fda6a318fcb7e54e",
-    ),
-    (
-      "TerminalSession.swift",
-      "b36ffbe1eb304ed55abc31cfc97ddef745bcd3efcfcd3b73ca133ff730ec3682",
-      "beaecbb1672eea141a80c8c910be51df3c551cbc89636ec29635603c93486801",
-    ),
-  ]
-  let hashes = try files.map { try digest(checkout.appendingPathComponent("Sources/TermLoom/" + $0.0)) }
-  if zip(files, hashes).allSatisfy({ $0.0.2 == $0.1 }) {
-    return
-  }
-  try require(!check, "TermLoom scroll presentation patch is missing. Run swift Scripts/Tatara.swift generate.")
-  try require(
-    zip(files, hashes).allSatisfy { $0.0.1 == $0.1 },
-    "TermLoom runtime changed. Re-evaluate the scroll presentation patch before upgrading.",
-  )
-  let patch = path("Scripts/Patches/termloom-scroll-presentation.patch").path
-  try run("git", ["apply", "--check", patch], cwd: checkout)
-  try run("git", ["apply", patch], cwd: checkout)
-  for (name, _, expected) in files {
-    try require(
-      digest(checkout.appendingPathComponent("Sources/TermLoom/" + name)) == expected,
-      "TermLoom scroll presentation patch produced unexpected content: \(name)",
-    )
-  }
-  print("Applied TermLoom scroll presentation patch.")
 }
 
 func toolchain(requiresReleaseBuild: Bool = false) throws {
@@ -441,34 +477,92 @@ func toolchain(requiresReleaseBuild: Bool = false) throws {
   if requiresReleaseBuild {
     try require(xcode.contains("Build version 27B52"), "Binary releases require the stable Xcode 27.2 build 27B52.")
   }
+  let sdkRoot = try run("xcrun", ["--sdk", "macosx", "--show-sdk-path"], capture: true)
+    .trimmingCharacters(in: .whitespacesAndNewlines)
+  try require(sdkRoot.hasPrefix("/") && sdkRoot.hasSuffix(".sdk"), "xcrun must report an absolute macOS SDK path.")
+  environment["SDKROOT"] = sdkRoot
+  print("macOS SDK path: \(sdkRoot)")
 }
 
-func generate(locked: Bool = false) throws {
+func resolve(locked: Bool = false) throws {
   try toolchain()
-  try run("tuist", ["install"])
-  try patchDependencies()
-  try run("swift", ["package", "--package-path", "Scripts/Smoke", "resolve"])
-  if locked {
-    try run("git", ["diff", "--exit-code", "--", "Tuist/Package.resolved", "Scripts/Smoke/Package.resolved"])
+  let flags = locked ? ["--force-resolved-versions"] : []
+  try run("swift", ["package"] + flags + ["resolve"])
+  try run("swift", ["package", "--package-path", "Scripts/Smoke"] + flags + ["resolve"])
+}
+
+func buildArguments(_ configuration: String, architecture: String? = nil) throws -> [String] {
+  let configuration = configuration.lowercased()
+  try require(["debug", "release"].contains(configuration), "Expected debug or release configuration.")
+  var args = ["--configuration", configuration]
+  if let architecture {
+    try require(["arm64", "x86_64"].contains(architecture), "Unsupported architecture: \(architecture)")
+    // Preserve each dependency's deployment target; the root manifest owns macOS 15.
+    args += ["--arch", architecture]
   }
-  try run("tuist", ["generate", "--no-open"])
+  return args
 }
 
-func build(_ configuration: String, scheme: String = "Tatara", extra: [String] = []) throws {
+func swiftProducts(_ configuration: String = "release", architecture: String? = nil, packagePath: String? = nil) throws -> URL {
+  var args = try buildArguments(configuration, architecture: architecture)
+  if let packagePath {
+    args += ["--package-path", packagePath]
+  }
+  let output = try run("swift", ["build"] + args + ["--show-bin-path"], capture: true)
+    .trimmingCharacters(in: .whitespacesAndNewlines)
+  try require(!output.isEmpty, "SwiftPM did not report a products directory.")
+  return URL(fileURLWithPath: output)
+}
+
+func products(_ configuration: String = "release", architecture: String? = nil) throws -> URL {
+  let architecture = try architecture ?? run("uname", ["-m"], capture: true).trimmingCharacters(in: .whitespacesAndNewlines)
+  _ = try buildArguments(configuration, architecture: architecture)
+  return path(".artifacts/products/\(configuration.lowercased())-\(architecture)")
+}
+
+func validateBuildMetadata(_ binary: URL) throws {
+  let data = try Data(run("swift", ["package", "dump-package"], capture: true).utf8)
+  guard
+    let manifest = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+    let platforms = manifest["platforms"] as? [[String: Any]],
+    let minimum = platforms.first(where: { $0["platformName"] as? String == "macos" })?["version"] as? String
+  else { throw ToolError("Package.swift must declare the macOS deployment target.") }
+  let expectedSDK = try run("xcrun", ["--sdk", "macosx", "--show-sdk-version"], capture: true)
+    .trimmingCharacters(in: .whitespacesAndNewlines)
+  let commands = try run("otool", ["-l", binary.path], capture: true)
+  let regex = try NSRegularExpression(
+    pattern: #"cmd LC_BUILD_VERSION\n\s+cmdsize \d+\n\s+platform 1\n\s+minos ([\d.]+)\n\s+sdk ([\d.]+)"#
+  )
+  guard
+    let match = regex.firstMatch(in: commands, range: NSRange(commands.startIndex..., in: commands)),
+    let minimumRange = Range(match.range(at: 1), in: commands),
+    let sdkRange = Range(match.range(at: 2), in: commands)
+  else { throw ToolError("The executable must contain macOS build metadata.") }
+  try require(commands[minimumRange] == minimum, "Executable deployment target does not match Package.swift.")
+  try require(commands[sdkRange] == expectedSDK, "Executable SDK metadata does not match the selected macOS SDK.")
+  print("Validated Mach-O deployment target \(minimum), SDK \(expectedSDK).")
+}
+
+func build(_ configuration: String, architecture: String? = nil) throws {
   try toolchain()
-  try run("xcodebuild", [
-    "build",
-    "-workspace",
-    "Tatara.xcworkspace",
-    "-scheme",
-    scheme,
-    "-configuration",
-    configuration,
-    "-destination",
-    "generic/platform=macOS",
-    "-derivedDataPath",
-    "DerivedData",
-  ] + extra)
+  try localizations(check: true)
+  let args = try buildArguments(configuration, architecture: architecture)
+  try run("swift", ["build", "--force-resolved-versions", "--product", "tatara"] + args)
+  let source = try swiftProducts(configuration, architecture: architecture).appendingPathComponent("tatara")
+  let stage = try temporary("runtime")
+  defer { try? fm.removeItem(at: stage) }
+  let binary = stage.appendingPathComponent("tatara")
+  try fm.copyItem(at: source, to: binary)
+  try validateBuildMetadata(binary)
+  try prepareRuntime(in: stage)
+  try run("codesign", ["--force", "--sign", "-", "--identifier", "dev.PangMo5.tatara", binary.path])
+  let directory = try products(configuration, architecture: architecture)
+  try fm.createDirectory(at: directory.deletingLastPathComponent(), withIntermediateDirectories: true)
+  if fm.fileExists(atPath: directory.path) {
+    try fm.removeItem(at: directory)
+  }
+  try fm.moveItem(at: stage, to: directory)
+  print("Prepared runtime at \(directory.path).")
 }
 
 func summarizeRendererComparisons(_ labels: [String]) throws {
@@ -689,8 +783,8 @@ func lint() throws {
       "TataraTUI",
       "TataraTests",
       "Scripts",
-      "Project.swift",
-      "Tuist/Package.swift",
+      "Package.swift",
+      "ThirdParty/TermLoom/Package.swift",
       "--lint",
     ],
   )
@@ -702,31 +796,21 @@ func lint() throws {
 
 func tests() throws {
   try toolchain()
+  try localizations(check: true)
   let log = path(".artifacts/test.log")
-  try run(
-    "xcodebuild",
-    [
-      "test",
-      "-workspace",
-      "Tatara.xcworkspace",
-      "-scheme",
-      "Tatara",
-      "-destination",
-      "platform=macOS",
-      "-derivedDataPath",
-      "DerivedData",
-    ],
-    output: log,
-  )
+  try run("swift", ["test", "--force-resolved-versions"], output: log, mergeStandardError: true)
   try checkTests(log)
 }
 
 func smoke(_ args: [String]) throws {
-  let binary = path("Scripts/Smoke/.build/release/tatara-smoke")
+  let args = try args.first.map { !$0.hasPrefix("--") } == true
+    ? args
+    : [products().appendingPathComponent("tatara").path] + args
   try run(
     "swift",
     ["build", "--package-path", path("Scripts/Smoke").path, "--configuration", "release", "--product", "tatara-smoke"],
   )
+  let binary = try swiftProducts(packagePath: "Scripts/Smoke").appendingPathComponent("tatara-smoke")
   try run(binary.path, args)
 }
 
@@ -752,15 +836,33 @@ func signing(_ command: String) throws {
     try run("security", ["list-keychains", "-d", "user", "-s", keychain.path])
 
   case "sign":
-    let binary = path("DerivedData/Build/Products/Release/tatara").path
-    try run("codesign", ["--force", "--sign", "Developer ID Application", "--options", "runtime", "--timestamp", binary])
-    try run("codesign", ["--verify", "--strict", binary])
+    let directory = try products(architecture: environment["ARCH"])
+    let flags = [
+      "--force",
+      "--sign",
+      "Developer ID Application",
+      "--options",
+      "runtime",
+      "--timestamp",
+    ]
+    for file in try runtimeFiles(in: directory).reversed() {
+      let identity = file.lastPathComponent == "tatara" ? ["--identifier", "dev.PangMo5.tatara"] : []
+      try run("codesign", flags + identity + [file.path])
+      try run("codesign", ["--verify", "--strict", file.path])
+    }
 
   case "notarize":
     let key = temp.appendingPathComponent("notary.p8")
     try write(required("AC_API_KEY_P8"), key)
     let archive = temp.appendingPathComponent("tatara.zip")
-    try run("ditto", ["-c", "-k", path("DerivedData/Build/Products/Release/tatara").path, archive.path])
+    let directory = try temporary("notarization")
+    defer { try? fm.removeItem(at: directory) }
+    let bin = directory.appendingPathComponent("bin")
+    try fm.createDirectory(at: bin, withIntermediateDirectories: true)
+    for file in try runtimeFiles(in: products(architecture: environment["ARCH"])) {
+      try fm.copyItem(at: file, to: bin.appendingPathComponent(file.lastPathComponent))
+    }
+    try run("ditto", ["-c", "-k", "--keepParent", bin.path, archive.path])
     let result = path(".artifacts/notarization.json")
     try run(
       "xcrun",
@@ -803,7 +905,7 @@ func release(_ command: String) throws {
   switch command {
   case "validate-release":
     try toolchain(requiresReleaseBuild: true)
-    try require(tag == "v\(version())", "Tag does not match appVersion.")
+    try require(tag == "v\(version())", "Tag does not match TataraVersion.current.")
     try run("git", ["merge-base", "--is-ancestor", "HEAD", "origin/main"])
     _ = try releaseNotes()
 
@@ -884,33 +986,31 @@ do {
   case "package":
     let arch = args.count > 1 ? args[1] : try required("ARCH")
     try package(
-      products: URL(fileURLWithPath: args.first ?? path("DerivedData/Build/Products/Release").path),
+      products: URL(fileURLWithPath: args.first ?? products(architecture: arch).path),
       architecture: arch,
       output: URL(fileURLWithPath: args.count > 2 ? args[2] : path("dist").path),
     )
 
   case "install-local":
     try installLocal(
-      products: URL(fileURLWithPath: args.first ?? path("DerivedData/Build/Products/Release").path),
+      products: URL(fileURLWithPath: args.first ?? products(architecture: environment["ARCH"]).path),
       prefix: URL(fileURLWithPath: args.count > 1
         ? args[1]
         : fm.homeDirectoryForCurrentUser
           .appendingPathComponent(".local/share/tatara/local").path),
     )
 
-  case "generate": try generate(locked: args.contains("--locked"))
+  case "resolve": try resolve(locked: args.contains("--locked"))
 
-  case "patch-dependencies": try patchDependencies(check: args.contains("--check"))
-
-  case "build": try build(args.first ?? "Debug")
+  case "build": try build(args.first ?? "debug", architecture: environment["ARCH"])
 
   case "renderer-summary": try summarizeRendererComparisons(args)
 
   case "renderer-preview": try createRendererPreview(args)
 
   case "release-build": try toolchain(requiresReleaseBuild: true)
-    try generate()
-    try build("Release", extra: ["ARCHS=\(required("ARCH"))", "ONLY_ACTIVE_ARCH=NO", "CODE_SIGNING_ALLOWED=NO"])
+    try resolve(locked: true)
+    try build("release", architecture: required("ARCH"))
     try signing("sign")
 
   case "test": try tests()
@@ -928,14 +1028,14 @@ do {
         "TataraTUI",
         "TataraTests",
         "Scripts",
-        "Project.swift",
-        "Tuist/Package.swift",
+        "Package.swift",
+        "ThirdParty/TermLoom/Package.swift",
       ],
     )
 
   case "readme-screenshot":
     try smoke([
-      path("DerivedData/Build/Products/Release/tatara").path,
+      products().appendingPathComponent("tatara").path,
       "--reading-workspace",
       "--screenshot-style",
       path("docs/images/readme-terminal.json").path,

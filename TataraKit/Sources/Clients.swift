@@ -80,12 +80,20 @@ extension ForgeClient: TestDependencyKey {
 // MARK: - DiffRequest
 
 public struct DiffRequest: Equatable, Sendable {
-  public init(repository: RepositoryID, revision: PullRequestRevision, file: ChangedFile, width: Int, theme: Theme) {
+  public init(
+    repository: RepositoryID,
+    revision: PullRequestRevision,
+    file: ChangedFile,
+    width: Int,
+    theme: Theme,
+    revealing: SourceLocation? = nil,
+  ) {
     self.repository = repository
     self.revision = revision
     self.file = file
     self.width = width
     self.theme = theme
+    self.revealing = revealing
   }
 
   public var repository: RepositoryID
@@ -93,6 +101,7 @@ public struct DiffRequest: Equatable, Sendable {
   public var file: ChangedFile
   public var width: Int
   public var theme: Theme
+  public var revealing: SourceLocation?
 }
 
 // MARK: - DiffClient

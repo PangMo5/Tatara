@@ -66,6 +66,7 @@ public enum KeyCommand: String, Codable, CaseIterable, Sendable {
   case back
   case refresh
   case search
+  case searchFileContents
   case nextMatch
   case previousMatch
   case toggleKind
@@ -154,6 +155,7 @@ public enum KeyCommand: String, Codable, CaseIterable, Sendable {
     case .back: ["esc"]
     case .refresh: ["r"]
     case .search: ["/"]
+    case .searchFileContents: ["g/"]
     case .nextMatch: ["n"]
     case .previousMatch: ["N"]
     case .toggleKind: ["I"]
@@ -220,6 +222,7 @@ public struct Keymap: Equatable, Sendable {
       "gg",
       "g*",
       "g#",
+      "g/",
       "zt",
       "zz",
       "zb",
@@ -299,6 +302,7 @@ extension KeyCommand {
     case .back: "Back"
     case .refresh: "Refresh"
     case .search: "Search"
+    case .searchFileContents: "Search file contents"
     case .nextMatch: "Next match"
     case .previousMatch: "Previous match"
     case .toggleKind: "Switch PRs / issues"

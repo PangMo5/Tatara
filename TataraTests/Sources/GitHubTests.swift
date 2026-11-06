@@ -38,6 +38,21 @@ struct GitHubTests {
       numbers.map { ("p\($0)", summary($0, state: state, nullStatus: nullStatus)) })]])
   }
 
+  static func listData(_ numbers: [Int], nullStatus: Bool = false, overflowing: Bool = false) throws -> Data {
+    let nodes = numbers.map { number -> [String: Any] in
+      var value = summary(number, nullStatus: nullStatus)
+      value["labels"] = ["nodes": [["name": "bug"]], "pageInfo": ["hasNextPage": overflowing]]
+      value["assignees"] = ["nodes": [["login": "owner"]], "pageInfo": ["hasNextPage": false]]
+      value["milestone"] = ["title": "v2"]
+      value["reviewRequests"] = ["nodes": [["requestedReviewer": ["slug": "ios"]]], "pageInfo": ["hasNextPage": false]]
+      return value
+    }
+    return try JSONSerialization.data(withJSONObject: ["data": ["repository": ["pullRequests": [
+      "nodes": nodes,
+      "pageInfo": ["hasNextPage": numbers.count == 100],
+    ]]]])
+  }
+
   @Test
   func `issue page skips P rs but preserves pagination`() async throws {
     let repository = try RepositoryID("owner/repo", host: "github.example.com")
@@ -88,32 +103,17 @@ struct GitHubTests {
   }
 
   @Test
-  func `PR page batches typed metadata without per item commands`() async throws {
+  func `initial PR page fetches complete typed metadata in one command`() async throws {
     let calls = Mutex(0)
     let runner = CommandRunner { _, arguments, input in
       calls.withLock { $0 += 1 }
-      if arguments.contains("graphql") {
-        let json = try JSONSerialization.jsonObject(with: Data(#require(input).utf8)) as? [String: Any]
-        #expect((json?["query"] as? String)?.contains("p100: pullRequest(number: 100)") == true)
-        return try .init(output: Self.summaryData(Array(1 ... 100)))
-      }
-      let values: [[String: Any]] = (1 ... 100).map { number in
-        [
-          "number": number,
-          "title": "PR",
-          "html_url": "https://github.com/owner/repo/pull/\(number)",
-          "state": "open",
-          "labels": [["name": "bug"]],
-          "updated_at": "2026-09-10T00:00:00Z",
-          "assignees": [["login": "owner"]],
-          "milestone": ["title": "v2"],
-          "requested_teams": [["slug": "ios"]],
-        ]
-      }
-      return try .init(output: JSONSerialization.data(withJSONObject: values))
+      #expect(arguments.contains("graphql"))
+      let json = try JSONSerialization.jsonObject(with: Data(#require(input).utf8)) as? [String: Any]
+      #expect((json?["query"] as? String)?.contains("pullRequests(first: 100") == true)
+      return try .init(output: Self.listData(Array(1 ... 100)))
     }
     let page = try await GitHubAdapter(runner: runner).list(RepositoryID("owner/repo"), .pullRequest, 1)
-    #expect(calls.withLock { $0 } == 2)
+    #expect(calls.withLock { $0 } == 1)
     #expect(page.nextPage == 2)
     let info = try #require(page.items.last?.github)
     #expect(info.reviewDecision == .changesRequested)
@@ -129,7 +129,7 @@ struct GitHubTests {
   func `null status and comment counts remain absent`() async throws {
     let runner = CommandRunner { _, arguments, _ in
       if arguments.contains("graphql") {
-        return try .init(output: Self.summaryData([1], nullStatus: true))
+        return try .init(output: Self.listData([1], nullStatus: true))
       }
       return .init(
         output: Data(#"[{"number":1,"title":"PR","html_url":"https://github.com/owner/repo/pull/1","state":"open","labels":[]}]"#
@@ -168,14 +168,54 @@ struct GitHubTests {
   }
 
   @Test
+  func `overflowing nested list metadata is completed without truncating labels`() async throws {
+    let runner = CommandRunner { _, arguments, _ in
+      if arguments.contains("graphql") {
+        return try .init(output: Self.listData([1], overflowing: true))
+      }
+      #expect(arguments.last == "repos/owner/repo/pulls/1")
+      return try .init(output: JSONSerialization.data(withJSONObject: [
+        "number": 1,
+        "title": "PR 1",
+        "html_url": "https://github.com/owner/repo/pull/1",
+        "state": "open",
+        "updated_at": "2026-09-10T00:00:00Z",
+        "labels": (0 ..< 101).map { ["name": "label-\($0)"] },
+      ]))
+    }
+    let page = try await GitHubAdapter(runner: runner).list(RepositoryID("owner/repo"), .pullRequest, 1)
+    #expect(page.items[0].labels.count == 101)
+    #expect(page.items[0].github?.commits == 2)
+  }
+
+  @Test
+  func `later PR pages preserve native REST pagination and metadata enrichment`() async throws {
+    let runner = CommandRunner { _, arguments, _ in
+      if arguments.contains("graphql") {
+        return try .init(output: Self.summaryData([101]))
+      }
+      #expect(arguments.last?.contains("page=2") == true)
+      return .init(
+        output: Data(
+          #"[{"number":101,"title":"PR 101","html_url":"https://github.com/owner/repo/pull/101","state":"open","labels":[]}]"#
+            .utf8
+        )
+      )
+    }
+    let page = try await GitHubAdapter(runner: runner).list(RepositoryID("owner/repo"), .pullRequest, 2)
+    #expect(page.items.first?.id.number == 101)
+    #expect(page.items.first?.github?.changedFiles == 3)
+  }
+
+  @Test
   func `metadata from another update snapshot is rejected`() async throws {
     let runner = CommandRunner { _, arguments, _ in
       if arguments.contains("graphql") {
-        return try .init(output: Self.summaryData([1]))
+        return try .init(output: Self.listData([1], overflowing: true))
       }
       return .init(
         output: Data(
-          #"[{"number":1,"title":"PR","html_url":"https://github.com/owner/repo/pull/1","state":"open","labels":[],"updated_at":"2026-09-09T00:00:00Z"}]"#
+          #"{"number":1,"title":"PR","html_url":"https://github.com/owner/repo/pull/1","state":"open","labels":[],"updated_at":"2026-09-09T00:00:00Z"}"#
             .utf8
         )
       )

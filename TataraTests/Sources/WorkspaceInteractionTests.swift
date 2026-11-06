@@ -258,7 +258,7 @@ struct WorkspaceInteractionTests {
   }
 
   @Test
-  func `committed filter clears without leaving its pane`() async throws {
+  func `committed list search clears without leaving its pane`() async throws {
     var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
     state.pane = .files
     state.tab = .diff
@@ -269,7 +269,7 @@ struct WorkspaceInteractionTests {
     state.searches[.files]?.query = "swift"
     let store = TestStore(initialState: state) { WorkspaceFeature() }
     await store.send(.keyPressed("esc")) { $0.searches[.files] = .init()
-      $0.fileSearchGeneration = 1
+      $0.listSearchGeneration = 1
     }
     #expect(store.state.pane == .files)
     #expect(store.state.scroll == 8)
@@ -281,11 +281,11 @@ struct WorkspaceInteractionTests {
     var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
     state.pane = .files
     let store = TestStore(initialState: state) { WorkspaceFeature() }
-    await store.send(.commandPressed(.search)) { $0.searches[.files] = .init()
-      $0.searches[.files]?.isEditing = true
-    }
-    await store.send(.keyPressed("s")) { $0.searches[.files]?.query = "s" }
-    await store.send(.keyPressed("enter")) { $0.searches[.files]?.isEditing = false }
+    store.exhaustivity = .off
+    await store.send(.commandPressed(.search))
+    await store.send(.keyPressed("s"))
+    await store.receive(\.listSearchResponse)
+    await store.send(.keyPressed("enter"))
     #expect(store.state.activeSearch.isActive)
     #expect(store.state.pane == .files)
   }
@@ -442,7 +442,7 @@ struct WorkspaceInteractionTests {
   }
 
   @Test
-  func `sidebar projections follow their inputs and preserve matching ancestors`() throws {
+  func `sidebar projections preserve unmatched rows during search`() throws {
     let item = try item()
     var state = WorkspaceFeature.State(repository: item.id.repository)
     state.items = [item]
@@ -457,12 +457,12 @@ struct WorkspaceInteractionTests {
     #expect(!state.visibleFileRows.contains { $0.path == "Sources/One.swift" })
     state.searches[.files] = .init()
     state.searches[.files]?.query = "One"
-    state.fileMatches = ["Sources/One.swift": [1]]
-    #expect(state.visibleFileRows.map(\.path) == ["/", "Sources", "Sources/One.swift"])
+    state.listSearchResults[.files] = .init(ids: ["file:Sources/One.swift"], rows: [2])
+    #expect(state.visibleFileRows.map(\.path) == ["/", "Sources", "Tests", "Tests/Two.swift"])
     state.preferences.filesView = .list
-    #expect(state.visibleFileRows.map(\.path) == ["Sources/One.swift"])
+    #expect(state.visibleFileRows.map(\.path) == ["Sources/One.swift", "Tests/Two.swift"])
     state.searches[.files] = nil
-    state.fileMatches = nil
+    state.listSearchResults[.files] = nil
     #expect(state.visibleFiles.count == 2)
     state.detail = nil
     #expect(state.visibleFileRows.isEmpty)

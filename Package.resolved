@@ -1,5 +1,5 @@
 {
-  "originHash" : "93b781f8dd15ba878b721005a63ca57e43d8fa15fed120e6769803ee9f694f62",
+  "originHash" : "48cd0e1c3b30c381e4f82b8f8cf0449f586b78bd6df1faa209f2d283667c8ac4",
   "pins" : [
     {
       "identity" : "combine-schedulers",
@@ -197,14 +197,6 @@
       "state" : {
         "revision" : "8227201d741c82183c9b0531a7d9ec7fa9240a2f",
         "version" : "2.1.0"
-      }
-    },
-    {
-      "identity" : "termloom",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/Frank-III/termloom",
-      "state" : {
-        "revision" : "ff6dd74f7daaef393480c24de734c1435719ad46"
       }
     }
   ],

@@ -63,7 +63,10 @@ do {
     for (name, value) in tools {
       let executable = fixtures.appendingPathComponent(name)
       // These constant-output executable fixtures never run build, signing or forge commands.
-      try "#!/bin/sh\nprintf '%s\\n' '\(value)'\n".write(to: executable, atomically: true, encoding: .utf8)
+      let source = name == "xcrun"
+        ? "#!/bin/sh\ncase \"$3\" in --show-sdk-path) printf '%s\\n' '/SDKs/MacOSX\(scenario.sdk).sdk' ;; *) printf '%s\\n' '\(value)' ;; esac\n"
+        : "#!/bin/sh\nprintf '%s\\n' '\(value)'\n"
+      try source.write(to: executable, atomically: true, encoding: .utf8)
       try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
     }
     var childEnvironment = environment

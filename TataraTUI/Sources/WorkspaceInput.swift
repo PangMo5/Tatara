@@ -51,11 +51,9 @@ extension TerminalWorkspace {
     if store.showsHelp {
       scope = .help
       rect = geometry.popup
-    } else if size.width < 100 {
+    } else if size.width < 100, store.isSelectingItems {
       rect = geometry.body
-      switch store.pane { case .items: scope = .items
-      case .files: scope = .files
-      case .content: scope = .content }
+      scope = store.pane == .items ? .items : .content
     } else if geometry.items.contains(event.position) {
       scope = .items
       rect = geometry.items
@@ -67,9 +65,9 @@ extension TerminalWorkspace {
       rect = geometry.content
     }
     guard rect.contains(event.position) else { return }
-    if scope == .content, event.kind == .down(.left), event.position.y == rect.y + 1 {
+    if scope == .content, event.kind == .down(.left), event.position.y == rect.y {
       let localization = Localization(language: store.preferences.language)
-      var x = rect.x + 1
+      var x = rect.x + 2
       for tab in WorkspaceFeature.ContentTab.allCases {
         let width = TerminalWidth.of(localization(WorkspacePresentation.tabTitle(tab))) + 3
         if event.position.x >= x, event.position.x < x + width {
@@ -86,7 +84,8 @@ extension TerminalWorkspace {
     }
     guard event.kind == .down(.left) || event.kind == .drag(.left) else { return }
     let rowHeight = scope == .items ? store.itemRowHeight : 1
-    let page = max(1, (rect.height - (scope == .help ? 5 : 3)) / rowHeight)
+    let headerRows = scope == .items || scope == .files ? 1 : 2
+    let page = max(1, (rect.height - (scope == .help ? 5 : headerRows + 1)) / rowHeight)
     let total: Int
     let offset: Int
     switch scope {
@@ -107,8 +106,8 @@ extension TerminalWorkspace {
       store.send(.scrollbarMoved(scope, offset: metrics.offset(at: Double(event.position.y - rect.y - 1))))
       return
     }
-    let row = offset + (event.position.y - rect.y - 2) / rowHeight
-    guard event.position.y >= rect.y + 2, event.position.y < rect.bottom - 1 else { return }
+    let row = offset + (event.position.y - rect.y - headerRows) / rowHeight
+    guard event.position.y >= rect.y + headerRows, event.position.y < rect.bottom - 1 else { return }
     switch scope {
     case .items: if store.visibleItems.indices.contains(row) {
         store.send(.itemSelected(store.visibleItems[row].id))
@@ -135,8 +134,14 @@ extension TerminalWorkspace {
   func handleEditor(_ event: TerminalEvent) -> ApplicationUpdate {
     guard let store else { return .ignore }
     if case .key(let key) = event, key.key == .escape {
-      if store.commentEditor != nil {
-        store.send(.commentEditor(.close))
+      if let comment = store.commentEditor {
+        if comment.isConfirming {
+          store.send(.commentEditor(.editPressed))
+        } else if !comment.isViewing {
+          store.send(.commentEditor(.viewThread))
+        } else {
+          store.send(.commentEditor(.close))
+        }
       } else if store.filterEditor != nil {
         store.send(.filterEditor(.close))
       } else {
@@ -150,6 +155,37 @@ extension TerminalWorkspace {
       previewTask?.cancel()
       reviewPreview = nil
       return .redraw
+    }
+    if let comment = store.commentEditor, comment.isViewing {
+      if case .key(let press) = event {
+        let key = Self.keyName(press)
+        let command = store.preferences.keymap.command(for: key)
+        if command == .down || command == .up || command == .contentPageDown || command == .contentPageUp {
+          let direction = command == .up || command == .contentPageUp ? -1 : 1
+          store.send(.commentEditor(.threadScrolled(direction * (command == .contentPageDown || command == .contentPageUp
+              ? comment.threadHeight
+              : 1))))
+          return .redraw
+        }
+        let operation: CommentOperation? =
+          switch command {
+          case .open,
+               .comment: .reply
+          case .editComment: .edit
+          case .deleteComment: .delete
+          case .reactComment: .react
+          case .resolveComment: comment.context?.thread?.isResolved == true ? .unresolve : .resolve
+          default: nil
+          }
+        if let operation {
+          store.send(.commentEditor(.operationSelected(operation)))
+          return .redraw
+        }
+      }
+      if case .mouse(let mouse) = event, mouse.kind == .scrollDown || mouse.kind == .scrollUp {
+        store.send(.commentEditor(.threadScrolled(mouse.kind == .scrollDown ? 3 : -3)))
+        return .redraw
+      }
     }
     if case .action(let action) = event {
       let id = action.rawValue
@@ -208,7 +244,7 @@ extension TerminalWorkspace {
         case "review-edit": store.send(.review(.editButtonPressed))
 
         case "review-add": store.send(.review(.addInlineButtonPressed))
-          if store.review?.isEditingInline == false {
+          if store.review?.isEditingInline != true {
             editors["review-inline"] = nil
             editorTexts["review-inline"] = nil
           }
@@ -218,6 +254,18 @@ extension TerminalWorkspace {
         case "review-latest": store.send(.review(.reviewLatestRevisionButtonPressed))
 
         default:
+          if
+            id.hasPrefix("draft-open:"),
+            let index = Int(id.dropFirst(11))
+          {
+            store.send(.draftCommentSelected(index, edit: false))
+          }
+          if
+            id.hasPrefix("draft-edit:"),
+            let index = Int(id.dropFirst(11))
+          {
+            store.send(.draftCommentSelected(index, edit: true))
+          }
           if
             id.hasPrefix("event:"),
             let value = ReviewEvent(rawValue: String(id.dropFirst(6)))
@@ -250,7 +298,15 @@ extension TerminalWorkspace {
           case .up: -1
           case .pageDown: 10
           case .pageUp: -10
-          default: 0 }
+          default:
+            switch store.preferences.keymap.command(for: Self.keyName(key)) {
+            case .down: 1
+            case .up: -1
+            case .contentPageDown: reviewPreviewHeight
+            case .contentPageUp: -reviewPreviewHeight
+            default: 0
+            }
+          }
 
         case .mouse(let mouse): mouse.kind == .scrollDown ? 3 : mouse.kind == .scrollUp ? -3 : 0
 

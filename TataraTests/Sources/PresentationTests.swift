@@ -10,11 +10,140 @@ import TataraSystem
 import TermLoom
 import TermLoomTextArea
 import Testing
+@testable import TataraTUI
 
 @MainActor
 struct PresentationTests {
 
   // MARK: Internal
+
+  @Test(arguments: TataraCore.Theme.allCases)
+  func `forge artwork changes pose within its bounds and preserves terminal transparency`(_ theme: TataraCore.Theme) {
+    let size = Size(width: 64, height: 30)
+    for ascii in [false, true] {
+      for noColor in [false, true] {
+        var pictures = [[String]]()
+        for phase in [0, 4] {
+          var screen = TerminalScreen(ascii: ascii)
+          screen.text("preserve", in: Rect(x: 0, y: 0, width: 8, height: 1))
+          ForgeLoading.draw(
+            in: Rect(x: 6, y: 3, width: 44, height: 22),
+            message: "Loading",
+            frame: phase,
+            ascii: ascii,
+            palette: Palette(theme, noColor: noColor),
+            brand: true,
+            into: &screen,
+          )
+          var frame = Frame(buffer: Buffer(area: Rect(size: size)))
+          frame.render(screen)
+          let lines = frame.buffer.lines()
+          #expect(lines[0].hasPrefix("preserve"))
+          #expect(lines.contains { $0.contains("Loading") })
+          #expect(lines.joined().contains(ascii ? "#####" : "█"))
+          if ascii {
+            #expect(lines.joined().unicodeScalars.allSatisfy { $0.isASCII })
+          }
+          for y in 0 ..< size.height {
+            for x in 0 ..< size.width {
+              let style = frame.buffer[.init(x: x, y: y)].style
+              if noColor || x < 6 || x >= 50 || y < 3 || y >= 25 {
+                #expect(style.background == nil || style.background == .reset)
+              }
+              if noColor {
+                #expect(style.foreground == nil || style.foreground == .reset)
+              }
+            }
+          }
+          pictures.append(lines)
+        }
+        #expect(pictures[0] != pictures[1])
+      }
+    }
+  }
+
+  @Test
+  func `loading animation preserves the identified preview cursor and source ownership`() throws {
+    var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
+    state.document = .init(lines: [[.init(text: "old title")], [.init(text: "keep this preview")]])
+    state.documentTitle = "Original.swift"
+    state.documentGeneration = 1
+    state.contentGeneration = 2
+    state.diffCursor = 1
+    state.pane = .content
+    state.isLoadingDiff = true
+    var view = presentation(state)
+    for phase in 0 ..< ForgeLoading.frameCount {
+      view.loadingFrame = phase
+      var frame = Frame(buffer: Buffer(area: Rect(size: view.size)))
+      frame.render(view.screen())
+      let lines = frame.buffer.lines()
+      #expect(lines.contains { $0.contains("keep this preview") })
+      #expect(lines.contains { $0.contains("Preview") && $0.contains("Original.swift") })
+
+      #expect(lines.contains { $0.unicodeScalars.contains { (0x2580 ... 0x259F).contains(Int($0.value)) } })
+      #expect(!view.store.isDocumentCurrent)
+      #expect(view.store.diffCursor == 1)
+      #expect(view.store.documentGeneration == 1)
+      #expect(view.store.contentGeneration == 2)
+    }
+  }
+
+  @Test
+  func `constrained preview keeps loading feedback without crowded artwork`() throws {
+    var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
+    state.document = .init(lines: [[.init(text: "old title")], [.init(text: "keep preview")]])
+    state.documentTitle = "Original.swift"
+    state.isLoadingDiff = true
+    state.pane = .content
+    let view = presentation(state, size: .init(width: 104, height: 32))
+    var frame = Frame(buffer: Buffer(area: Rect(size: view.size)))
+    frame.render(view.screen())
+    let text = frame.buffer.lines().joined(separator: "\n")
+    #expect(text.contains("Preview"))
+    #expect(text.contains("keep preview"))
+    #expect(text.contains("Normal"))
+    #expect(!text.unicodeScalars.contains { (0x2580 ... 0x259F).contains(Int($0.value)) })
+  }
+
+  @Test
+  func `source search never paints loading chrome over current diff source`() throws {
+    var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
+    state.document = .init(lines: [[.init(text: "first current line")], [.init(text: "second current line")]])
+    state.isFinding = true
+    state.pane = .content
+    let view = presentation(state)
+    var frame = Frame(buffer: Buffer(area: Rect(size: view.size)))
+    frame.render(view.screen())
+    #expect(frame.buffer.lines().contains { $0.contains("first current line") })
+    #expect(frame.buffer.lines().contains { $0.contains("second current line") })
+    #expect(!frame.buffer.lines().contains { $0.unicodeScalars.contains { (0x2580 ... 0x259F).contains(Int($0.value)) } })
+  }
+
+  @Test
+  func `initial forge loading survives an empty content placeholder prepared after resize`() throws {
+    var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
+    state.isLoading = true
+    state.document = .init(lines: [[.init(text: "unselected placeholder")]])
+    let view = presentation(state, size: .init(width: 104, height: 32))
+    var frame = Frame(buffer: Buffer(area: Rect(size: view.size)))
+    frame.render(view.screen())
+    #expect(frame.buffer.lines().contains { $0.unicodeScalars.contains { (0x2580 ... 0x259F).contains(Int($0.value)) } })
+    #expect(!frame.buffer.lines().contains { $0.contains("unselected placeholder") })
+  }
+
+  @Test
+  func `loading artwork never replaces a visible failure`() throws {
+    var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
+    state.isLoading = true
+    state.error = TataraError(.commandFailed, detail: "fixture failure")
+    let view = presentation(state)
+    var frame = Frame(buffer: Buffer(area: Rect(size: view.size)))
+    frame.render(view.screen())
+    #expect(frame.buffer.lines().contains { $0.contains("fixture failure") })
+    #expect(!ForgeLoading.isActive(view.store))
+    #expect(!frame.buffer.lines().contains { $0.unicodeScalars.contains { (0x2580 ... 0x259F).contains(Int($0.value)) } })
+  }
 
   @Test
   func `sidebar geometry honors preference and preserves usable content width`() {
@@ -235,16 +364,16 @@ struct PresentationTests {
       state.itemsScroll = ScrollMetrics.selectionOffset(
         selected: 10,
         total: 25,
-        page: max(1, (geometry.items.height - 3) / state.itemRowHeight),
+        page: max(1, (geometry.items.height - 2) / state.itemRowHeight),
       )
-      state.filesScroll = ScrollMetrics.selectionOffset(selected: 10, total: 25, page: geometry.files.height - 3)
+      state.filesScroll = ScrollMetrics.selectionOffset(selected: 10, total: 25, page: geometry.files.height - 2)
       let view = presentation(state, size: .init(width: 160, height: height))
       var frame = Frame(buffer: Buffer(area: Rect(size: view.size)))
       frame.render(view.screen())
       let rect = pane == .items ? view.geometry.items : view.geometry.files
-      let page = pane == .items ? max(1, (rect.height - 3) / state.itemRowHeight) : rect.height - 3
+      let page = pane == .items ? max(1, (rect.height - 2) / state.itemRowHeight) : rect.height - 2
       let margin = min(2, (page - 1) / 2)
-      let rows = stride(from: rect.y + 2, to: rect.bottom - 1, by: pane == .items ? state.itemRowHeight : 1)
+      let rows = stride(from: rect.y + 1, to: rect.bottom - 1, by: pane == .items ? state.itemRowHeight : 1)
         .map { String(frame.buffer.lines()[$0].prefix(rect.width)) }
       let selected = try #require(rows.firstIndex { $0.contains(pane == .items ? "PR-10" : "File10.swift") })
       #expect(selected >= margin)

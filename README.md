@@ -33,12 +33,12 @@ with the existing Git history. See [contributing](CONTRIBUTING.md).
 ```sh
 mise install
 mise run toolchain
-mise run generate
+mise run resolve
 mise run build
-mise exec -- DerivedData/Build/Products/Debug/tatara --demo
+mise run run -- --demo
 
 mise exec -- gh auth login
-mise exec -- DerivedData/Build/Products/Debug/tatara --repo OWNER/REPO
+mise run run -- --repo OWNER/REPO
 ```
 
 Run without `--repo` inside a repository to use `gh repo view`'s repository
@@ -49,6 +49,8 @@ For a local optimized installation, run `mise exec -- swift Scripts/Tatara.swift
 and `mise exec -- swift Scripts/Tatara.swift install-local`. This installs into
 `~/.local/share/tatara/local/bin`; add that directory to your shell
 PATH. Re-run the installer after rebuilding, then restart Tatara.
+Keep `libswiftCompatibilitySpan.dylib` beside `tatara` in that `bin` directory;
+the installer copies this Swift compatibility runtime for macOS 15 support.
 
 ## Installation status
 
@@ -62,8 +64,17 @@ installs those runtime tools. Rebuild and rerun `install-local` to update Tatara
 See the [release checklist](docs/RELEASING.md) for the unverified binary distribution
 work that remains before the first release.
 
+Use `tatara --current` inside a Git checkout or linked worktree to open the PR
+associated with that branch directly in Files. It uses `gh pr view` for checkout
+resolution; a missing PR is an explicit error. `--current` uses the current
+directory and cannot be combined with `--repo`.
+
 ## Review workflow
 
+- Loading shows a shaded pixel-art forge with a swinging hammer, glowing metal
+  and sparks. Initial loading has a centered scene; diff preparation has a smaller
+  scene beside the identified preview, or an inline indicator in narrow panes. Use
+  `--reduce-motion`, `--stable-output` or `--accessible` to keep the artwork still.
 - Start by selecting a PR in a dedicated screen. Every row includes its author,
   update time and branches; the adjacent Overview shows assignees, reviewers,
   labels, milestone, CI/review state and change totals. There is no density toggle.
@@ -81,20 +92,48 @@ work that remains before the first release.
 - Files use a directory tree by default. `Enter` folds/unfolds directories;
   `h` collapses or selects the parent, and `l` expands or enters a child.
   Focusing a directory shows the combined diff of its changed descendants.
+- Below 100 columns, Files and Diff stay visible in an equal vertical split:
+  Files above and Content below. Tab changes focus without replacing either pane;
+  mouse and wheel input target the panel under the pointer.
+- The current-PR summary shows draft/open state, explicit review and CI status,
+  branch direction, file/comment totals, added/removed lines and commits. Reviewer,
+  assignee and label rows use remaining room; the border shows the update timestamp.
+- Panel titles, counts and selection positions sit in their borders. Diff file
+  names stay pinned while scrolling, including combined folder diffs. A subtle
+  cursor-line tint follows the active source side without changing syntax colors.
+- In Diff, `c` starts a comment at the source cursor; `V` selects a range. Adding
+  the comment returns to Diff and shows a **Pending review** card. `R` opens the
+  review summary beside Files, where pending comments can be opened, edited or
+  removed. A preview precedes the explicit final submission. Drafts remain local
+  until submission and stay in this process until quitting.
+- `gc` focuses an existing comment and `{` / `}` move between comments. `Enter`
+  opens its conversation reader; `c` replies and `e` edits when permitted. Escape
+  returns from editing to the reader, preserving the unfinished text; Escape again
+  returns to Diff. Every published-comment mutation retains its preview and fresh
+  permission/version/head checks.
 - `[` / `]` switch Overview, Diff, Discussion and Checks.
 - `gg/G` jump to first/last; `Ctrl-d/Ctrl-u` move half a page. `j/k` move source
   lines while `gj/gk` move displayed lines when a source line wraps.
 - Diff lines wrap by default. `w` toggles wrap; with wrap off, use `zh/zl` to scroll
   horizontally, `zH/zL` for half a screen and `z0` for the start. Horizontal wheel
   input also works. Additions/deletions with only one source side use the full width.
-- `/` in PRs submits a GitHub search query on `Enter`, including qualifiers such
-  as `is:open label:bug author:@me`. In Files it searches changed-file contents
-  with a regular expression, preserving matching files and their parent folders.
+- `/` in PRs finds titles, numbers, authors and branches within the loaded list;
+  in Files it finds file names and paths. Both keep all rows visible. Matches
+  highlight as you type, with no provider reads or preview changes. `Enter`
+  confirms the match, `Esc` cancels back to the original cursor and folds, and
+  `n/N` wrap through matching rows from the current cursor. After confirmation,
+  `Esc` clears the search. Patterns are case-sensitive; use `(?i)` to ignore case.
+- `f` opens GitHub filters and presets, including queries such as
+  `is:open label:bug author:@me`. `L` loads another page of remote results.
+- `g/` opens file-content search across all changed files. Submit a regular
+  expression with `Enter`; results show `path:line`, source side and a highlighted
+  excerpt. `j/k` or `n/N` navigate, `Enter` opens the exact diff location, and
+  `/` or `i` edits the query. `Esc` leaves input before closing the result list.
   Added/modified files use the reviewed head; deleted files use the merge base.
+  Opening a result reveals its immutable context even outside ordinary diff hunks.
 - `/` in Diff highlights regular-expression matches; `n/N` move to the next or
-  previous occurrence and reveal matches beyond the visible columns. Patterns
-  are case-sensitive; use `(?i)` for case-insensitive search. `Enter` keeps the
-  query active; `Esc` clears it without changing panes. `L` loads another page.
+  previous occurrence and reveal matches beyond the visible columns. `Enter`
+  keeps the query active; `Esc` clears it without changing panes.
 - In Diff, `*` / `#` search the current word forward/backward; `g*` / `g#`
   also match inside longer words. The line cursor uses the first keyword on the
   line, or the word at the current search hit. `n` follows the search direction;
@@ -210,15 +249,26 @@ difftastic's detected language and structural change status while reading a diff
 
 ## Development
 
-Tuist owns the project graph. TCA owns application state and effects. TermLoom
+Swift Package Manager owns the project graph; no Xcode project generation is
+required. Open `Package.swift` in Xcode for IDE support, or use `swift build`,
+`swift run tatara` and `swift test` through the pinned mise environment.
+TCA owns application state and effects. TermLoom
 owns terminal layout, input and rendering. Swift Subprocess runs `gh` and `difft`
 with explicit arguments and cancellation. TOML configures user preferences.
 All project automation is Swift: `Scripts/Tatara.swift` drives development and
 releases; `Scripts/Smoke` is a Swift package using SwiftTerm for real PTY checks.
-The generation command applies a checksum-verified patch to the pinned TermLoom
-input parser so horizontal wheel events retain their axis. Build validation rejects
-an unpatched checkout. Remove the patch in `Scripts/Tatara.swift` when the upstream
-dependency provides the fix; changed source checksums require an explicit review.
+The [local TermLoom package](ThirdParty/TermLoom/README.md) contains pinned upstream
+core and TextArea sources with the required wheel-axis and bounded scroll
+presentation changes. Builds do not modify dependency checkouts. Remote dependency
+versions are recorded in `Package.resolved`; `mise run resolve` also resolves the
+independent PTY helper. `TataraVersion.current` owns the executable version.
+Immutable file contents can be read from a matching local Git object store
+(Git 2.43 or newer), without checkout or fetch. Otherwise the existing `gh`
+provider reads the pinned revision. Folder/root diffs prepare at most four files
+concurrently and retain their original file order and source coordinates.
+`Package.swift` records the minimum macOS version and pinned SDK version. mise
+selects the matching SDK through `DEVELOPER_DIR`/`SDKROOT`, and scripted builds
+verify both values in the executable's Mach-O metadata.
 
 ```sh
 mise run test
@@ -226,10 +276,20 @@ mise run format
 mise exec -- swift Scripts/Tatara.swift localizations --check
 mise exec -- swift Scripts/Tatara.swift notices --check
 mise exec -- uvx --from 'reuse[charset-normalizer]==6.2.0' reuse lint
-mise exec -- swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Debug/tatara
-mise exec -- swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara --workspace
-mise exec -- swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara --stress
+mise exec -- swift Scripts/Tatara.swift build Release
+mise exec -- swift Scripts/Tatara.swift smoke
+mise exec -- swift Scripts/Tatara.swift smoke --workspace
+mise exec -- swift Scripts/Tatara.swift smoke --stress
 ```
+
+The build script queries `swift build --show-bin-path`, then prepares a relocatable
+runtime in `.artifacts/products/CONFIGURATION-ARCH`. It uses Apple's
+`swift-stdlib-tool` to copy the required Span compatibility runtime beside the
+executable and removes Xcode/build-directory library search paths. SwiftPM's own
+outputs remain untouched. `smoke`, installation, packaging and signing use this
+prepared Release runtime; an explicit binary path may be passed first to `smoke`.
+Installation and release archives retain that layout; Developer ID releases sign
+and notarize both files.
 
 See [architecture and initial boundaries](docs/ARCHITECTURE.md),
 [performance measurement](docs/PERFORMANCE.md),

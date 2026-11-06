@@ -65,6 +65,37 @@ tree. The quick picker filters loaded items on a cancellable worker, preserves
 the current PR until acceptance, and owns its own query generation.
 
 Comment actions load a fresh REST comment and GraphQL permissions/reactions.
+Below 100 columns, review geometry divides the body evenly between Files above
+and Content below. Geometry is independent of focus and supplies the same bounds
+for rendering, pointer dispatch and viewport updates. The PR selector retains its
+own screen. When the lower pane cannot contain an inline editor, its source-owned
+composer uses the available body; source and draft identities remain unchanged.
+
+Panel titles and selection counters occupy borders. Files and PR rows use the
+reclaimed header row; pointer and viewport geometry share that offset. Diff tabs
+occupy the top border, and an immutable per-row file-path lookup supplies the
+sticky filename from the displayed document, including combined diffs and previews.
+A low-contrast interaction fill marks the focused source side without changing
+syntax colors or token emphasis; unified shared rows retain both source identities.
+
+Saving an inline draft returns to Diff. Pending cards precede published discussion
+at the same anchor. R opens the final review beside Files; pending comments can be
+opened, edited or removed. Pending controls keep stable local identities after removal/reordering. Unsaved
+edits have separate draft identities from new comments, and removing the last pending comment invalidates its presentation.
+Review preview publication checks item, immutable revisions, event, body, comments
+and viewport generation. Only a completed preview exposes submission controls.
+
+Enter on a focused published comment opens a Markdown reader. Thread construction
+and wrapping run on workers; replies come from the loaded detail snapshot, while
+selected-comment context refreshes identity, permissions and version. The reader
+cannot produce a mutation. Editing returns to the reader with unfinished text
+intact; explicit preview and confirmation still gate every published write.
+
+`--current` uses gh's checkout-aware PR resolution and validates its host/repository
+URL before opening Files. The remaining PR list loads independently and retains
+the selected PR even when it is absent from that page. Missing PRs fail visibly;
+the application never substitutes the first listed PR. `--repo` is mutually exclusive.
+
 Review-thread lookup is paginated and matches the root comment's node ID. The
 comment editor owns its immutable item/head and preview. Confirmation consumes
 the preview once; the adapter rechecks account, body/version, permissions and head
@@ -73,8 +104,8 @@ refresh detail while preserving the selected file/directory and source cursor.
 
 The Files tree uses `/` as a synthetic root, separate from repository-relative
 file paths. Selecting it uses the existing combined-diff pipeline for all changed
-files. Empty trees have no root; search results keep it as an ancestor, and
-clearing a search expands the root when needed to reveal the selected file.
+files. Empty trees have no root. Local search keeps unrelated rows and expands
+only the ancestors needed to reveal its cursor; cancellation restores prior folds.
 
 File status badges and insertion/deletion totals come from `ChangedFile` metadata,
 not from counting difftastic's changed tokens. Zero line-count values are hidden. File comment counts include all published
@@ -180,29 +211,38 @@ Missing or truncated patches do not produce invented line mappings.
 
 File trees are built from metadata before presentation, with distinct directory
 and file identities (including file-to-directory transitions). Collapse state is
-per workspace; search exposes matching files with their ancestors. The cursor can
+per workspace; search preserves the complete tree and reveals matching rows. The cursor can
 select a directory to prepare a combined diff for its changed descendants. Each
 source row retains its file path, side, and source line; annotations have no review
 anchor. Current remote comments follow their source row, while outdated or
 unrepresented comments remain identified under the file header. Draft insertion
 preserves the cursor and viewport by source identity. The review editor expands
 beneath its source row and keeps the workspace visible. `files_view` selects tree or
-flat presentation. Sidebar projections are rebuilt only when their source, filter,
+flat presentation. Sidebar projections are rebuilt only when their source,
 collapse state, or layout changes; navigation and view evaluation reuse them.
 
-`/` in the item pane submits a remote query on Enter. `f` opens a TCA filter
-feature with repository labels and saved presets. Remote queries use GitHub's issue/PR search API
+`/` in PRs and Files incrementally searches loaded metadata on a worker. Stable
+row identities and indexed results preserve the complete list. Input moves a
+transient cursor without loading previews; Enter commits, Esc restores the prior
+query/cursor/folds, and n/N wrap from the current row. Search generations reject
+obsolete source snapshots. `f` opens a TCA filter feature with repository labels and saved presets. Remote queries use GitHub's issue/PR search API
 through `gh`; responses must still match the configured forge, repository and
 kind. Saved presets live in a separate SQLiteData database under XDG data storage,
 so cache eviction cannot remove them. Preset loading is owned by the parent
 state transition, not a transient popup lifecycle hook. Request generations prevent
 an older read from clearing an in-flight save or replacing its result.
 
-Files search reads immutable changed-file contents through the forge client:
+`g/` opens a separate TCA result list and reads immutable changed-file contents
+through the forge client:
 head content for present files and merge-base content for deleted files. Four
 bounded worker tasks evaluate ICU regular expressions, rejecting files over
 32 MiB with a visible error and skipping binary or non-UTF-8 contents. Search
-generations prevent obsolete results from changing the tree. Diff search uses
+generations prevent obsolete responses from replacing results. Each hit retains
+path, source side, line and a bounded excerpt; at most 10,000 matching lines are
+retained. Opening a hit validates the current item/revisions and requests its exact
+source context from difftastic alignment, including unchanged files or omitted
+context. Cache identity includes the reveal location, so ordinary hunk rendering
+and expanded search context cannot collide. Diff search uses
 the same pattern syntax and limits results to 100,000 occurrences with a visible
 error. This is content search with explicit limits, not complete ripgrep syntax
 or Vim pattern compatibility.
@@ -219,9 +259,10 @@ or Vim pattern compatibility.
   native character editing, Unicode paste and undo/redo.
 - GitHub caps its changed-file endpoint at 3,000 files. Tatara checks the reported
   count and reports incompleteness instead of showing a falsely complete review.
-- TermLoom is pinned to an immutable upstream revision in the committed lockfile.
+- TermLoom is a local source package under `ThirdParty/TermLoom`, with its immutable
+  upstream revision recorded in `upstream.json` and the original MIT license retained.
   Its native application runtime owns input, focus routing, observation-driven
-  redraw and terminal restoration. The TextArea module is built from that same
-  pinned checkout through the Tuist manifest. `Scripts/Tatara.swift` applies and validates
-  source-hash-guarded wheel-axis and scroll-presentation patches during generation.
-  Upgrades must reevaluate both patches; a source mismatch is a visible failure.
+  redraw and terminal restoration. The local manifest exposes core and TextArea
+  from the same source snapshot. Wheel-axis and scroll-presentation changes are
+  committed source, exercised by unit and PTY tests; builds never patch caches.
+  Upgrades must reevaluate both changes against the recorded upstream revision.

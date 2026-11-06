@@ -85,13 +85,15 @@ struct FeatureTests {
 
   @Test
   func `search consumes quit key as text`() async throws {
-    var state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
-    state.searches[.items] = .init()
-    state.searches[.items]?.isEditing = true
+    let state = try WorkspaceFeature.State(repository: RepositoryID("owner/repo"))
     let store = TestStore(initialState: state) { WorkspaceFeature() }
-    await store.send(.keyPressed("q")) { $0.searches[.items]?.query = "q" }
-    await store.send(.keyPressed("esc")) { $0.searches[.items] = .init()
-    }
+    store.exhaustivity = .off
+    await store.send(.commandPressed(.search))
+    await store.send(.keyPressed("q"))
+    await store.receive(\.listSearchResponse)
+    #expect(store.state.searches[.items]?.query == "q")
+    await store.send(.keyPressed("esc"))
+    #expect(store.state.searches[.items]?.isActive == false)
   }
 
   @Test

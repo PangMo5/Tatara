@@ -101,25 +101,47 @@ struct WorkspaceGeometry {
     )
   }
 
+  var isStacked: Bool {
+    size.width < 100 && !isSelectingItems
+  }
+
+  var canShowInlineReview: Bool {
+    content.height >= 12
+  }
+
   var items: Rect {
     if size.width >= 100 {
       Rect(
         x: 0,
         y: 1,
         width: sidebarWidth,
-        height: isSelectingItems ? body.height : min(8, max(5, body.height / 4)),
+        height: isSelectingItems ? body.height : min(10, max(5, body.height / 4)),
       )
     } else {
-      body
+      if isSelectingItems {
+        body
+      } else {
+        Rect(x: 0, y: body.y, width: size.width, height: 0)
+      }
     }
   }
 
   var files: Rect {
-    size.width >= 100 ? Rect(x: 0, y: items.bottom, width: sidebarWidth, height: body.height - items.height) : body
+    if isStacked {
+      return Rect(x: 0, y: body.y, width: body.width, height: body.height / 2)
+    }
+    return size.width >= 100 ? Rect(x: 0, y: items.bottom, width: sidebarWidth, height: body.height - items.height) : body
   }
 
   var content: Rect {
-    size.width >= 100 ? Rect(x: sidebarWidth, y: 1, width: size.width - sidebarWidth, height: body.height) : body
+    if isStacked {
+      return Rect(x: 0, y: files.bottom, width: body.width, height: body.bottom - files.bottom)
+    }
+    return size.width >= 100 ? Rect(x: sidebarWidth, y: 1, width: size.width - sidebarWidth, height: body.height) : body
+  }
+
+  var review: Rect {
+    size.width >= 140 ? content : body
   }
 
   var reviewCommentCapacity: Int {

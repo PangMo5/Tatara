@@ -39,14 +39,28 @@ public struct ReviewFeature {
     public var isSubmitting = false
     public var error: TataraError?
     public var selectedFile: ChangedFile?
-    public var comments = [InlineComment]()
+    public private(set) var commentIdentities = [Int]()
     public var isEditingInline = false
     public var inlineLine = ""
     public var inlineStartLine = ""
     public var inlineAnchorLocked = false
+    public var editingCommentIndex: Int?
     public var inlineDrafts = [String: String]()
     public var inlineSide = InlineComment.Side.right
     public var inlineBody = ""
+
+    public var comments: [InlineComment] {
+      get { storedComments }
+      set {
+        storedComments = newValue
+        commentIdentities = []
+        for _ in newValue {
+          let identity = nextCommentIdentity
+          nextCommentIdentity += 1
+          commentIdentities.append(identity)
+        }
+      }
+    }
 
     public var revisionChanged: Bool {
       expectedHead != latestHead || expectedMergeBase != latestMergeBase
@@ -58,14 +72,51 @@ public struct ReviewFeature {
       }
     }
 
-    public mutating func restoreInlineDraft() {
-      inlineBody = inlineDrafts[inlineKey] ?? ""
+    public mutating func restoreInlineDraft(fallback: String = "") {
+      inlineBody = inlineDrafts[inlineKey] ?? fallback
+    }
+
+    public mutating func discardInlineDraft() {
+      inlineDrafts[inlineKey] = nil
+    }
+
+    public mutating func commitInlineComment(_ comment: InlineComment) {
+      if let index = editingCommentIndex {
+        storedComments[index] = comment
+      } else {
+        storedComments.append(comment)
+        let identity = nextCommentIdentity
+        nextCommentIdentity += 1
+        commentIdentities.append(identity)
+      }
+    }
+
+    public mutating func removeInlineComment(id: Int) {
+      guard let index = commentIdentities.firstIndex(of: id) else { return }
+      inlineDrafts["edit:\(id)"] = nil
+      storedComments.remove(at: index)
+      commentIdentities.remove(at: index)
+      if let editing = editingCommentIndex {
+        if editing == index {
+          editingCommentIndex = nil
+          isEditingInline = false
+          inlineBody = ""
+        } else if editing > index {
+          editingCommentIndex = editing - 1
+        }
+      }
     }
 
     // MARK: Private
 
+    private var storedComments = [InlineComment]()
+    private var nextCommentIdentity = 0
+
     private var inlineKey: String {
-      "\(selectedFile?.path ?? "")|\(inlineSide)|\(inlineStartLine)|\(inlineLine)"
+      if let index = editingCommentIndex {
+        return "edit:\(commentIdentities[index])"
+      }
+      return "\(selectedFile?.path ?? "")|\(inlineSide)|\(inlineStartLine)|\(inlineLine)"
     }
 
   }
@@ -103,6 +154,7 @@ public struct ReviewFeature {
         state.inlineLine = ""
         state.inlineStartLine = ""
         state.inlineDrafts = [:]
+        state.editingCommentIndex = nil
         state.isEditingInline = false
         state.isConfirming = false
         state.error = nil
@@ -146,14 +198,16 @@ public struct ReviewFeature {
           state.error = .init(.emptyReview)
           return .none
         }
-        state.comments.append(.init(
+        let comment = InlineComment(
           path: file.path,
           line: line,
           side: state.inlineSide,
           body: state.inlineBody,
           startLine: start == line ? nil : start,
-        ))
-        state.inlineDrafts["\(file.path)|\(state.inlineSide)|\(state.inlineStartLine)|\(state.inlineLine)"] = nil
+        )
+        state.commitInlineComment(comment)
+        state.discardInlineDraft()
+        state.editingCommentIndex = nil
         state.isEditingInline = false
         state.inlineBody = ""
         state.inlineLine = ""
@@ -162,13 +216,17 @@ public struct ReviewFeature {
         state.error = nil
         return .none
 
-      case .cancelInlineButtonPressed: state.isEditingInline = false
+      case .cancelInlineButtonPressed:
+        state.stashInlineDraft()
+        state.isEditingInline = false
+        state.editingCommentIndex = nil
+        state.inlineBody = ""
         state.error = nil
         return .none
 
-      case .removeInlineButtonPressed(let index):
-        guard !state.isSubmitting, state.comments.indices.contains(index) else { return .none }
-        state.comments.remove(at: index)
+      case .removeInlineButtonPressed(let id):
+        guard !state.isSubmitting else { return .none }
+        state.removeInlineComment(id: id)
         state.isConfirming = false
         return .none
 

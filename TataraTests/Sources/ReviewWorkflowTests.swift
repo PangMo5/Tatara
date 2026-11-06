@@ -9,6 +9,7 @@ import TataraKit
 import TataraPersistence
 import TataraSystem
 import Testing
+@testable import TataraTUI
 
 struct ReviewWorkflowTests {
   @Test
@@ -32,7 +33,7 @@ struct ReviewWorkflowTests {
   }
 
   @Test
-  func `tree keeps directories distinct from files and filters with ancestors`() {
+  func `tree keeps directories distinct and collapsed rows retain stable indices`() {
     let tree = FileTree(paths: ["a", "a/b.swift", "Sources/File10.swift", "Sources/File2.swift", "README.md"])
     #expect(Set(tree.rows.map(\.id)).count == tree.rows.count)
     #expect(tree.rows.first?.id == "directory:/")
@@ -40,7 +41,6 @@ struct ReviewWorkflowTests {
     #expect(tree.rows.first { $0.path == "README.md" }?.parent == "directory:/")
     #expect(tree.rows.first { $0.path == "Sources" }?.parent == "directory:/")
     #expect(tree.visible(collapsed: ["/"]).map(\.path) == ["/"])
-    #expect(tree.visible(collapsed: ["/"], matching: []).isEmpty)
     #expect(FileTree(paths: []).rows.isEmpty)
     #expect(tree.rows.filter { !$0.isDirectory }.map(\.path) == [
       "a/b.swift",
@@ -50,12 +50,53 @@ struct ReviewWorkflowTests {
       "README.md",
     ])
     #expect(!tree.visible(collapsed: ["Sources"]).contains { $0.path == "Sources/File2.swift" })
-    #expect(tree.visible(collapsed: ["Sources"], matching: ["Sources/File2.swift"]).map(\.path) == [
-      "/",
-      "Sources",
-      "Sources/File2.swift",
-    ])
-    #expect(tree.visible(collapsed: ["/"], matching: ["README.md"]).map(\.path) == ["/", "README.md"])
+    let id = "file:Sources/File2.swift"
+    #expect(tree.index(for: id).map { tree.rows[$0].id } == id)
+    #expect(tree.visible(collapsed: ["Sources"]).contains { $0.path == "README.md" })
+  }
+
+  @Test
+  func `search targets reveal omitted immutable context without expanding every gap`() throws {
+    let lines = (0..<40).map { "line \($0)" }
+    let json: [String: Any] = [
+      "language": "Swift",
+      "status": "changed",
+      "aligned_lines": (0..<40).map { [$0, $0] },
+      "chunks": [[["rhs": [
+        "line_number": 0,
+        "changes": [["start": 0, "end": 4, "content": "line", "highlight": "normal"]],
+      ]]]],
+    ]
+    let data = try JSONSerialization.data(withJSONObject: json)
+    let source = lines.joined(separator: "\n")
+    let normal = try ReviewDiff.decode(data, before: source, after: source, path: "A.swift")
+    #expect(!normal.rows.contains { $0.right?.number == 30 })
+    let revealed = try ReviewDiff.decode(
+      data,
+      before: source,
+      after: source,
+      path: "A.swift",
+      revealing: .init(path: "A.swift", line: 30, side: .right),
+    )
+    #expect(revealed.rows.contains { $0.right?.number == 30 && $0.right?.spans.first?.text == "line 29" })
+    #expect(!revealed.rows.contains { $0.right?.number == 15 })
+    #expect(revealed.rows.first?.right?.spans.first?.role == .added)
+    let unchanged = Data(#"{"language":"Swift","status":"unchanged"}"#.utf8)
+    let context = try ReviewDiff.decode(
+      unchanged,
+      before: source,
+      after: source,
+      path: "A.swift",
+      revealing: .init(path: "A.swift", line: 30, side: .right),
+    )
+    #expect(context.rows.contains { $0.left?.number == 30 && $0.right?.number == 30 })
+    #expect(throws: TataraError.self) { try ReviewDiff.decode(
+      unchanged,
+      before: source,
+      after: source,
+      path: "A.swift",
+      revealing: .init(path: "A.swift", line: 100, side: .right),
+    ) }
   }
 
   @Test
@@ -174,6 +215,8 @@ struct ReviewWorkflowTests {
     #expect(store.state.visualStart == nil)
     await store.send(.review(.inlineBodyChanged("Preserve this draft.")))
     await store.send(.review(.addInlineButtonPressed))
+    await store.receive(\.contentResponse)
+    await store.send(.commandPressed(.review))
     await store.send(.review(.previewButtonPressed))
     #expect(store.state.review?.isConfirming == true)
     await store.send(.reviewDismissed)

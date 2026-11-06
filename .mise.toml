@@ -1,5 +1,4 @@
 [tools]
-"aqua:tuist/tuist" = "4.214.1"
 swiftformat = "0.64.5"
 "aqua:cli/cli" = "2.103.3"
 "aqua:Wilfred/difftastic" = "0.72.0"
@@ -9,12 +8,13 @@ uv = "0.13.7"
 
 [env]
 DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode-27.2.0.app/Contents/Developer') }}"
+SDKROOT = "{{ exec(command='xcrun --sdk macosx --show-sdk-path') | trim }}"
 
 [tasks.toolchain]
 run = "swift Scripts/Tatara.swift toolchain"
 
-[tasks.generate]
-run = "swift Scripts/Tatara.swift generate"
+[tasks.resolve]
+run = "swift Scripts/Tatara.swift resolve"
 
 [tasks.build]
 run = "swift Scripts/Tatara.swift build"
@@ -23,10 +23,10 @@ run = "swift Scripts/Tatara.swift build"
 run = "swift Scripts/Tatara.swift test"
 
 [tasks.run]
-run = "DerivedData/Build/Products/Debug/tatara"
+run = "swift run tatara"
 
 [tasks.format]
 run = "swift Scripts/Tatara.swift format"
 
 [tasks.smoke]
-run = "swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara --workspace"
+run = "swift Scripts/Tatara.swift smoke --workspace"

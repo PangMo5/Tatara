@@ -39,6 +39,14 @@ public struct CommentFeature {
     public var item: ForgeItem
     public var expectedHead: String?
     public var target: DiscussionComment
+    public var isViewing = false
+    public var threadComments = [DiscussionComment]()
+    public var threadTarget: DiscussionComment?
+    public var threadDocument: ReviewDocument?
+    public var threadScroll = 0
+    public var threadWidth = 88
+    public var threadHeight = 16
+    public var threadGeneration = 0
     public var context: CommentContext?
     public var operation: CommentOperation
     public var body: String
@@ -55,7 +63,7 @@ public struct CommentFeature {
     public var strings: [String: String]
 
     public var mutation: CommentMutation? {
-      guard let context, context.allows(operation) else { return nil }
+      guard !isViewing, let context, context.allows(operation) else { return nil }
       let submittedBody = operation == .reply && target.anchor == nil ? "@\(context.comment.author)\n\n" + body : body
       return .init(
         item: item,
@@ -75,6 +83,10 @@ public struct CommentFeature {
 
   public enum Action: Sendable {
     case appeared
+    case viewThread
+    case threadRequested(width: Int, height: Int)
+    case threadResponse(key: String, generation: Int, Result<ReviewDocument, TataraError>)
+    case threadScrolled(Int)
     case contextResponse(Result<CommentContext, TataraError>)
     case operationSelected(CommentOperation)
     case bodyChanged(String)
@@ -97,15 +109,19 @@ public struct CommentFeature {
       case .appeared:
         let item = state.item
         let target = state.target
-        return .run { [forge] send in
+        let context = Effect<Action>.run { [forge] send in
           do { try await send(.contextResponse(.success(forge.commentContext(item, target)))) }
           catch is CancellationError {} catch { await send(.contextResponse(.failure(.wrapping(error)))) }
-        }.cancellable(id: CancelID.context)
+        }.cancellable(id: CancelID.context, cancelInFlight: true)
+        return state.isViewing
+          ? .merge(context, .send(.threadRequested(width: state.threadWidth, height: state.threadHeight)))
+          : context
 
       case .contextResponse(let result):
         state.isLoading = false
         switch result {
         case .success(let context):
+          guard context.comment.key == state.target.key else { return .none }
           if state.operation == .edit, state.body == state.target.body {
             state.body = context.comment.body
           }
@@ -114,24 +130,88 @@ public struct CommentFeature {
           if state.operation == .resolve, context.thread?.isResolved == true {
             state.operation = .unresolve
           }
-          if !context.allows(state.operation) {
+          if !state.isViewing, !context.allows(state.operation) {
             state.error = .init(.unavailable)
           }
 
         case .failure(let error): state.error = error
         }
+        return state.isViewing ? .send(.threadRequested(width: state.threadWidth, height: state.threadHeight)) : .none
+
+      case .viewThread:
+        guard !state.isSubmitting else { return .none }
+        state.isViewing = true
+        state.isConfirming = false
+        state.generation += 1
+        return .merge(
+          .cancel(id: CancelID.preview),
+          .send(.threadRequested(width: state.threadWidth, height: state.threadHeight)),
+        )
+
+      case .threadRequested(let width, let height):
+        guard state.isViewing else { return .none }
+        let reusable = state.threadWidth == max(1, width) && state.threadTarget == state.target
+        state.threadWidth = max(1, width)
+        state.threadHeight = max(1, height)
+        if reusable, state.isPreparing || state.threadDocument != nil {
+          state.threadScroll = min(state.threadScroll, max(0, (state.threadDocument?.lines.count ?? 0) - state.threadHeight))
+          return .none
+        }
+        state.threadTarget = state.target
+        state.threadGeneration += 1
+        let generation = state.threadGeneration
+        let target = state.target
+        let comments = state.threadComments
+        state.isPreparing = true
+        return .run(priority: .utility) { [documents] send in
+          do {
+            let markdown = try await Self.threadText(comments, target: target)
+            let document = try await documents.prepareComment(markdown, max(1, width))
+            try Task.checkCancellation()
+            await send(.threadResponse(key: target.key, generation: generation, .success(document)))
+          } catch is CancellationError {} catch {
+            if
+              !Task
+                .isCancelled
+            {
+              await send(.threadResponse(key: target.key, generation: generation, .failure(.wrapping(error))))
+            }
+          }
+        }.cancellable(id: CancelID.thread, cancelInFlight: true)
+
+      case .threadResponse(let key, let generation, let result):
+        guard state.isViewing, key == state.target.key, generation == state.threadGeneration else { return .none }
+        state.isPreparing = false
+        switch result {
+        case .success(let document):
+          state.threadDocument = document
+          state.threadScroll = min(state.threadScroll, max(0, document.lines.count - state.threadHeight))
+
+        case .failure(let error): state.error = error
+        }
+        return .none
+
+      case .threadScrolled(let delta):
+        state.threadScroll = max(
+          0,
+          min(max(0, (state.threadDocument?.lines.count ?? 0) - state.threadHeight), state.threadScroll + delta),
+        )
         return .none
 
       case .operationSelected(let operation):
         guard !state.isSubmitting, state.context?.allows(operation) == true else { return .none }
+        state.threadTarget = nil
+        state.isViewing = false
+        if state.operation != operation {
+          state.body = operation == .edit ? state.target.body : ""
+        }
         state.operation = operation
-        state.body = operation == .edit ? state.target.body : ""
         state.isConfirming = false
         state.preview = nil
         state.isPreparing = false
         state.error = nil
         state.generation += 1
-        return .cancel(id: CancelID.preview)
+        return .merge(.cancel(id: CancelID.preview), .cancel(id: CancelID.thread))
 
       case .bodyChanged(let value):
         guard !state.isSubmitting else { return .none }
@@ -243,9 +323,28 @@ public struct CommentFeature {
 
   // MARK: Internal
 
-  enum CancelID { case context, preview, submission }
+  enum CancelID { case context, preview, submission, thread }
 
   @Dependency(ForgeClient.self) var forge
   @Dependency(DocumentClient.self) var documents
+
+  // MARK: Private
+
+  @concurrent
+  private static func threadText(_ comments: [DiscussionComment], target: DiscussionComment) async throws -> String {
+    let root = target.replyToID ?? target.id
+    var thread = comments.filter { $0.id == root || $0.replyToID == root }
+    if let index = thread.firstIndex(where: { $0.key == target.key }) {
+      thread[index] = target
+    } else {
+      thread.append(target)
+    }
+    var blocks = [String]()
+    for comment in thread {
+      try Task.checkCancellation()
+      blocks.append("### @" + comment.author + "\n\n" + comment.body)
+    }
+    return blocks.joined(separator: "\n\n---\n\n")
+  }
 
 }

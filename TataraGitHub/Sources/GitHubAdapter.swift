@@ -12,15 +12,17 @@ public struct GitHubAdapter: Sendable {
 
   // MARK: Lifecycle
 
-  public init(runner: CommandRunner = .live, cache: CacheClient = .disabled) {
+  public init(runner: CommandRunner = .live, cache: CacheClient = .disabled, localGit: LocalGitReader = .disabled) {
     self.runner = runner
     self.cache = cache
+    self.localGit = localGit
   }
 
   // MARK: Public
 
   public let runner: CommandRunner
   public let cache: CacheClient
+  public let localGit: LocalGitReader
 
   public var capabilities: ForgeCapabilities {
     .init(reviews: true, inlineComments: true, issues: true)
@@ -64,11 +66,51 @@ public struct GitHubAdapter: Sendable {
     return try RepositoryID(value.nameWithOwner, host: resolvedHost)
   }
 
+  /// Let gh resolve the current checkout, including fork tracking; verify its identity.
+  @concurrent
+  public func currentPullRequest(_ repository: RepositoryID) async throws -> ForgeItem {
+    struct Current: Decodable {
+      let number: Int
+      let title: String
+      let url: URL
+      let author: Author
+      let state: String
+      let isDraft: Bool
+      struct Author: Decodable { let login: String }
+    }
+    let output = try await runner.checked("gh", ["pr", "view", "--json", "number,title,url,author,state,isDraft"])
+    let value = try decode(Current.self, output.output)
+    guard
+      value.number > 0,
+      let state = ItemState(rawValue: value.state.lowercased()),
+      value.url.scheme == "https",
+      value.url.host?.lowercased() == repository.host.lowercased(),
+      value.url.path.lowercased() == "/\(repository.owner)/\(repository.name)/pull/\(value.number)".lowercased()
+    else {
+      throw TataraError(.invalidResponse, detail: "The current branch PR does not belong to the detected repository.")
+    }
+    return ForgeItem(
+      id: .init(repository: repository, number: value.number),
+      kind: .pullRequest,
+      title: value.title,
+      author: value.author.login,
+      url: value.url,
+      state: state,
+      isDraft: value.isDraft,
+    )
+  }
+
   @concurrent
   public func list(_ repository: RepositoryID, _ kind: ItemKind, _ page: Int) async throws -> ItemPage {
     let key = "list:\(kind):\(page)"
     if let data = try await cache.read(Self.metadataNamespace(repository), key, 30) {
       return try decode(ItemPage.self, data)
+    }
+    if kind == .pullRequest, page == 1 {
+      let result = try await firstPullPage(repository)
+      try Task.checkCancellation()
+      try await cache.write(Self.metadataNamespace(repository), key, JSONEncoder().encode(result))
+      return result
     }
     let collection = kind == .pullRequest ? "pulls" : "issues"
     let values: [ItemDTO] = try await get(
@@ -234,6 +276,11 @@ public struct GitHubAdapter: Sendable {
     if let data = try await cache.read(namespace, path, nil) {
       return data
     }
+    if let data = try await localGit.read(repository, revision, path) {
+      try Task.checkCancellation()
+      try await cache.write(namespace, path, data)
+      return data
+    }
     let escaped = path.split(separator: "/", omittingEmptySubsequences: false)
       .lazy.map { String($0).addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "" }.joined(separator: "/")
     let result = try await runner.checked("gh", [
@@ -270,9 +317,9 @@ public struct GitHubAdapter: Sendable {
         let comparison: CompareDTO = try await get(repository, "compare/\(current.base.sha)...\(current.head.sha)")
         guard comparison.mergeBaseCommit.sha == expectedBase else { throw TataraError(.revisionChanged) }
       }
-      guard current.state == "open", !current.draft else { throw TataraError(
+      guard current.state == "open" else { throw TataraError(
         .unavailable,
-        detail: "The pull request is closed or a draft.",
+        detail: "The pull request is closed.",
       ) }
       endpoint = "pulls/\(number)/reviews"
       payload = try JSONEncoder().encode(ReviewPayload(
@@ -311,6 +358,70 @@ public struct GitHubAdapter: Sendable {
 
   private static func metadataNamespace(_ repository: RepositoryID) -> String {
     "metadata-v3:\(repository)"
+  }
+
+  /// The initial rich selection page is one snapshot, rather than REST followed by GraphQL.
+  private func firstPullPage(_ repository: RepositoryID) async throws -> ItemPage {
+    let query = """
+      query($owner: String!, $name: String!) {
+        repository(owner: $owner, name: $name) {
+          pullRequests(first: 100, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
+            nodes {
+              number title body url state isDraft author { login }
+              createdAt updatedAt closedAt mergedAt headRefOid headRefName baseRefName
+              reviewDecision totalCommentsCount statusCheckRollup { state }
+              additions deletions changedFiles commits { totalCount }
+              milestone { title }
+              labels(first: 100) { nodes { name } pageInfo { hasNextPage } }
+              assignees(first: 100) { nodes { login } pageInfo { hasNextPage } }
+              reviewRequests(first: 100) {
+                nodes { requestedReviewer { __typename ... on User { login } ... on Team { slug } ... on Mannequin { login } } }
+                pageInfo { hasNextPage }
+              }
+            }
+            pageInfo { hasNextPage }
+          }
+        }
+      }
+      """
+    let payload = try JSONSerialization.data(withJSONObject: [
+      "query": query,
+      "variables": ["owner": repository.owner, "name": repository.name],
+    ])
+    let output = try await runner.checked(
+      "gh",
+      ["api", "--hostname", repository.host, "graphql", "--input", "-"],
+      input: String(decoding: payload, as: UTF8.self),
+    )
+    let response = try decode(PullListResponse.self, output.output)
+    if let errors = response.errors, !errors.isEmpty {
+      throw TataraError(.invalidResponse, detail: errors.map(\.message).joined(separator: "\n"))
+    }
+    guard let page = response.data?.repository?.pullRequests else {
+      throw TataraError(.incompleteResponse, detail: "GitHub did not return the pull request page.")
+    }
+    var items = [ForgeItem]()
+    for value in page.nodes {
+      var item = try value.model(repository)
+      // Overflowing nested connections are completed from the full native REST record.
+      if value.labels.pageInfo.hasNextPage || value.assignees.pageInfo.hasNextPage || value.reviewRequests.pageInfo.hasNextPage {
+        let full: ItemDTO = try await get(repository, "pulls/\(value.number)")
+        let complete = full.model(repository, .pullRequest)
+        guard
+          complete.id == item.id,
+          complete.url == item.url,
+          complete.github?.updatedAt == item.github?.updatedAt
+        else {
+          throw TataraError(.revisionChanged, detail: "Pull request metadata changed while completing its connections.")
+        }
+        item.labels = complete.labels
+        item.github?.assignees = complete.github?.assignees ?? []
+        item.github?.requestedReviewers = complete.github?.requestedReviewers ?? []
+        item.github?.requestedTeams = complete.github?.requestedTeams ?? []
+      }
+      items.append(item)
+    }
+    return ItemPage(items: items, nextPage: page.pageInfo.hasNextPage ? 2 : nil)
   }
 
   /// One bounded GraphQL request enriches a REST page; no per-row subprocesses or inferred decisions.
@@ -442,6 +553,117 @@ private struct MilestoneDTO: Decodable { var title: String }
 // MARK: - TeamDTO
 
 private struct TeamDTO: Decodable { var slug: String }
+
+// MARK: - PullListResponse
+
+private struct PullListResponse: Decodable {
+  struct PageInfo: Decodable { var hasNextPage: Bool }
+  struct Page: Decodable { var nodes: [ListedPullDTO]
+    var pageInfo: PageInfo
+  }
+
+  struct Repository: Decodable { var pullRequests: Page }
+  struct Payload: Decodable { var repository: Repository? }
+
+  var data: Payload?
+  var errors: [SummaryResponse.Failure]?
+}
+
+// MARK: - ListConnection
+
+private struct ListConnection<Value: Decodable>: Decodable {
+  var nodes: [Value]
+  var pageInfo: PullListResponse.PageInfo
+}
+
+// MARK: - ListedPullDTO
+
+private struct ListedPullDTO: Decodable {
+
+  // MARK: Lifecycle
+
+  init(from decoder: any Decoder) throws {
+    summary = try PullSummaryDTO(from: decoder)
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    title = try values.decode(String.self, forKey: .title)
+    body = try values.decode(String.self, forKey: .body)
+    author = try values.decodeIfPresent(UserDTO.self, forKey: .author)
+    milestone = try values.decodeIfPresent(MilestoneDTO.self, forKey: .milestone)
+    labels = try values.decode(ListConnection<LabelDTO>.self, forKey: .labels)
+    assignees = try values.decode(ListConnection<UserDTO>.self, forKey: .assignees)
+    reviewRequests = try values.decode(ListConnection<Reviewer>.self, forKey: .reviewRequests)
+  }
+
+  // MARK: Internal
+
+  struct Reviewer: Decodable {
+    struct Identity: Decodable { var login: String?
+      var slug: String?
+    }
+
+    var requestedReviewer: Identity?
+  }
+
+  enum CodingKeys: String, CodingKey { case title, body, author, milestone, labels, assignees, reviewRequests }
+
+  let summary: PullSummaryDTO
+  let title: String
+  let body: String
+  let author: UserDTO?
+  let milestone: MilestoneDTO?
+  let labels: ListConnection<LabelDTO>
+  let assignees: ListConnection<UserDTO>
+  let reviewRequests: ListConnection<Reviewer>
+
+  var number: Int {
+    summary.number
+  }
+
+  func model(_ repository: RepositoryID) throws -> ForgeItem {
+    let path = summary.url.path.split(separator: "/")
+    guard
+      summary.url.host?.lowercased() == repository.host.lowercased(),
+      path.count == 4,
+      "\(path[0])/\(path[1])".lowercased() == repository.slug.lowercased(),
+      path[2] == "pull",
+      Int(path[3]) == number
+    else {
+      throw TataraError(.invalidResponse, detail: "The pull request page escaped its repository.")
+    }
+    return ForgeItem(
+      id: .init(repository: repository, number: number),
+      kind: .pullRequest,
+      title: title,
+      author: author?.login ?? "ghost",
+      body: body,
+      url: summary.url,
+      state: summary.state == "MERGED" ? .merged : summary.state == "OPEN" ? .open : .closed,
+      labels: labels.nodes.map(\.name),
+      isDraft: summary.isDraft,
+      github: .init(
+        createdAt: summary.createdAt,
+        updatedAt: summary.updatedAt,
+        closedAt: summary.closedAt,
+        mergedAt: summary.mergedAt,
+        assignees: assignees.nodes.map(\.login),
+        milestone: milestone?.title,
+        requestedReviewers: reviewRequests.nodes.compactMap { $0.requestedReviewer?.login },
+        requestedTeams: reviewRequests.nodes.compactMap { $0.requestedReviewer?.slug },
+        commentCount: summary.totalCommentsCount,
+        reviewDecision: summary.reviewDecision,
+        checksState: summary.statusCheckRollup?.state,
+        headOID: summary.headRefOid,
+        headBranch: summary.headRefName,
+        baseBranch: summary.baseRefName,
+        additions: summary.additions,
+        deletions: summary.deletions,
+        changedFiles: summary.changedFiles,
+        commits: summary.commits.totalCount,
+      ),
+    )
+  }
+
+}
 
 // MARK: - SummaryResponse
 

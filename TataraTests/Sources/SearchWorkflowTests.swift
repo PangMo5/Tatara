@@ -8,6 +8,7 @@ import Synchronization
 import TataraCore
 import TataraKit
 import Testing
+@testable import TataraTUI
 
 private func unifiedFixture() -> ReviewDiff {
   .init(path: "Example.swift", language: "Swift", status: "changed", rows: [
@@ -131,81 +132,193 @@ struct SearchWorkflowTests {
   // MARK: Internal
 
   @Test
-  func `PR slash search sends GitHub qualifiers only after Enter`() async throws {
-    let calls = Mutex<[String]>([])
-    let state = try state()
-    let store = TestStore(initialState: state) { WorkspaceFeature() } withDependencies: {
-      $0[ForgeClient.self].search = { _, kind, query, page in
-        expectNoDifference(kind, .pullRequest)
-        expectNoDifference(page, 1)
-        calls.withLock { $0.append(query) }
+  func `PR search keeps the loaded list and waits for confirmation before loading another PR`() async throws {
+    var initial = try state()
+    let second = ForgeItem(
+      id: .init(repository: initial.repository, number: 2),
+      kind: .pullRequest,
+      title: "Fix needle",
+      author: "other",
+      url: try #require(URL(string: "https://github.com/owner/repo/pull/2")),
+    )
+    initial.items.append(second)
+    initial.detailCache[second.id] = .init(item: second)
+    let store = TestStore(initialState: initial) { WorkspaceFeature() } withDependencies: {
+      $0[DocumentClient.self] = DocumentRenderer.client
+    }
+    store.exhaustivity = .off
+    await store.send(.commandPressed(.search))
+    await store.send(.keyPressed("n"))
+    await store.receive(\.listSearchResponse)
+    #expect(store.state.visibleItems == initial.items)
+    #expect(store.state.selectedItemID == initial.selectedItemID)
+    #expect(store.state.selectedItemIndex == 1)
+    #expect(store.state.contentGeneration == initial.contentGeneration)
+    await store.send(.keyPressed("esc"))
+    #expect(store.state.selectedItemIndex == 0)
+    #expect(store.state.selectedItemID == initial.selectedItemID)
+    await store.send(.commandPressed(.search))
+    await store.send(.keyPressed("2"))
+    await store.receive(\.listSearchResponse)
+    await store.send(.keyPressed("enter"))
+    await store.receive(\.itemSelected)
+    await store.finish()
+    #expect(store.state.selectedItemID == second.id)
+    #expect(store.state.visibleItems == initial.items)
+    #expect(store.state.activeFilter.isEmpty)
+  }
+
+  @Test
+  func `forge filters submit qualifiers without creating a local search`() async throws {
+    var initial = try state()
+    initial.filterEditor = .init(repository: initial.repository, kind: .pullRequest, query: "")
+    let queries = Mutex<[String]>([])
+    let store = TestStore(initialState: initial) { WorkspaceFeature() } withDependencies: {
+      $0[ForgeClient.self].search = { _, _, query, _ in
+        queries.withLock { $0.append(query) }
         return .init(items: [])
       }
       $0[DocumentClient.self] = DocumentRenderer.client
     }
     store.exhaustivity = .off
-    await store.send(.commandPressed(.search))
-    for character in "is:open label:\"good first issue\" author:@me" {
-      await store.send(.keyPressed(String(character)))
-    }
-    expectNoDifference(calls.withLock { $0 }, [])
-    expectNoDifference(store.state.visibleItems, state.items)
-    await store.send(.keyPressed("enter"))
+    await store.send(.filterEditor(.delegate(.apply("is:open label:bug author:@me"))))
     await store.receive(\.listResponse)
     await store.finish()
-    expectNoDifference(calls.withLock { $0 }, ["is:open label:\"good first issue\" author:@me"])
-    #expect(store.state.visibleItems.isEmpty)
-    expectNoDifference(store.state.pane, .items)
+    #expect(queries.withLock { $0 } == ["is:open label:bug author:@me"])
+    #expect(store.state.activeFilter == "is:open label:bug author:@me")
+    #expect(store.state.searches[.items]?.isActive == false)
   }
 
-  @Test
-  func `Files search reads immutable content including unchanged context and deleted files`() async throws {
-    var state = try state()
-    state.pane = .files
-    state.searches[.files] = .init()
-    state.searches[.files]?.query = "needle[0-9]"
-    state.searches[.files]?.isEditing = true
-    let reads = Mutex<[String: String]>([:])
-    let store = TestStore(initialState: state) { WorkspaceFeature() } withDependencies: {
-      $0[ForgeClient.self].content = { _, revision, path in
-        reads.withLock { $0[path] = revision }
-        return Data((path == "Sources/B.swift" ? "no matching content" : "unchanged\nneedle2\nend").utf8)
-      }
+  @Test(arguments: [FilesView.tree, .list])
+  func `Files search preserves all rows finds hidden paths and wraps from the actual cursor`(_ view: FilesView) async throws {
+    var initial = try state()
+    initial.pane = .files
+    initial.preferences.filesView = view
+    initial.collapsedDirectories = ["Elsewhere"]
+    let store = TestStore(initialState: initial) { WorkspaceFeature() } withDependencies: {
       $0[DiffClient.self].render = { request in .init(
         path: request.file.path,
         language: "Swift",
         status: "changed",
-        rows: [.init(left: nil, right: .init(number: 1, spans: [.init(text: "c")]))],
+        rows: [],
         revision: request.revision,
       ) }
       $0[DocumentClient.self] = DocumentRenderer.client
     }
     store.exhaustivity = .off
-    await store.send(.keyPressed("enter"))
-    await store.receive(\.fileSearchResponse)
-    await store.finish()
-    expectNoDifference(store.state.fileMatches, ["Sources/A.swift": [2], "Elsewhere/C.swift": [2]])
-    expectNoDifference(reads.withLock { $0 }, ["Sources/A.swift": "head", "Sources/B.swift": "head", "Elsewhere/C.swift": "base"])
-    expectNoDifference(store.state.visibleFiles.map(\.path), ["Sources/A.swift", "Elsewhere/C.swift"])
-    #expect(store.state.visibleFileRows.contains { $0.path == "Sources" && $0.isDirectory })
+    await store.send(.commandPressed(.search))
+    await store.send(.keyPressed("C"))
+    await store.receive(\.listSearchResponse)
+    #expect(store.state.fileCursor?.path == "Elsewhere/C.swift")
+    #expect(store.state.selectedFilePath == "Sources/A.swift")
+    #expect(store.state.contentGeneration == initial.contentGeneration)
+    #expect(store.state.visibleFiles == initial.visibleFiles)
     await store.send(.keyPressed("esc"))
-    expectNoDifference(store.state.visibleFiles.count, 3)
+    #expect(store.state.collapsedDirectories == initial.collapsedDirectories)
+    #expect(store.state.fileCursor?.path == "Sources/A.swift")
+    await store.send(.commandPressed(.search))
+    for key in ["[", "A", "C", "]"] { await store.send(.keyPressed(key)) }
+    await store.receive(\.listSearchResponse)
+    await store.send(.keyPressed("enter"))
+    await store.receive(\.fileSelected)
+    await store.receive(\.contentResponse)
+    await store.finish()
+    #expect(store.state.selectedFilePath == "Elsewhere/C.swift")
+    #expect(store.state.visibleFiles.count == 3)
+    #expect(store.state.visibleFileRows.contains { $0.path == "Sources/B.swift" })
+    await store.send(.commandPressed(.nextMatch))
+    await store.receive(\.fileSelected)
+    await store.receive(\.contentResponse)
+    await store.finish()
+    #expect(store.state.selectedFilePath == "Sources/A.swift")
+    await store.send(.commandPressed(.previousMatch))
+    await store.receive(\.fileSelected)
+    await store.receive(\.contentResponse)
+    await store.finish()
+    #expect(store.state.selectedFilePath == "Elsewhere/C.swift")
+    await store.send(.keyPressed("esc"))
+    #expect(store.state.visibleFiles.count == 3)
   }
 
   @Test
-  func `clearing Files search cancels reads and rejects stale responses`() async throws {
-    var state = try state()
-    state.pane = .files
-    state.searches[.files] = .init()
-    state.searches[.files]?.query = "needle"
-    state.searches[.files]?.isEditing = true
+  func `invalid incremental pattern stays editable and cancels without a workspace error`() async throws {
+    var initial = try state()
+    initial.pane = .files
+    let store = TestStore(initialState: initial) { WorkspaceFeature() }
+    store.exhaustivity = .off
+    await store.send(.commandPressed(.search))
+    await store.send(.keyPressed("["))
+    await store.receive(\.listSearchResponse)
+    #expect(store.state.listSearchError != nil)
+    #expect(store.state.error == nil)
+    #expect(store.state.isSearching)
+    await store.send(.keyPressed("esc"))
+    #expect(!store.state.isSearching)
+    #expect(store.state.listSearchError == nil)
+    #expect(store.state.visibleFileRows == initial.visibleFileRows)
+  }
+
+  @Test
+  func `late local search results cannot move a cancelled search cursor`() async throws {
+    var initial = try state()
+    initial.pane = .files
+    let store = TestStore(initialState: initial) { WorkspaceFeature() }
+    store.exhaustivity = .off
+    await store.send(.commandPressed(.search))
+    let generation = store.state.listSearchGeneration
+    await store.send(.keyPressed("esc"))
+    await store.send(.listSearchResponse(
+      scope: .files,
+      generation: generation,
+      .success(.init(ids: ["file:Elsewhere/C.swift"], rows: [2])),
+    ))
+    #expect(store.state.selectedFilePath == initial.selectedFilePath)
+    #expect(store.state.listSearchResults[.files] == nil)
+  }
+
+  @Test
+  func `content results read immutable source and retain old and new line identities`() async throws {
+    let initial = try state()
+    let reads = Mutex<[String: String]>([:])
+    let detail = try #require(initial.detail)
+    let store = TestStore(initialState: FileContentSearchFeature.State(
+      detail: detail,
+      keymap: initial.preferences.keymap,
+    )) {
+      FileContentSearchFeature()
+    } withDependencies: {
+      $0[ForgeClient.self].content = { _, revision, path in
+        reads.withLock { $0[path] = revision }
+        return Data((path == "Sources/B.swift" ? "no matching content" : "unchanged\nneedle2 😀\nend").utf8)
+      }
+    }
+    store.exhaustivity = .off
+    for key in "needle[0-9]" { await store.send(.keyPressed(String(key))) }
+    #expect(reads.withLock { $0 }.isEmpty)
+    await store.send(.keyPressed("enter"))
+    await store.receive(\.response)
+    await store.finish()
+    #expect(store.state.results.map(\.location) == [
+      .init(path: "Sources/A.swift", line: 2, side: .right),
+      .init(path: "Elsewhere/C.swift", line: 2, side: .left),
+    ])
+    #expect(store.state.results.allSatisfy { $0.excerpt == "needle2 😀" })
+    #expect(reads.withLock { $0 } == ["Sources/A.swift": "head", "Sources/B.swift": "head", "Elsewhere/C.swift": "base"])
+  }
+
+  @Test
+  func `closing content results cancels reads without changing the file tree`() async throws {
+    var initial = try state()
+    initial.pane = .files
+    initial.fileSearch = .init(detail: try #require(initial.detail), keymap: initial.preferences.keymap)
+    initial.fileSearch?.query = "needle"
     let (started, didStart) = AsyncStream<Void>.makeStream()
     let (pending, finishPending) = AsyncStream<Void>.makeStream()
     defer { didStart.finish()
       finishPending.finish()
     }
     let cancelled = Mutex(false)
-    let store = TestStore(initialState: state) { WorkspaceFeature() } withDependencies: {
+    let store = TestStore(initialState: initial) { WorkspaceFeature() } withDependencies: {
       $0[ForgeClient.self].content = { _, _, _ in
         try await withTaskCancellationHandler {
           didStart.yield(())
@@ -219,11 +332,61 @@ struct SearchWorkflowTests {
     var iterator = started.makeAsyncIterator()
     _ = await iterator.next()
     await store.send(.keyPressed("esc"))
+    await store.receive(\.fileSearch.delegate)
     await store.finish()
     #expect(cancelled.withLock { $0 })
-    await store.send(.fileSearchResponse(generation: 1, .success(["Sources/B.swift": [9]])))
-    #expect(store.state.fileMatches == nil)
-    #expect(!store.state.isSearchingFiles)
+    #expect(store.state.fileSearch == nil)
+    #expect(store.state.visibleFileRows == initial.visibleFileRows)
+    #expect(store.state.selectedFilePath == initial.selectedFilePath)
+  }
+
+  @Test
+  func `content result opens its exact source side and line without filtering Files`() async throws {
+    var initial = try state()
+    initial.pane = .files
+    let requests = Mutex<[DiffRequest]>([])
+    let store = TestStore(initialState: initial) { WorkspaceFeature() } withDependencies: {
+      $0[ForgeClient.self].content = { _, _, path in Data((path == "Sources/B.swift" ? "first\nneedle\nlast" : "other").utf8) }
+      $0[DiffClient.self].render = { request in
+        requests.withLock { $0.append(request) }
+        return .init(path: request.file.path, language: "Swift", status: "changed", rows: [
+          .init(left: nil, right: .init(number: 2, spans: [.init(text: "needle")]))
+        ], revision: request.revision)
+      }
+      $0[DocumentClient.self] = DocumentRenderer.client
+    }
+    store.exhaustivity = .off
+    await store.send(.commandPressed(.searchFileContents))
+    for key in "needle" { await store.send(.keyPressed(String(key))) }
+    await store.send(.keyPressed("enter"))
+    await store.receive(\.fileSearch.response)
+    #expect(store.state.selectedFilePath == initial.selectedFilePath)
+    await store.send(.keyPressed("enter"))
+    await store.receive(\.fileSearch.delegate)
+    await store.receive(\.contentResponse)
+    await store.finish()
+    let expected = SourceLocation(path: "Sources/B.swift", line: 2, side: .right)
+    #expect(requests.withLock { $0.last?.revealing } == expected)
+    #expect(store.state.document.location(at: store.state.diffCursor, side: store.state.diffSide) == expected)
+    #expect(store.state.visibleFiles == initial.visibleFiles)
+    #expect(store.state.pane == .content)
+  }
+
+  @Test
+  func `content results from an old head cannot open against a refreshed PR`() async throws {
+    var initial = try state()
+    let old = try #require(initial.detail)
+    let hit = FileContentHit(location: .init(path: "Sources/A.swift", line: 1, side: .right), excerpt: "needle", ranges: [0..<6])
+    initial.fileSearch = .init(detail: old, keymap: initial.preferences.keymap)
+    initial.fileSearch?.results = [hit]
+    initial.fileSearch?.isEditing = false
+    initial.detail = .init(item: old.item, revision: .init(mergeBase: "base", head: "new-head"), files: old.files)
+    let store = TestStore(initialState: initial) { WorkspaceFeature() }
+    store.exhaustivity = .off
+    await store.send(.fileSearch(.delegate(.open(hit))))
+    #expect(store.state.fileSearch == nil)
+    #expect(store.state.error?.code == .revisionChanged)
+    #expect(store.state.contentGeneration == initial.contentGeneration)
   }
 
   @Test(arguments: ["Sources", "/"])
@@ -261,15 +424,13 @@ struct SearchWorkflowTests {
     await store.send(.fileRowSelected("directory:" + directory))
     await store.receive(\.contentResponse)
     await store.finish()
-    expectNoDifference(
-      renderedPaths.withLock { $0 },
-      directory == "/"
-        ? ["Sources/A.swift", "Sources/B.swift", "Elsewhere/C.swift", "Root.swift"]
-        : [
-          "Sources/A.swift",
-          "Sources/B.swift",
-        ],
-    )
+    let expectedPaths = directory == "/"
+      ? ["Sources/A.swift", "Sources/B.swift", "Elsewhere/C.swift", "Root.swift"]
+      : [
+        "Sources/A.swift",
+        "Sources/B.swift",
+      ]
+    expectNoDifference(renderedPaths.withLock { $0.sorted() }, expectedPaths.sorted())
     expectNoDifference(store.state.selectedDirectoryPath, directory)
     #expect(store.state.selectedFilePath == nil)
     let document = store.state.document
@@ -289,7 +450,6 @@ struct SearchWorkflowTests {
     #expect(store.state.review?.inlineAnchorLocked == true)
     await store.send(.review(.inlineBodyChanged("Draft under B")))
     await store.send(.review(.addInlineButtonPressed))
-    await store.send(.reviewDismissed)
     await store.receive(\.contentResponse)
     await store.finish()
     expectNoDifference(store.state.document.location(at: store.state.diffCursor, side: .right), location)
@@ -299,6 +459,43 @@ struct SearchWorkflowTests {
     await store.send(.commandPressed(.comment))
     #expect(store.state.review == nil)
     expectNoDifference(store.state.error?.code, .invalidLine)
+  }
+
+  @Test
+  func `combined diff reads overlap within a fixed bound and retain source file order`() async throws {
+    var initial = try state()
+    let detail = try #require(initial.detail)
+    let files = (0 ..< 8).map { ChangedFile(path: "Batch/File\($0).swift") }
+    initial.detail = .init(item: detail.item, revision: detail.revision, files: files)
+    initial.pane = .files
+    let activity = Mutex((active: 0, maximum: 0, completed: [String]()))
+    let store = TestStore(initialState: initial) { WorkspaceFeature() } withDependencies: {
+      $0[DiffClient.self].render = { request in
+        activity.withLock { $0.active += 1
+          $0.maximum = max($0.maximum, $0.active)
+        }
+        defer { activity.withLock { $0.active -= 1 } }
+        let index = try #require(files.firstIndex { $0.path == request.file.path })
+        // Simulate independent providers finishing out of order, not UI settling.
+        try await Task.sleep(for: .milliseconds((8 - index) * 10))
+        activity.withLock { $0.completed.append(request.file.path) }
+        return ReviewDiff(path: request.file.path, language: "Swift", status: "changed", rows: [
+          .init(left: nil, right: .init(number: 1, spans: [.init(text: request.file.path)]))
+        ], revision: request.revision)
+      }
+      $0[DocumentClient.self] = DocumentRenderer.client
+    }
+    store.exhaustivity = .off
+    await store.send(.fileRowSelected("directory:/"))
+    await store.receive(\.contentResponse)
+    await store.finish()
+    let observed = activity.withLock { $0 }
+    #expect(observed.maximum == 4)
+    #expect(observed.active == 0)
+    #expect(observed.completed != files.map(\.path))
+    let diff = try #require(store.state.document.diff)
+    let paths = diff.rows.filter { $0.left != nil || $0.right != nil }.compactMap(\.path)
+    expectNoDifference(paths, files.map(\.path))
   }
 
   @Test

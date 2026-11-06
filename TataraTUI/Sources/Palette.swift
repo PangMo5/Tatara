@@ -237,6 +237,7 @@ struct Palette {
     base = color(values[23])
     mantle = color(values[24])
     crust = color(values[25])
+    cursorLine = color(Self.blend(values[17], over: values[23], opacity: 0.08))
     selection = color(Self.blend(values[17], over: values[23], opacity: 0.25))
     editorSelection = color(Self.blend(values[17], over: values[22], opacity: 0.25))
     sidebarSelection = color(Self.blend(values[17], over: values[24], opacity: 0.25))
@@ -274,11 +275,14 @@ struct Palette {
   let base: Color
   let mantle: Color
   let crust: Color
+  let cursorLine: Color
   let selection: Color
   let editorSelection: Color
   let sidebarSelection: Color
   let search: Color
   let activeSearch: Color
+
+  let noColor: Bool
 
   var surface: Color {
     surface0
@@ -336,7 +340,6 @@ struct Palette {
   // MARK: Private
 
   private let lightBackground: Bool
-  private let noColor: Bool
   private let ansiColors: [Color]
 
   private static func blend(_ foreground: UInt32, over background: UInt32, opacity: Double) -> UInt32 {

@@ -1,0 +1,887 @@
+import Foundation
+
+#if canImport(Darwin)
+  import Darwin
+#elseif canImport(Glibc)
+  import Glibc
+#elseif canImport(Musl)
+  import Musl
+#endif
+
+public enum ANSIBackendError: Error {
+  case sizeUnavailable
+}
+
+public enum CursorAddressing: Hashable, Sendable {
+  case absolute
+  case savedOrigin
+  case savedBottom(viewportHeight: Int)
+  case absoluteOrigin(Position)
+}
+
+public enum ANSIColorProfile: Hashable, Sendable {
+  case ansi16
+  case indexed256
+  case trueColor
+}
+
+public enum ANSIHistoryInsertionStrategy: Hashable, Sendable {
+  /// Fast DECSTBM insertion for terminals that retain top-margin CRLF rows as scrollback.
+  case scrollingRegion
+  /// Whole-screen terminal output followed by a live-viewport redraw. This is more expensive but
+  /// preserves history in multiplexers and Supaterm's Ghostty host, which discard margin-scrolled rows.
+  case terminalOutput
+}
+
+public struct ANSIBackendConfiguration: Hashable, Sendable {
+  public var colorProfile: ANSIColorProfile
+  public var supportsUnderlineColor: Bool
+  public var supportsSynchronizedOutput: Bool
+  public var historyInsertionStrategy: ANSIHistoryInsertionStrategy
+
+  public init(
+    colorProfile: ANSIColorProfile = .trueColor,
+    supportsUnderlineColor: Bool = true,
+    supportsSynchronizedOutput: Bool = true,
+    historyInsertionStrategy: ANSIHistoryInsertionStrategy = .scrollingRegion
+  ) {
+    self.colorProfile = colorProfile
+    self.supportsUnderlineColor = supportsUnderlineColor
+    self.supportsSynchronizedOutput = supportsSynchronizedOutput
+    self.historyInsertionStrategy = historyInsertionStrategy
+  }
+
+  public static let full = Self()
+
+  public static func detected(
+    environment: [String: String] = ProcessInfo.processInfo.environment
+  ) -> Self {
+    let term = environment["TERM", default: ""].lowercased()
+    let colorTerm = environment["COLORTERM", default: ""].lowercased()
+    if term == "dumb" {
+      return Self(
+        colorProfile: .ansi16,
+        supportsUnderlineColor: false,
+        supportsSynchronizedOutput: false
+      )
+    }
+    let colorProfile: ANSIColorProfile
+    if colorTerm.contains("truecolor") || colorTerm.contains("24bit") {
+      colorProfile = .trueColor
+    } else if term.contains("256color") {
+      colorProfile = .indexed256
+    } else {
+      colorProfile = .ansi16
+    }
+    let requiresTerminalOutputHistory =
+      environment["SUPATERM_SOCKET_PATH"] != nil || environment["ZELLIJ"] != nil
+      || environment["TMUX"] != nil
+    return Self(
+      colorProfile: colorProfile,
+      historyInsertionStrategy: requiresTerminalOutputHistory ? .terminalOutput : .scrollingRegion)
+  }
+}
+
+public struct ANSIBackend: Backend, LineAppendingBackend, InlineHistoryBackend, @unchecked Sendable
+{
+  private var output: FileHandle
+  var outputWriter: (Data) throws -> Void
+  private var fallbackSize: Size?
+  private var viewportHeight: Int?
+  private var effectiveViewportHeight: Int?
+  private var reportedViewportOrigin: Position?
+  private var cursorAddressing: CursorAddressing
+  private var historyBatchOrigin: Position?
+  private var historyBatchRowCount = 0
+  /// Byte storage reused across `draw` calls so steady-state frames do not reallocate it.
+  private var outputBuffer: [UInt8] = []
+  /// The cursor state the last `presentFrame` left on the terminal. Every other operation that
+  /// writes to the terminal or changes cursor addressing resets it to unknown, so the next frame
+  /// emits the complete cursor state again.
+  internal private(set) var presentedCursor = ANSIPresentedCursor.unknown
+  /// Counts writes to the shared terminal output, including writes that bypass this backend
+  /// (`TerminalSession` lifecycle sequences, other backends, discarded transactions). A frame that
+  /// observes a count other than the one recorded after this backend's own last frame write treats
+  /// the cursor state as unknown.
+  var outputGeneration: (() -> UInt64)?
+  private var presentedOutputGeneration: UInt64?
+  public var configuration: ANSIBackendConfiguration
+
+  public var capabilities: BackendCapabilities {
+    var result: BackendCapabilities = [.windowPixelSize, .regionalClears]
+    if configuration.supportsSynchronizedOutput { result.insert(.synchronizedOutput) }
+    if configuration.supportsUnderlineColor { result.insert(.underlineColor) }
+    if configuration.colorProfile != .ansi16 { result.insert(.indexedColor) }
+    if configuration.colorProfile == .trueColor { result.insert(.trueColor) }
+    if case .absoluteOrigin = cursorAddressing { result.insert(.inlineViewport) }
+    return result
+  }
+
+  public var viewportOrigin: Position {
+    if case .absoluteOrigin(let origin) = cursorAddressing { return origin }
+    return reportedViewportOrigin ?? Position(x: 0, y: 0)
+  }
+
+  public init(
+    output: FileHandle = .standardOutput,
+    fallbackSize: Size? = nil,
+    viewportHeight: Int? = nil,
+    viewportOrigin: Position? = nil,
+    cursorAddressing: CursorAddressing = .absolute,
+    configuration: ANSIBackendConfiguration = .full
+  ) {
+    self.output = output
+    outputWriter = { data in try output.write(contentsOf: data) }
+    self.fallbackSize = fallbackSize
+    let viewportHeight = viewportHeight.map { max(0, $0) }
+    self.viewportHeight = viewportHeight
+    effectiveViewportHeight =
+      viewportHeight.map {
+        min($0, fallbackSize?.height ?? $0)
+      } ?? fallbackSize?.height
+    reportedViewportOrigin = viewportOrigin
+    self.cursorAddressing = cursorAddressing
+    self.configuration = configuration
+  }
+
+  public mutating func size() throws -> Size {
+    let addressing = cursorAddressing
+    // A clamped inline origin moves where every logical cursor position lands on the screen.
+    defer { if cursorAddressing != addressing { presentedCursor.position = nil } }
+    #if os(macOS) || os(Linux)
+      var window = winsize()
+      if ioctl(output.fileDescriptor, UInt(TIOCGWINSZ), &window) == 0,
+        window.ws_col > 0,
+        window.ws_row > 0
+      {
+        let physicalHeight = Int(window.ws_row)
+        let height = viewportHeight.map { min($0, physicalHeight) } ?? physicalHeight
+        effectiveViewportHeight = height
+        if case .absoluteOrigin(let origin) = cursorAddressing {
+          let clamped = Position(
+            x: 0,
+            y: min(origin.y, (max(0, Int(window.ws_row) - height))))
+          cursorAddressing = .absoluteOrigin(clamped)
+          reportedViewportOrigin = clamped
+        }
+        return Size(width: Int(window.ws_col), height: height)
+      }
+    #endif
+    if let fallbackSize {
+      let height = viewportHeight.map { min($0, fallbackSize.height) } ?? fallbackSize.height
+      effectiveViewportHeight = height
+      if case .absoluteOrigin(let origin) = cursorAddressing {
+        let clamped = Position(
+          x: 0,
+          y: min(origin.y, (max(0, fallbackSize.height - height))))
+        cursorAddressing = .absoluteOrigin(clamped)
+        reportedViewportOrigin = clamped
+      }
+      return Size(width: fallbackSize.width, height: height)
+    }
+    throw ANSIBackendError.sizeUnavailable
+  }
+
+  public mutating func windowSize() throws -> WindowSize {
+    #if os(macOS) || os(Linux)
+      var window = winsize()
+      if ioctl(output.fileDescriptor, UInt(TIOCGWINSZ), &window) == 0,
+        window.ws_col > 0,
+        window.ws_row > 0
+      {
+        let cells = Size(width: Int(window.ws_col), height: Int(window.ws_row))
+        let pixels =
+          window.ws_xpixel > 0 && window.ws_ypixel > 0
+          ? Size(width: Int(window.ws_xpixel), height: Int(window.ws_ypixel))
+          : nil
+        return WindowSize(cells: cells, pixels: pixels)
+      }
+    #endif
+    if let fallbackSize { return WindowSize(cells: fallbackSize) }
+    return WindowSize(cells: try size())
+  }
+
+  public mutating func draw(_ updates: [CellUpdate]) throws {
+    guard !updates.isEmpty else { return }
+    presentedCursor = .unknown
+    var bytes: [UInt8] = []
+    swap(&bytes, &outputBuffer)
+    defer {
+      if bytes.capacity <= Self.maximumRetainedOutputCapacity {
+        bytes.removeAll(keepingCapacity: true)
+        swap(&bytes, &outputBuffer)
+      }
+    }
+    bytes.removeAll(keepingCapacity: true)
+    bytes.reserveCapacity(updates.count * 16)
+    appendDraw(updates, to: &bytes)
+    try outputWriter(Data(bytes))
+  }
+
+  /// The largest output buffer `draw` keeps for reuse; larger buffers are released after the frame.
+  private static let maximumRetainedOutputCapacity = 1 << 20
+
+  /// Writes one `Terminal` frame: the changed cells followed by only those parts of the cursor
+  /// state (shape, position, visibility) that differ from what the terminal already shows, as one
+  /// write and, when synchronized output is enabled, inside one synchronized update. Writes nothing
+  /// when no cell and no cursor state changed.
+  ///
+  /// The terminal ends up exactly as after `draw(updates)`, `setCursorStyle(cursorStyle)` and
+  /// `setCursor(cursorPosition)`: only escape sequences that would not change anything are omitted.
+  internal mutating func presentFrame(
+    _ updates: [CellUpdate], cursorStyle: CursorStyle, cursorPosition: Position?
+  ) throws {
+    if let generation = outputGeneration?(), generation != presentedOutputGeneration {
+      presentedCursor = .unknown
+    }
+    var bytes: [UInt8] = []
+    swap(&bytes, &outputBuffer)
+    defer {
+      if bytes.capacity <= Self.maximumRetainedOutputCapacity {
+        bytes.removeAll(keepingCapacity: true)
+        swap(&bytes, &outputBuffer)
+      }
+    }
+    bytes.removeAll(keepingCapacity: true)
+    if !updates.isEmpty { bytes.reserveCapacity(updates.count * 16 + 32) }
+    let cursor = appendFrame(
+      updates, cursorStyle: cursorStyle, cursorPosition: cursorPosition,
+      from: presentedCursor, to: &bytes)
+    guard !bytes.isEmpty else { return }
+    do {
+      try outputWriter(Data(bytes))
+    } catch {
+      // Some of the frame may have reached the terminal.
+      presentedCursor = .unknown
+      throw error
+    }
+    presentedCursor = cursor
+    presentedOutputGeneration = outputGeneration?()
+  }
+
+  /// Serializes a frame exactly as `presentFrame` writes it when the terminal shows `cursor`, and
+  /// returns the cursor state the terminal shows afterwards.
+  internal func appendFrame(
+    _ updates: [CellUpdate],
+    cursorStyle: CursorStyle,
+    cursorPosition: Position?,
+    from cursor: ANSIPresentedCursor,
+    to bytes: inout [UInt8]
+  ) -> ANSIPresentedCursor {
+    let synchronized = configuration.supportsSynchronizedOutput
+    let frameStart = bytes.count
+    var cursor = cursor
+    if updates.isEmpty {
+      if synchronized { bytes.appendANSI("\u{1B}[?2026h") }
+    } else {
+      appendCells(updates, to: &bytes)
+      // Drawing moves the cursor.
+      cursor.position = nil
+    }
+    let cursorStart = bytes.count
+    appendCursorChanges(
+      style: cursorStyle, position: cursorPosition, cursor: &cursor, to: &bytes)
+    if updates.isEmpty, bytes.count == cursorStart {
+      bytes.removeSubrange(frameStart...)
+      return cursor
+    }
+    if synchronized { bytes.appendANSI("\u{1B}[?2026l") }
+    return cursor
+  }
+
+  /// Appends the escape sequences that take the terminal's cursor from `cursor` to the given
+  /// shape and position (`nil` hides it), in the order `setCursorStyle` then `setCursor` emit them,
+  /// skipping each one that would not change the terminal.
+  private func appendCursorChanges(
+    style: CursorStyle,
+    position: Position?,
+    cursor: inout ANSIPresentedCursor,
+    to bytes: inout [UInt8]
+  ) {
+    if cursor.style != style {
+      bytes.appendANSI("\u{1B}[")
+      bytes.appendANSIDecimal(Self.cursorStyleParameter(style))
+      bytes.appendANSI(" q")
+      cursor.style = style
+    }
+    guard let position else {
+      if cursor.isVisible != false {
+        bytes.appendANSI("\u{1B}[?25l")
+        cursor.isVisible = false
+      }
+      return
+    }
+    if cursor.position != position {
+      appendCursor(position, to: &bytes)
+      switch cursorAddressing {
+      case .absolute, .absoluteOrigin:
+        cursor.position = position
+      case .savedOrigin, .savedBottom:
+        // These moves restore the saved cursor (DECRC), which also restores its rendition and
+        // wrap state, so they are repeated every frame exactly as before.
+        cursor.position = nil
+      }
+    }
+    if cursor.isVisible != true {
+      bytes.appendANSI("\u{1B}[?25h")
+      cursor.isVisible = true
+    }
+  }
+
+  private static func cursorStyleParameter(_ style: CursorStyle) -> Int {
+    switch style {
+    case .defaultUserShape: 0
+    case .blinkingBlock: 1
+    case .steadyBlock: 2
+    case .blinkingUnderline: 3
+    case .steadyUnderline: 4
+    case .blinkingBar: 5
+    case .steadyBar: 6
+    }
+  }
+
+  /// Serializes `updates` exactly as `draw` writes them.
+  ///
+  /// The first style of the frame is established with a full reset-and-set sequence because the
+  /// terminal's rendition before the frame is unknown. Later style changes emit only the changed
+  /// attributes and colors when that is shorter (see `appendSGRTransition`). The frame ends with
+  /// `CSI 0 m`, so the terminal is left in the default rendition as before.
+  internal func appendDraw(_ updates: [CellUpdate], to bytes: inout [UInt8]) {
+    appendCells(updates, to: &bytes)
+    if configuration.supportsSynchronizedOutput {
+      bytes.appendANSI("\u{1B}[?2026l")
+    }
+  }
+
+  /// `appendDraw` without the closing synchronized-update sequence.
+  private func appendCells(_ updates: [CellUpdate], to bytes: inout [UInt8]) {
+    var activeStyle: Style?
+    var activeState: ANSIGraphicState?
+    var expectedPosition: Position?
+
+    if configuration.supportsSynchronizedOutput {
+      bytes.appendANSI("\u{1B}[?2026h")
+    }
+    for update in updates where !update.cell.isContinuation {
+      if expectedPosition != update.position {
+        appendCursor(update.position, to: &bytes)
+      }
+      let style = update.cell.style
+      if activeStyle != style {
+        let state = graphicState(for: style)
+        if let activeState {
+          bytes.appendSGRTransition(from: activeState, to: state)
+        } else {
+          bytes.appendFullSGR(state)
+        }
+        activeState = state
+        activeStyle = style
+      }
+      bytes.append(contentsOf: update.cell.symbol.utf8)
+      expectedPosition = update.position.offset(
+        by: Offset(x: max(1, Int(update.cell.width)), y: 0)
+      )
+    }
+    bytes.appendANSI("\u{1B}[0m")
+  }
+
+  public mutating func clear() throws {
+    presentedCursor = .unknown
+    try outputWriter(Data(clearSequence().utf8))
+  }
+
+  public mutating func clear(_ region: ClearRegion) throws {
+    if region == .all { return try clear() }
+    presentedCursor = .unknown
+    let sequence: String
+    switch region {
+    case .all: return try clear()
+    case .afterCursor: sequence = "\u{1B}[0J"
+    case .beforeCursor: sequence = "\u{1B}[1J"
+    case .currentLine: sequence = "\u{1B}[2K"
+    case .untilNewLine: sequence = "\u{1B}[0K"
+    }
+    try outputWriter(Data(sequence.utf8))
+  }
+
+  public mutating func setCursor(_ position: Position?) throws {
+    presentedCursor = .unknown
+    let sequence = position.map { "\(cursor(position: $0))\u{1B}[?25h" } ?? "\u{1B}[?25l"
+    try outputWriter(Data(sequence.utf8))
+  }
+
+  public mutating func setCursorStyle(_ style: CursorStyle) throws {
+    presentedCursor = .unknown
+    let parameter = Self.cursorStyleParameter(style)
+    try outputWriter(Data("\u{1B}[\(parameter) q".utf8))
+  }
+
+  public mutating func setViewportOrigin(_ origin: Position) throws {
+    presentedCursor = .unknown
+    switch cursorAddressing {
+    case .absolute:
+      reportedViewportOrigin = origin
+    case .absoluteOrigin:
+      cursorAddressing = .absoluteOrigin(origin)
+      reportedViewportOrigin = origin
+    case .savedOrigin, .savedBottom:
+      throw BackendOperationError.unsupported("viewport origin")
+    }
+  }
+
+  public mutating func appendLines(_ count: Int) throws {
+    guard count > 0 else { return }
+    presentedCursor = .unknown
+    try outputWriter(Data(String(repeating: "\n", count: Int(count)).utf8))
+  }
+
+  public mutating func insertHistory(_ buffer: Buffer) throws -> Bool {
+    try insertHistory(buffer, batchPosition: .single)
+  }
+
+  public mutating func insertHistory(
+    _ buffer: Buffer, batchPosition: HistoryInsertionBatchPosition
+  ) throws -> Bool {
+    try insertHistory(buffer, batchPosition: batchPosition, restoring: nil)
+  }
+
+  public mutating func insertHistory(
+    _ buffer: Buffer,
+    batchPosition: HistoryInsertionBatchPosition,
+    restoring viewport: Buffer?
+  ) throws -> Bool {
+    guard configuration.historyInsertionStrategy == .terminalOutput,
+      case .absoluteOrigin(let currentOrigin) = cursorAddressing,
+      buffer.area.height > 0
+    else { return false }
+
+    presentedCursor = .unknown
+    var operationSucceeded = false
+    defer {
+      if !operationSucceeded {
+        historyBatchOrigin = nil
+        historyBatchRowCount = 0
+        // A failed chunk must not leak scoped margins, styles, or disabled wrapping into the caller's
+        // terminal session. The original error remains authoritative if this cleanup also fails.
+        try? outputWriter(Data("\u{1B}[r\u{1B}[0m\u{1B}[?7h".utf8))
+      }
+    }
+
+    let requestedStart = batchPosition == .single || batchPosition == .first
+    let startsBatch = requestedStart || historyBatchOrigin == nil
+    let finishesBatch = batchPosition == .single || batchPosition == .last
+    let origin: Position
+    if startsBatch {
+      origin = currentOrigin
+      historyBatchOrigin = origin
+      historyBatchRowCount = 0
+      // Clear the retained pane once before whole-screen line feeds can move composer/status cells into
+      // scrollback. When a retained viewport is available, its clear is emitted with the history and
+      // restoration bytes so Supaterm cannot paint the intermediate blank surface.
+      if viewport == nil { try clear() }
+    } else {
+      origin = historyBatchOrigin ?? currentOrigin
+    }
+
+    let screen = try windowSize().cells
+    let liveHeight = min(
+      max(1, effectiveViewportHeight ?? viewportHeight ?? buffer.area.height), max(1, screen.height)
+    )
+
+    // Scrolling while synchronized-output mode is active is not consistently committed to native
+    // scrollback by Ghostty-family hosts. Chunks remain outside CSI ?2026, while wrap restoration and
+    // live-row reservation are deferred until the final chunk.
+    var bytes: [UInt8] = []
+    if startsBatch {
+      if viewport != nil { bytes.append(contentsOf: clearSequence().utf8) }
+      bytes.append(contentsOf: "\u{1B}[r\u{1B}[?7l\u{1B}[\(origin.y + 1);1H".utf8)
+    } else {
+      bytes.append(contentsOf: "\r\n".utf8)
+    }
+    for row in 0..<buffer.area.height {
+      if row > 0 { bytes.append(contentsOf: "\r\n".utf8) }
+      bytes.append(contentsOf: "\u{1B}[2K".utf8)
+      appendHistoryRow(row, from: buffer, to: &bytes)
+    }
+    historyBatchRowCount = saturatingANSIAdd(historyBatchRowCount, buffer.area.height)
+
+    var completedOrigin: Position?
+    if finishesBatch {
+      for _ in 0..<Int(liveHeight) {
+        bytes.append(contentsOf: "\r\n\u{1B}[2K".utf8)
+      }
+      bytes.append(contentsOf: "\u{1B}[0m\u{1B}[?7h".utf8)
+      let nextY = min(
+        saturatingANSIAdd(origin.y, historyBatchRowCount), max(0, screen.height - liveHeight))
+      let nextOrigin = Position(x: 0, y: nextY)
+      completedOrigin = nextOrigin
+      if let viewport {
+        appendViewportRestoration(viewport, at: nextOrigin, to: &bytes)
+      }
+    }
+    try outputWriter(Data(bytes))
+
+    if let completedOrigin {
+      cursorAddressing = .absoluteOrigin(completedOrigin)
+      reportedViewportOrigin = completedOrigin
+      historyBatchOrigin = nil
+      historyBatchRowCount = 0
+    }
+    operationSucceeded = true
+    return true
+  }
+
+  public mutating func scrollRegionUp(_ rows: Range<Int>, by count: Int) throws {
+    try scrollRegion(rows, by: count, command: "S")
+  }
+
+  public mutating func scrollRegionUpIntoScrollback(
+    _ rows: Range<Int>, by count: Int
+  ) throws {
+    guard cursorAddressing != .savedOrigin else {
+      throw BackendOperationError.unsupported("scrollback insertion from a saved origin")
+    }
+    guard !rows.isEmpty, count > 0 else { return }
+    presentedCursor = .unknown
+    let top = Int(rows.lowerBound) + 1
+    let bottom = Int(rows.upperBound)
+    // CSI S is a visual region transform, not a history operation: Ghostty-family terminals discard
+    // rows it displaces. Codex Rust instead emits CRLF at the bottom margin so those rows retain native
+    // scrollback metadata.
+    let lineFeeds = String(repeating: "\r\n", count: Int(count))
+    let sequence =
+      "\u{1B}7\u{1B}[\(top);\(bottom)r\u{1B}[\(bottom);1H\(lineFeeds)\u{1B}[r\u{1B}8"
+    try outputWriter(Data(sequence.utf8))
+  }
+
+  public mutating func scrollRegionDown(_ rows: Range<Int>, by count: Int) throws {
+    try scrollRegion(rows, by: count, command: "T")
+  }
+
+  private mutating func scrollRegion(
+    _ rows: Range<Int>,
+    by count: Int,
+    command: Character
+  ) throws {
+    guard cursorAddressing != .savedOrigin else {
+      throw BackendOperationError.unsupported("region scrolling from a saved origin")
+    }
+    guard !rows.isEmpty, count > 0 else { return }
+    presentedCursor = .unknown
+    let top = Int(rows.lowerBound) + 1
+    let bottom = Int(rows.upperBound)
+    let sequence = "\u{1B}7\u{1B}[\(top);\(bottom)r\u{1B}[\(count)\(command)\u{1B}[r\u{1B}8"
+    try outputWriter(Data(sequence.utf8))
+  }
+
+  private func appendViewportRestoration(
+    _ viewport: Buffer,
+    at origin: Position,
+    to bytes: inout [UInt8]
+  ) {
+    if configuration.supportsSynchronizedOutput {
+      bytes.append(contentsOf: "\u{1B}[?2026h".utf8)
+    }
+    for row in 0..<viewport.area.height {
+      bytes.append(
+        contentsOf: "\u{1B}[\(origin.y + row + 1);\(origin.x + 1)H\u{1B}[2K".utf8)
+      appendHistoryRow(row, from: viewport, to: &bytes)
+    }
+    if configuration.supportsSynchronizedOutput {
+      bytes.append(contentsOf: "\u{1B}[?2026l".utf8)
+    }
+  }
+
+  private func clearSequence() -> String {
+    switch cursorAddressing {
+    case .absolute:
+      "\u{1B}[2J\u{1B}[H"
+    case .savedOrigin, .savedBottom, .absoluteOrigin:
+      (0..<Int(max(1, effectiveViewportHeight ?? fallbackSize?.height ?? 1))).map { row in
+        "\(cursor(position: Position(x: 0, y: row)))\u{1B}[2K"
+      }.joined()
+    }
+  }
+
+  private func cursor(position: Position) -> String {
+    var bytes: [UInt8] = []
+    appendCursor(position, to: &bytes)
+    return String(decoding: bytes, as: UTF8.self)
+  }
+
+  private func appendCursor(_ position: Position, to bytes: inout [UInt8]) {
+    switch cursorAddressing {
+    case .absolute:
+      bytes.appendANSI("\u{1B}[")
+      bytes.appendANSIDecimal(oneBasedANSI(position.y))
+      bytes.append(0x3B)
+      bytes.appendANSIDecimal(oneBasedANSI(position.x))
+      bytes.append(0x48)
+    case .savedOrigin:
+      bytes.appendANSI("\u{1B}8")
+      if position.y != 0 {
+        bytes.appendANSI("\u{1B}[")
+        bytes.appendANSIDecimal(position.y)
+        bytes.append(0x42)
+      }
+      bytes.appendANSI("\u{1B}[")
+      bytes.appendANSIDecimal(oneBasedANSI(position.x))
+      bytes.append(0x47)
+    case .savedBottom(let viewportHeight):
+      let rowsUp = max(0, viewportHeight - 1 - position.y)
+      bytes.appendANSI("\u{1B}8")
+      if rowsUp != 0 {
+        bytes.appendANSI("\u{1B}[")
+        bytes.appendANSIDecimal(rowsUp)
+        bytes.append(0x41)
+      }
+      bytes.appendANSI("\u{1B}[")
+      bytes.appendANSIDecimal(oneBasedANSI(position.x))
+      bytes.append(0x47)
+    case .absoluteOrigin(let origin):
+      bytes.appendANSI("\u{1B}[")
+      bytes.appendANSIDecimal(oneBasedANSI(origin.y, position.y))
+      bytes.append(0x3B)
+      bytes.appendANSIDecimal(oneBasedANSI(origin.x, position.x))
+      bytes.append(0x48)
+    }
+  }
+
+  private func appendHistoryRow(_ row: Int, from buffer: Buffer, to bytes: inout [UInt8]) {
+    let cells = (0..<buffer.area.width).compactMap { column in
+      buffer.cell(
+        at: Position(
+          x: (buffer.area.x + column),
+          y: (buffer.area.y + row)
+        ))
+    }
+    let lastMeaningful = cells.lastIndex {
+      !$0.isContinuation && ($0.symbol != " " || $0.style != .plain)
+    }
+    guard let lastMeaningful else { return }
+
+    // History rows keep the full reset-and-set form for every style change.
+    var activeStyle: Style?
+    for cell in cells[...lastMeaningful] where !cell.isContinuation {
+      if activeStyle != cell.style {
+        bytes.appendFullSGR(graphicState(for: cell.style))
+        activeStyle = cell.style
+      }
+      bytes.append(contentsOf: cell.symbol.utf8)
+    }
+    bytes.appendANSI("\u{1B}[0m")
+  }
+
+  /// The SGR state that `style` establishes under this backend's configuration.
+  internal func graphicState(for style: Style) -> ANSIGraphicState {
+    var state = ANSIGraphicState(
+      attributes: UInt8(truncatingIfNeeded: style.modifiers.rawValue),
+      foreground: .unset,
+      background: .unset,
+      underlineColor: .unset
+    )
+    state.attributes &= ANSIGraphicState.attributeMask
+    if let foreground = style.foreground {
+      state.foreground = colorCode(foreground, foreground: true)
+    }
+    if let background = style.background {
+      state.background = colorCode(background, foreground: false)
+    }
+    if configuration.supportsUnderlineColor, let underlineColor = style.underlineColor {
+      state.underlineColor = underlineColorCode(underlineColor)
+    }
+    return state
+  }
+
+  private func underlineColorCode(_ color: Color) -> ANSIColorCode {
+    if case .reset = color { return .explicitDefault }
+    switch configuration.colorProfile {
+    case .trueColor:
+      if case .rgb(let red, let green, let blue) = color {
+        return .rgb(red, green, blue)
+      }
+      return .indexed(indexedColor(color))
+    case .indexed256:
+      return .indexed(indexedColor(color))
+    case .ansi16:
+      return .indexed(nearestANSI16Index(rgbColor(color)))
+    }
+  }
+
+  private func indexedColor(_ color: Color) -> UInt8 {
+    switch color {
+    case .reset, .black: return 0
+    case .red: return 1
+    case .green: return 2
+    case .yellow: return 3
+    case .blue: return 4
+    case .magenta: return 5
+    case .cyan: return 6
+    case .gray: return 7
+    case .darkGray: return 8
+    case .lightRed: return 9
+    case .lightGreen: return 10
+    case .lightYellow: return 11
+    case .lightBlue: return 12
+    case .lightMagenta: return 13
+    case .lightCyan: return 14
+    case .white: return 15
+    case .indexed(let value): return value
+    case .rgb(let red, let green, let blue):
+      return nearestXtermIndex((red, green, blue))
+    }
+  }
+
+  private func colorCode(_ color: Color, foreground: Bool) -> ANSIColorCode {
+    if case .reset = color { return .explicitDefault }
+    switch configuration.colorProfile {
+    case .trueColor:
+      break
+    case .indexed256:
+      if case .rgb = color { return .indexed(indexedColor(color)) }
+    case .ansi16:
+      return .basic(ansi16Code(nearestANSI16Index(rgbColor(color)), foreground: foreground))
+    }
+    let offset = foreground ? 30 : 40
+    switch color {
+    case .reset: return .explicitDefault
+    case .black: return .basic(offset)
+    case .red: return .basic(offset + 1)
+    case .green: return .basic(offset + 2)
+    case .yellow: return .basic(offset + 3)
+    case .blue: return .basic(offset + 4)
+    case .magenta: return .basic(offset + 5)
+    case .cyan: return .basic(offset + 6)
+    case .gray: return .basic(offset + 7)
+    case .darkGray: return .basic(offset + 60)
+    case .lightRed: return .basic(offset + 61)
+    case .lightGreen: return .basic(offset + 62)
+    case .lightYellow: return .basic(offset + 63)
+    case .lightBlue: return .basic(offset + 64)
+    case .lightMagenta: return .basic(offset + 65)
+    case .lightCyan: return .basic(offset + 66)
+    case .white: return .basic(offset + 67)
+    case .indexed(let value): return .indexed(value)
+    case .rgb(let red, let green, let blue): return .rgb(red, green, blue)
+    }
+  }
+
+  private func ansi16Code(_ index: UInt8, foreground: Bool) -> Int {
+    let base = foreground ? 30 : 40
+    return index < 8 ? base + Int(index) : base + 60 + Int(index - 8)
+  }
+
+  private func rgbColor(_ color: Color) -> (UInt8, UInt8, UInt8) {
+    switch color {
+    case .reset, .black: return (0, 0, 0)
+    case .red: return (128, 0, 0)
+    case .green: return (0, 128, 0)
+    case .yellow: return (128, 128, 0)
+    case .blue: return (0, 0, 128)
+    case .magenta: return (128, 0, 128)
+    case .cyan: return (0, 128, 128)
+    case .gray: return (192, 192, 192)
+    case .darkGray: return (128, 128, 128)
+    case .lightRed: return (255, 0, 0)
+    case .lightGreen: return (0, 255, 0)
+    case .lightYellow: return (255, 255, 0)
+    case .lightBlue: return (0, 0, 255)
+    case .lightMagenta: return (255, 0, 255)
+    case .lightCyan: return (0, 255, 255)
+    case .white: return (255, 255, 255)
+    case .indexed(let index): return xtermRGB(index)
+    case .rgb(let red, let green, let blue): return (red, green, blue)
+    }
+  }
+
+  private func xtermRGB(_ index: UInt8) -> (UInt8, UInt8, UInt8) {
+    if index < 16 { return ansi16Palette[Int(index)] }
+    if index < 232 {
+      let offset = Int(index) - 16
+      let red = xtermCubeLevel(offset / 36)
+      let green = xtermCubeLevel((offset / 6) % 6)
+      let blue = xtermCubeLevel(offset % 6)
+      return (red, green, blue)
+    }
+    let level = UInt8(8 + 10 * (Int(index) - 232))
+    return (level, level, level)
+  }
+
+  private func nearestXtermIndex(_ rgb: (UInt8, UInt8, UInt8)) -> UInt8 {
+    var best: UInt8 = 0
+    var bestDistance = Int.max
+    for candidate in Int(0)...255 {
+      let palette = xtermRGB(UInt8(candidate))
+      let distance = colorDistance(rgb, palette)
+      if distance < bestDistance {
+        bestDistance = distance
+        best = UInt8(candidate)
+      }
+    }
+    return best
+  }
+
+  private func xtermCubeLevel(_ step: Int) -> UInt8 {
+    step == 0 ? 0 : UInt8(truncatingIfNeeded: 55 + 40 * step)
+  }
+
+  private func nearestANSI16Index(_ rgb: (UInt8, UInt8, UInt8)) -> UInt8 {
+    // The first palette entry at the minimum distance wins, as with `min(by:)`.
+    let palette = ansi16Palette
+    var best = 0
+    var bestDistance = colorDistance(rgb, palette[0])
+    for index in 1..<palette.count {
+      let distance = colorDistance(rgb, palette[index])
+      if distance < bestDistance {
+        bestDistance = distance
+        best = index
+      }
+    }
+    return UInt8(best)
+  }
+
+  private func colorDistance(
+    _ lhs: (UInt8, UInt8, UInt8),
+    _ rhs: (UInt8, UInt8, UInt8)
+  ) -> Int {
+    let red = Int(lhs.0) - Int(rhs.0)
+    let green = Int(lhs.1) - Int(rhs.1)
+    let blue = Int(lhs.2) - Int(rhs.2)
+    return red * red + green * green + blue * blue
+  }
+
+  private var ansi16Palette: [(UInt8, UInt8, UInt8)] {
+    ansiPalette16
+  }
+}
+
+/// The cursor state an `ANSIBackend` frame left on the terminal; `nil` means unknown.
+struct ANSIPresentedCursor: Equatable {
+  var style: CursorStyle?
+  var isVisible: Bool?
+  /// Where the cursor sits, as a viewport position, when nothing has moved it since a frame put it
+  /// there.
+  var position: Position?
+
+  static let unknown = Self()
+}
+
+private let ansiPalette16: [(UInt8, UInt8, UInt8)] = [
+  (0, 0, 0), (128, 0, 0), (0, 128, 0), (128, 128, 0),
+  (0, 0, 128), (128, 0, 128), (0, 128, 128), (192, 192, 192),
+  (128, 128, 128), (255, 0, 0), (0, 255, 0), (255, 255, 0),
+  (0, 0, 255), (255, 0, 255), (0, 255, 255), (255, 255, 255),
+]
+
+private func saturatingANSIAdd(_ lhs: Int, _ rhs: Int) -> Int {
+  let result = lhs.addingReportingOverflow(rhs)
+  return result.overflow ? Int.max : max(0, result.partialValue)
+}
+
+private func oneBasedANSI(_ component: Int) -> Int {
+  saturatingANSIAdd(saturatingANSIAdd(0, component), 1)
+}
+
+private func oneBasedANSI(_ first: Int, _ second: Int) -> Int {
+  saturatingANSIAdd(saturatingANSIAdd(saturatingANSIAdd(0, first), second), 1)
+}

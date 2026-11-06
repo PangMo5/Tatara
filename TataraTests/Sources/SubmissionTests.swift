@@ -31,10 +31,10 @@ struct SubmissionTests {
     #expect(await recorder.writes == 0)
   }
 
-  @Test
-  func `review carries exact commit and source anchor in one write`() async throws {
+  @Test(arguments: [false, true])
+  func `review carries exact commit and source anchor in one write including draft PRs`(_ draft: Bool) async throws {
     let head = String(repeating: "b", count: 40)
-    let response = try pullRequest(head: head)
+    let response = try pullRequest(head: head, draft: draft)
     let recorder = Recorder()
     let runner = CommandRunner { executable, arguments, input in
       #expect(executable == "gh")
@@ -66,6 +66,24 @@ struct SubmissionTests {
   }
 
   @Test
+  func `closed PRs remain blocked before every review write`() async throws {
+    let head = String(repeating: "b", count: 40)
+    let response = try pullRequest(head: head, state: "closed")
+    let recorder = Recorder()
+    let runner = CommandRunner { _, arguments, _ in
+      if arguments.contains("POST") {
+        await recorder.wrote()
+      }
+      return .init(output: response)
+    }
+    let submission = try ReviewSubmission(item: item(), expectedHead: head, event: .comment, body: "Comment")
+    await #expect(throws: TataraError(.unavailable, detail: "The pull request is closed.")) {
+      try await GitHubAdapter(runner: runner).submit(submission)
+    }
+    #expect(await recorder.writes == 0)
+  }
+
+  @Test
   func `misspelled configuration does not silently default`() throws {
     let path = FileManager.default.temporaryDirectory.appendingPathComponent("tatara-config-\(UUID()).toml")
     defer { try? FileManager.default.removeItem(at: path) }
@@ -93,16 +111,16 @@ struct SubmissionTests {
     )
   }
 
-  private func pullRequest(head: String) throws -> Data {
+  private func pullRequest(head: String, draft: Bool = false, state: String = "open") throws -> Data {
     try JSONSerialization.data(withJSONObject: [
       "number": 7,
       "title": "Example",
       "user": ["login": "author"],
       "body": "",
       "html_url": "https://github.com/owner/repo/pull/7",
-      "state": "open",
+      "state": state,
       "labels": [],
-      "draft": false,
+      "draft": draft,
       "merged": false,
       "changed_files": 1,
       "mergeable_state": "clean",

@@ -31,30 +31,40 @@ jobs:
         run: swift Scripts/Tatara.swift toolchain
       - name: Toolchain contract
         run: swift Scripts/Tests/Toolchain.swift
-      - name: Resolve and generate
-        run: swift Scripts/Tatara.swift generate --locked
+      - name: Resolve locked packages
+        run: swift Scripts/Tatara.swift resolve --locked
       - name: Formatting, localization and notices
         run: swift Scripts/Tatara.swift lint
       - name: Test
         run: swift Scripts/Tatara.swift test
       - name: Build production runtime
         run: swift Scripts/Tatara.swift build Release
+      - name: Forge loading and reduced motion
+        run: swift Scripts/Tatara.swift smoke --loading
       - name: PTY runtime
-        run: swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara
+        run: swift Scripts/Tatara.swift smoke
       - name: PR selection and quick picker
-        run: swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara --reading-workspace
+        run: swift Scripts/Tatara.swift smoke --reading-workspace
       - name: Search, scrollbar and loading responsiveness
-        run: swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara --workspace
+        run: swift Scripts/Tatara.swift smoke --workspace
       - name: Wheel axes and sidebar scroll margins
-        run: swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara --wheel
+        run: swift Scripts/Tatara.swift smoke --wheel
       - name: Tree, visual comments and saved filters
-        run: swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara --features
+        run: swift Scripts/Tatara.swift smoke --features
       - name: Multiline editor and complete review preview
-        run: swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara --editors
+        run: swift Scripts/Tatara.swift smoke --editors
       - name: Source search and combined review
-        run: swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara --search-review
+        run: swift Scripts/Tatara.swift smoke --search-review
+      - name: Loaded-list search ownership
+        run: swift Scripts/Tatara.swift smoke --list-search --dense-navigation --animated
+      - name: Draft PR review entry
+        run: swift Scripts/Tatara.swift smoke --draft-review
+      - name: Pending review and comment reader
+        run: swift Scripts/Tatara.swift smoke --review-experience
+      - name: Narrow stacked workspace
+        run: swift Scripts/Tatara.swift smoke --stacked
       - name: Large input and in-flight focus changes
-        run: swift Scripts/Tatara.swift smoke DerivedData/Build/Products/Release/tatara --stress
+        run: swift Scripts/Tatara.swift smoke --stress
       - uses: actions/upload-artifact@v7.0.2
         if: always()
         with:

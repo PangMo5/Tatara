@@ -122,6 +122,7 @@ private struct ContentSource: Sendable {
     width: Int,
     viewport: DiffViewport,
     theme: Theme,
+    revealing: SourceLocation?,
     documents: DocumentClient,
     difftastic: DiffClient,
   ) async throws -> ReviewDocument? {
@@ -136,15 +137,17 @@ private struct ContentSource: Sendable {
     var rows = [ReviewDiffRow]()
     var identities = [String]()
     var hasCacheIdentity = true
-    for file in files {
+    let rendered = try await renderDiffs(
+      files,
+      repository: detail.item.id.repository,
+      revision: revision,
+      width: width,
+      theme: theme,
+      revealing: revealing,
+      client: difftastic,
+    )
+    for (file, diff) in zip(files, rendered) {
       try Task.checkCancellation()
-      let diff = try await difftastic.render(.init(
-        repository: detail.item.id.repository,
-        revision: revision,
-        file: file,
-        width: width,
-        theme: theme,
-      ))
       let remote = comments[file.path] ?? []
       let local = draftGroups[file.path] ?? []
       if directory == nil, remote.isEmpty, local.isEmpty {
@@ -183,7 +186,7 @@ private struct ContentSource: Sendable {
           ),
         )
         if let index = positions["\(draft.side.rawValue):\(draft.line)"] {
-          attached[index, default: []].append(comment)
+          attached[index, default: []].insert(comment, at: 0)
         } else {
           detached.append(comment)
         }
@@ -198,7 +201,8 @@ private struct ContentSource: Sendable {
         let coordinate = anchor.subjectType == "file"
           ? file.path
           : "\(anchor.side?.rawValue ?? "–"):\(range)\(location.map(String.init) ?? "–")"
-        let heading = "@\(comment.author) · \(coordinate)\(status)"
+        let author = comment.id < 0 ? (strings["Pending review"] ?? "Pending review") : "@" + comment.author
+        let heading = "\(author) · \(coordinate)\(status)"
         let placement = anchor.line.flatMap { line in anchor.side.map { SourceLocation(path: file.path, line: line, side: $0) } }
         let commentWidth = width >= 100 && anchor.side != nil ? (width - 3) / 2 : width
         for spans in try await commentLines(comment, heading: heading, width: commentWidth, documents: documents) {
@@ -265,6 +269,51 @@ private struct ContentSource: Sendable {
     } }
   }
 
+  @concurrent
+  private func renderDiffs(
+    _ files: [ChangedFile],
+    repository: RepositoryID,
+    revision: PullRequestRevision,
+    width: Int,
+    theme: Theme,
+    revealing: SourceLocation?,
+    client: DiffClient,
+  ) async throws -> [ReviewDiff] {
+    let render: @Sendable (Int) async throws -> (Int, ReviewDiff) = { index in
+      try Task.checkCancellation()
+      let diff = try await client.render(.init(
+        repository: repository,
+        revision: revision,
+        file: files[index],
+        width: width,
+        theme: theme,
+        revealing: revealing?.path == files[index].path ? revealing : nil,
+      ))
+      return (index, diff)
+    }
+    return try await withThrowingTaskGroup(of: (Int, ReviewDiff).self) { group in
+      var results = [ReviewDiff?](repeating: nil, count: files.count)
+      var next = 0
+      for index in 0 ..< min(4, files.count) {
+        group.addTask { try await render(index) }
+        next += 1
+      }
+      while let (index, diff) = try await group.next() {
+        try Task.checkCancellation()
+        results[index] = diff
+        if next < files.count {
+          let index = next
+          next += 1
+          group.addTask { try await render(index) }
+        }
+      }
+      return try results.map { result in
+        guard let result else { throw TataraError(.invalidResponse, detail: "Combined diff preparation is incomplete.") }
+        return result
+      }
+    }
+  }
+
 }
 
 // MARK: - WorkspaceFeature
@@ -304,6 +353,16 @@ public struct WorkspaceFeature {
     var selection: Int
   }
 
+  public struct ListSearchSession: Equatable, Sendable {
+    public let scope: SearchScope
+    public let previous: PaneSearch
+    public let results: ListSearchResults?
+    public let collapsed: Set<String>
+    public let itemsScroll: Int
+    public let filesScroll: Int
+    public var acceptWhenReady = false
+  }
+
   @ObservableState
   public struct State: Equatable {
 
@@ -317,6 +376,7 @@ public struct WorkspaceFeature {
 
     // MARK: Public
 
+    public var initialItem: ForgeItem?
     public var repository: RepositoryID
     public var strings: [String: String]
     public var kind = ItemKind.pullRequest
@@ -357,6 +417,8 @@ public struct WorkspaceFeature {
     public var filesHeight = 12
     public var contentWidth = 100
     public var contentHeight = 24
+    public var popupWidth = 88
+    public var popupHeight = 16
     public var helpHeight = 16
     public var helpScroll = 0
     public var isLoading = false
@@ -367,11 +429,16 @@ public struct WorkspaceFeature {
     public var nextPage: Int?
     public var error: TataraError?
     public var searches = [SearchScope: PaneSearch]()
-    public var fileSearchGeneration = 0
-    public var isSearchingFiles = false
-
+    public var listSearchGeneration = 0
+    public var listSearchPending: SearchScope?
+    public var listSearchErrors = [SearchScope: TataraError]()
+    public var listSearchResults = [SearchScope: ListSearchResults]()
+    public var listSearchSession: ListSearchSession?
+    public var fileSearch: FileContentSearchFeature.State?
+    public var revealedSource: SourceLocation?
     public var showsHelp = false
     public var pendingPrefix: String?
+    public var reviewEntryHint: String?
     public var reviewLocation: SourceLocation?
     public var commentEditor: CommentFeature.State?
     public var review: ReviewFeature.State?
@@ -389,9 +456,14 @@ public struct WorkspaceFeature {
     public private(set) var visibleFiles = [ChangedFile]()
     public private(set) var visibleFileRows = [FileTreeRow]()
 
+    public var listSearchError: TataraError? {
+      listSearchErrors[searchScope]
+    }
+
     public var preferences: Preferences {
       didSet {
         if preferences.filesView != oldValue.filesView {
+          invalidateListSearch(.files)
           rebuildFileRows()
         }
       }
@@ -405,7 +477,14 @@ public struct WorkspaceFeature {
     }
 
     public var detail: ItemDetail? {
-      didSet { rebuildFiles() }
+      didSet {
+        let changed = oldValue?.files != detail?.files || oldValue?.revision != detail?.revision || oldValue?.item.id != detail?
+          .item.id
+        if oldValue?.revision != detail?.revision || oldValue?.item.id != detail?.item.id {
+          revealedSource = nil
+        }
+        rebuildFiles(invalidateSearch: changed)
+      }
     }
 
     public var itemRowHeight: Int {
@@ -414,10 +493,6 @@ public struct WorkspaceFeature {
 
     public var itemsPage: Int {
       max(1, itemsHeight / itemRowHeight)
-    }
-
-    public var fileMatches: [String: [Int]]? {
-      didSet { rebuildFiles() }
     }
 
     public var reviewRow: Int? {
@@ -454,7 +529,15 @@ public struct WorkspaceFeature {
     }
 
     public var selectedItemIndex: Int? {
-      selectedItemID.flatMap { visibleItemIndices[$0] }
+      if
+        listSearchSession?.scope == .items,
+        let search = searches[.items],
+        let results = listSearchResults[.items],
+        results.rows.indices.contains(search.selection)
+      {
+        return results.rows[search.selection]
+      }
+      return selectedItemID.flatMap { visibleItemIndices[$0] }
     }
 
     public var fileCursorIndex: Int? {
@@ -466,7 +549,15 @@ public struct WorkspaceFeature {
     }
 
     public var fileCursorKey: String? {
-      fileCursorID ?? selectedFilePath.map { "file:" + $0 }
+      if
+        listSearchSession?.scope == .files,
+        let search = searches[.files],
+        let results = listSearchResults[.files],
+        results.ids.indices.contains(search.selection)
+      {
+        return results.ids[search.selection]
+      }
+      return fileCursorID ?? selectedFilePath.map { "file:" + $0 }
     }
 
     public var visibleHelp: [KeyCommand] {
@@ -562,7 +653,24 @@ public struct WorkspaceFeature {
     private var visibleItemIndices = [ItemID: Int]()
     private var visibleFileIndices = [String: Int]()
 
+    private mutating func invalidateListSearch(_ scope: SearchScope) {
+      if listSearchPending == scope || listSearchSession?.scope == scope {
+        listSearchGeneration += 1
+      }
+      listSearchResults[scope] = nil
+      listSearchErrors[scope] = nil
+      searches[scope]?.matches = []
+      if listSearchPending == scope {
+        listSearchPending = nil
+      }
+      if listSearchSession?.scope == scope {
+        listSearchSession = nil
+        searches[scope]?.isEditing = false
+      }
+    }
+
     private mutating func rebuildItems() {
+      invalidateListSearch(.items)
       visibleItems = items
       visibleItemIndices = Dictionary(
         visibleItems.enumerated().map { ($0.element.id, $0.offset) },
@@ -570,9 +678,11 @@ public struct WorkspaceFeature {
       )
     }
 
-    private mutating func rebuildFiles() {
-      let files = detail?.files ?? []
-      visibleFiles = fileMatches.map { matches in files.filter { matches[$0.path] != nil } } ?? files
+    private mutating func rebuildFiles(invalidateSearch: Bool) {
+      if invalidateSearch {
+        invalidateListSearch(.files)
+      }
+      visibleFiles = detail?.files ?? []
       rebuildFileRows()
     }
 
@@ -580,10 +690,7 @@ public struct WorkspaceFeature {
       if preferences.filesView == .list {
         visibleFileRows = visibleFiles.map { .init(path: $0.path, name: $0.path, depth: 0, isDirectory: false) }
       } else {
-        visibleFileRows = detail?.fileTree.visible(
-          collapsed: collapsedDirectories,
-          matching: fileMatches.map { Set($0.keys) },
-        ) ?? []
+        visibleFileRows = detail?.fileTree.visible(collapsed: collapsedDirectories) ?? []
       }
       visibleFileIndices = Dictionary(
         visibleFileRows.enumerated().map { ($0.element.id, $0.offset) },
@@ -595,12 +702,14 @@ public struct WorkspaceFeature {
 
   public enum Action {
     case appeared
+    case initialItemListResponse(generation: Int, item: ForgeItem, Result<ItemPage, TataraError>)
     case keyPressed(String)
     case pickerMatches(generation: Int, [ForgeItem])
     case reflowResponse(generation: Int, Result<ReviewDocument, TataraError>)
     case commandPressed(KeyCommand)
     case tabSelected(ContentTab)
     case viewportChanged(width: Int, height: Int)
+    case popupViewportChanged(width: Int, height: Int)
     case helpViewportChanged(Int)
     case sidebarViewportChanged(items: Int, files: Int)
     case scrollbarMoved(SearchScope, offset: Int)
@@ -615,7 +724,8 @@ public struct WorkspaceFeature {
     case listResponse(generation: Int, append: Bool, Result<ItemPage, TataraError>)
     case detailResponse(generation: Int, Result<ItemDetail, TataraError>)
     case contentResponse(generation: Int, Result<ReviewDocument, TataraError>)
-    case fileSearchResponse(generation: Int, Result<[String: [Int]], TataraError>)
+    case listSearchResponse(scope: SearchScope, generation: Int, Result<ListSearchResults, TataraError>)
+    case fileSearch(FileContentSearchFeature.Action)
     case searchResponse(generation: Int, matches: SearchMatches)
     case searchRefreshed(generation: Int, matches: SearchMatches, selection: Int)
     case wordSearchResponse(
@@ -635,6 +745,7 @@ public struct WorkspaceFeature {
     case pickerRowActivated(Int)
     case pickerQueryChanged(String)
     case review(ReviewFeature.Action)
+    case draftCommentSelected(Int, edit: Bool)
     case reviewDismissed
     case markReviewedPressed
   }
@@ -726,6 +837,9 @@ public struct WorkspaceFeature {
         switch result {
         case .success(let detail):
           guard detail.item.id == state.selectedItemID else { return .none }
+          if state.fileSearch?.detail.revision != detail.revision {
+            state.fileSearch = nil
+          }
           state.detail = detail
           retainDetail(detail, in: &state)
           if let key = state.focusedCommentKey, detail.comment(for: key) == nil {
@@ -748,7 +862,41 @@ public struct WorkspaceFeature {
       case .reflowResponse(let generation, let result):
         return .send(.contentResponse(generation: generation, result))
 
-      case .appeared: return loadList(&state)
+      case .appeared:
+        guard let item = state.initialItem else { return loadList(&state) }
+        state.initialItem = nil
+        state.items = [item]
+        state.isSelectingItems = false
+        state.pane = .files
+        state.tab = .diff
+        state.listGeneration += 1
+        let generation = state.listGeneration
+        return .merge(.send(.itemSelected(item.id)), .run(priority: .utility) { [forge] send in
+          do {
+            let page = try await forge.list(item.id.repository, .pullRequest, 1)
+            try Task.checkCancellation()
+            await send(.initialItemListResponse(generation: generation, item: item, .success(page)))
+          } catch is CancellationError {} catch {
+            if !Task.isCancelled {
+              await send(.initialItemListResponse(generation: generation, item: item, .failure(.wrapping(error))))
+            }
+          }
+        }.cancellable(id: CancelID.list, cancelInFlight: true))
+
+      case .initialItemListResponse(let generation, let item, let result):
+        guard generation == state.listGeneration else { return .none }
+        switch result {
+        case .success(let page):
+          let current = state.selectedItem ?? item
+          state.items = page.items
+          if !state.items.contains(where: { $0.id == current.id }) {
+            state.items.insert(current, at: 0)
+          }
+          state.nextPage = page.nextPage
+
+        case .failure(let error): state.error = error
+        }
+        return .none
 
       case .filtersOpened:
         state.visualStart = nil
@@ -759,7 +907,6 @@ public struct WorkspaceFeature {
         state.activeFilter = query
         state.filterEditor = nil
         state.searches[.items] = .init()
-        state.searches[.items]?.query = query
         return loadList(&state)
 
       case .filterEditor(.delegate(.close)): state.filterEditor = nil
@@ -795,7 +942,6 @@ public struct WorkspaceFeature {
         guard let row = state.fileRow(for: id) else { return .none }
         state.fileCursorID = id
         if row.isDirectory {
-          guard state.fileMatches == nil else { return .send(.fileRowSelected(id)) }
           if !state.collapsedDirectories.insert(row.path).inserted {
             state.collapsedDirectories.remove(row.path)
           }
@@ -811,6 +957,7 @@ public struct WorkspaceFeature {
             return .none
           }
           state.selectedDirectoryPath = row.path
+          state.revealedSource = nil
           state.horizontalOffset = 0
           state.focusedCommentKey = nil
           state.selectedFilePath = nil
@@ -857,6 +1004,13 @@ public struct WorkspaceFeature {
         return loadContent(&state, resetScroll: true)
 
       case .keyPressed(let key):
+        state.reviewEntryHint = nil
+        if state.fileSearch != nil {
+          return .send(.fileSearch(.keyPressed(key)))
+        }
+        if state.listSearchSession?.acceptWhenReady == true, key != "enter" {
+          state.listSearchSession = nil
+        }
         if state.picker != nil {
           return pickerKey(&state, key)
         }
@@ -870,16 +1024,27 @@ public struct WorkspaceFeature {
         if state.isSearching {
           let scope = state.searchScope
           switch key {
-          case "esc": return clearSearch(&state, scope)
+          case "esc":
+            return scope == .items || scope == .files ? cancelListSearch(&state) : clearSearch(&state, scope)
 
           case "enter":
             state.searches[scope, default: .init()].isEditing = false
             switch scope {
-            case .items:
-              state.activeFilter = state.searches[.items]?.query.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-              return loadList(&state)
-
-            case .files: return findFiles(&state)
+            case .items,
+                 .files:
+              if
+                state.searches[scope]?.query.isEmpty == true,
+                let previous = state.listSearchSession?.previous,
+                !previous.query.isEmpty
+              {
+                state.searches[scope] = previous
+                return findListMatches(&state, scope, accept: true)
+              }
+              if state.listSearchPending == scope {
+                state.listSearchSession?.acceptWhenReady = true
+                return .none
+              }
+              return finishListSearch(&state, scope)
 
             case .content: return .none
 
@@ -900,6 +1065,9 @@ public struct WorkspaceFeature {
           }
           if scope == .help {
             state.helpScroll = 0
+          }
+          if scope == .items || scope == .files {
+            return findListMatches(&state, scope)
           }
           return scope == .content ? findMatches(&state) : .none
         }
@@ -928,6 +1096,10 @@ public struct WorkspaceFeature {
         return .none
 
       case .commandPressed(let command):
+        state.reviewEntryHint = nil
+        if state.listSearchSession?.acceptWhenReady == true {
+          state.listSearchSession = nil
+        }
         if
           state.pane == .content,
           let key = state.focusedCommentKey,
@@ -961,6 +1133,12 @@ public struct WorkspaceFeature {
               operation: operation,
               strings: state.strings,
             )
+            state.commentEditor?.threadComments = detail.comments
+            let popupWidth = state.popupWidth
+            let popupHeight = state.popupHeight
+            state.commentEditor?.threadWidth = popupWidth
+            state.commentEditor?.threadHeight = popupHeight
+            state.commentEditor?.isViewing = command == .open
             return .send(.commentEditor(.appeared))
           }
           if command == .down || command == .up || command == .visualDown || command == .visualUp {
@@ -1015,7 +1193,6 @@ public struct WorkspaceFeature {
           if command == .left {
             if
               row.isDirectory,
-              state.searches[.files]?.query.isEmpty != false,
               !state.collapsedDirectories.contains(row.path)
             {
               state.collapsedDirectories.insert(row.path)
@@ -1185,13 +1362,18 @@ public struct WorkspaceFeature {
         case .help: state.showsHelp = true
           state.helpScroll = 0
 
+        case .searchFileContents:
+          guard !state.isSelectingItems, let detail = state.detail, detail.revision != nil else { return .none }
+          state.fileSearch = .init(detail: detail, keymap: state.preferences.keymap)
+          return .none
+
         case .search: state.visualStart = nil
+          if state.searchScope == .items || state.searchScope == .files {
+            return beginListSearch(&state, state.searchScope)
+          }
           state.searches[state.searchScope, default: .init()].direction = 1
           state.searches[state.searchScope, default: .init()].originSide = nil
           state.searches[state.searchScope, default: .init()].originColumn = nil
-          if state.searchScope == .items {
-            state.searches[.items, default: .init()].query = state.activeFilter
-          }
           state.searches[state.searchScope, default: .init()].origin = state.diffCursor
           state.searches[state.searchScope, default: .init()].isEditing = true
           if state.searchScope == .content {
@@ -1247,22 +1429,28 @@ public struct WorkspaceFeature {
         case .review,
              .comment:
           if command == .comment, state.pane == .files, state.fileCursor?.isDirectory == true {
+            state.reviewEntryHint = "Select a file and press Enter to open Diff."
             return .none
           }
-          guard
-            let detail = state.detail,
-            !state.isLoadingDetail,
-            state.isDocumentCurrent,
-            detail.item.state == .open,
-            !detail.item.isDraft
-          else { return .none }
+          guard let detail = state.detail else {
+            state.reviewEntryHint = "Open a pull request before starting a review."
+            return .none
+          }
+          guard !state.isLoadingDetail, state.isDocumentCurrent else {
+            state.reviewEntryHint = "Wait for the current document to finish loading."
+            return .none
+          }
+          guard detail.item.state == .open else {
+            state.reviewEntryHint = "This pull request is closed."
+            return .none
+          }
           state.review = state.drafts[detail.item.id] ?? .init(
             item: detail.item,
             expectedHead: detail.revision?.head,
             expectedMergeBase: detail.revision?.mergeBase,
           )
           state.review?.isConfirming = false
-          state.reviewLocation = state.pane == .content && state.tab == .diff
+          state.reviewLocation = command == .comment && state.pane == .content && state.tab == .diff
             ? state.document.location(
               at: state.diffCursor,
               side: state.diffSide,
@@ -1322,9 +1510,8 @@ public struct WorkspaceFeature {
         state.selectedItemID = id
         state.horizontalOffset = 0
         state.focusedCommentKey = nil
-        state.fileSearchGeneration += 1
-        state.fileMatches = nil
-        state.isSearchingFiles = false
+        state.fileSearch = nil
+        state.revealedSource = nil
         state.searches[.files] = .init()
         state.selectedDirectoryPath = nil
         state.selectedFilePath = nil
@@ -1340,7 +1527,7 @@ public struct WorkspaceFeature {
         state.isLoadingDetail = state.detailCache[id] == nil
         state.selectedFilePath = state.visibleFiles.first?.path
         state.fileCursorID = state.selectedFilePath.map { "file:" + $0 }
-        let contentEffect = Effect<Action>.merge(.cancel(id: CancelID.filesSearch), loadContent(&state, resetScroll: true))
+        let contentEffect = loadContent(&state, resetScroll: true)
         guard state.isLoadingDetail else { return .merge(.cancel(id: CancelID.detail), contentEffect) }
         let generation = state.detailGeneration
         return .merge(contentEffect, replacing(.detail, with: .run(priority: .utility) { [forge] send in
@@ -1367,6 +1554,7 @@ public struct WorkspaceFeature {
           return .none
         }
         state.selectedDirectoryPath = nil
+        state.revealedSource = nil
         state.selectedFilePath = path
         state.horizontalOffset = 0
         state.focusedCommentKey = nil
@@ -1387,7 +1575,7 @@ public struct WorkspaceFeature {
           state.items = append ? state.items + page.items.filter { !ids.contains($0.id) } : page.items
           state.nextPage = page.nextPage
           if append {
-            return .none
+            return state.searches[.items]?.query.isEmpty == false ? findListMatches(&state, .items) : .none
           }
           if let id = state.selectedItemID, state.items.contains(where: { $0.id == id }) {
             return .send(.itemSelected(id))
@@ -1407,6 +1595,9 @@ public struct WorkspaceFeature {
           return .none
 
         case .success(let detail):
+          if state.fileSearch?.detail.revision != detail.revision {
+            state.fileSearch = nil
+          }
           state.detail = detail
           retainDetail(detail, in: &state)
           state.selectedFilePath = state.visibleFiles.first?.path
@@ -1416,6 +1607,7 @@ public struct WorkspaceFeature {
 
       case .contentResponse(let generation, let result):
         guard generation == state.contentGeneration else { return .none }
+        state.reviewEntryHint = nil
         state.isLoadingDiff = false
         state.isPreparingDocument = false
         switch result {
@@ -1453,19 +1645,73 @@ public struct WorkspaceFeature {
         }
         return .none
 
-      case .fileSearchResponse(let generation, let result):
-        guard generation == state.fileSearchGeneration else { return .none }
-        state.isSearchingFiles = false
+      case .listSearchResponse(let scope, let generation, let result):
+        guard generation == state.listSearchGeneration else { return .none }
+        state.listSearchPending = nil
         switch result {
-        case .success(let matches):
-          state.fileMatches = matches
-          if let first = state.visibleFiles.first {
-            return .send(.fileSelected(first.path))
+        case .success(let results):
+          state.listSearchResults[scope] = results
+          state.searches[scope, default: .init()].matches = results.rows
+          let origin = state.searches[scope]?.origin ?? 0
+          state.searches[scope]?.selection = results.next(from: origin, direction: 1) ?? 0
+          if state.listSearchSession?.scope == scope {
+            if state.listSearchSession?.acceptWhenReady == true {
+              return finishListSearch(&state, scope)
+            }
+            if scope == .files {
+              state.collapsedDirectories = state.listSearchSession?.collapsed ?? state.collapsedDirectories
+              if let id = state.fileCursorKey {
+                revealFileRow(&state, id)
+              }
+            }
           }
 
-        case .failure(let error): state.error = error
+        case .failure(let error):
+          state.listSearchErrors[scope] = error
+          state.listSearchSession?.acceptWhenReady = false
+          let editing = state.listSearchSession?.scope == scope
+          state.searches[scope]?.isEditing = editing
         }
         return .none
+
+      case .fileSearch(.delegate(.close)):
+        state.fileSearch = nil
+        return .none
+
+      case .fileSearch(.delegate(.open(let hit))):
+        guard
+          let search = state.fileSearch,
+          let detail = state.detail,
+          detail.item.id == search.detail.item.id,
+          detail.revision == search.detail.revision,
+          !search.isLoading,
+          search.error == nil,
+          search.results.indices.contains(search.selection),
+          search.results[search.selection] == hit,
+          detail.file(at: hit.location.path) != nil
+        else {
+          state.fileSearch = nil
+          state.error = .init(.revisionChanged)
+          return .none
+        }
+        state.fileSearch = nil
+        state.pane = .content
+        state.tab = .diff
+        state.selectedDirectoryPath = nil
+        state.selectedFilePath = hit.location.path
+        state.fileCursorID = "file:" + hit.location.path
+        state.revealedSource = hit.location
+        state.diffSide = hit.location.side
+        state.horizontalOffset = 0
+        state.focusedCommentKey = nil
+        revealFileRow(&state, "file:" + hit.location.path)
+        let effect = loadContent(&state, resetScroll: true)
+        state.resetsScrollOnResponse = false
+        state.pendingCursorLocation = hit.location
+        state.pendingViewportLocation = hit.location
+        return effect
+
+      case .fileSearch: return .none
 
       case .wordSearchResponse(let generation, let row, let side, let column, let direction, let word):
         guard generation == state.searchGeneration else { return .none }
@@ -1550,6 +1796,14 @@ public struct WorkspaceFeature {
         state.scroll = min(state.scroll, state.maxScroll)
         return changed ? loadContent(&state, preservingSearchPosition: true) : .none
 
+      case .popupViewportChanged(let width, let height):
+        state.popupWidth = max(1, width)
+        state.popupHeight = max(1, height)
+        if state.commentEditor?.isViewing == true {
+          return .send(.commentEditor(.threadRequested(width: width, height: height)))
+        }
+        return .none
+
       case .helpViewportChanged(let height):
         state.helpHeight = max(1, height)
         state.helpScroll = min(state.helpScroll, max(0, state.visibleHelp.count - state.helpHeight))
@@ -1559,6 +1813,61 @@ public struct WorkspaceFeature {
         state.itemsHeight = max(1, items)
         state.filesHeight = max(1, files)
         return .none
+
+      case .draftCommentSelected(let id, let edit):
+        guard
+          let detail = state.detail,
+          let revision = detail.revision,
+          var review = state.review ?? state.drafts[detail.item.id],
+          let index = review.commentIdentities.firstIndex(of: id),
+          review.item.id == detail.item.id,
+          !review.isSubmitting,
+          review.expectedHead == revision.head,
+          review.expectedMergeBase == revision.mergeBase
+        else { return .none }
+        let comment = review.comments[index]
+        guard let file = detail.file(at: comment.path) else { return .none }
+        let location = SourceLocation(path: comment.path, line: comment.line, side: comment.side)
+        review.selectedFile = file
+        review.editingCommentIndex = edit ? index : nil
+        review.isEditingInline = edit
+        review.isConfirming = false
+        review.inlineBody = comment.body
+        review.inlineLine = String(comment.line)
+        review.inlineStartLine = comment.startLine.map(String.init) ?? ""
+        review.inlineSide = comment.side
+        review.inlineAnchorLocked = true
+        if edit {
+          review.restoreInlineDraft(fallback: comment.body)
+        }
+        state.drafts[detail.item.id] = review
+        state.review = edit ? review : nil
+        state.reviewLocation = edit ? location : nil
+        state.selectedDirectoryPath = nil
+        state.selectedFilePath = comment.path
+        state.fileCursorID = "file:" + comment.path
+        state.pane = .content
+        state.tab = .diff
+        state.diffSide = comment.side
+        state.revealedSource = location
+        revealFileRow(&state, "file:" + comment.path)
+        let effect = loadContent(&state, resetScroll: true)
+        state.resetsScrollOnResponse = false
+        state.pendingCursorLocation = location
+        state.pendingViewportLocation = location
+        return effect
+
+      case .review(.addInlineButtonPressed):
+        guard
+          let review = state.review,
+          state.reviewLocation != nil,
+          !review.isEditingInline,
+          review.error == nil
+        else { return .none }
+        state.drafts[review.item.id] = review
+        state.review = nil
+        state.reviewLocation = nil
+        return loadContent(&state)
 
       case .review(.delegate(.submitted)):
         if let id = state.review?.item.id {
@@ -1580,10 +1889,13 @@ public struct WorkspaceFeature {
 
       case .reviewDismissed:
         guard let review = state.review, !review.isSubmitting else { return .none }
-        state.drafts[review.item.id] = review
+        let changed = state.drafts[review.item.id]?.comments != review.comments
+        var draft = review
+        draft.stashInlineDraft()
+        state.drafts[review.item.id] = draft
         state.review = nil
         state.reviewLocation = nil
-        return state.tab == .diff && !review.comments.isEmpty ? loadContent(&state) : .none
+        return state.tab == .diff && (changed || !review.comments.isEmpty) ? loadContent(&state) : .none
 
       case .markReviewedPressed:
         guard state.pane != .files || state.fileCursor?.isDirectory != true else { return .none }
@@ -1598,11 +1910,12 @@ public struct WorkspaceFeature {
     .ifLet(\.commentEditor, action: \.commentEditor) { CommentFeature() }
     .ifLet(\.review, action: \.review) { ReviewFeature() }
     .ifLet(\.filterEditor, action: \.filterEditor) { FilterFeature() }
+    .ifLet(\.fileSearch, action: \.fileSearch) { FileContentSearchFeature() }
   }
 
   // MARK: Internal
 
-  enum CancelID { case list, detail, content, search, filesSearch, picker }
+  enum CancelID { case list, detail, content, search, listSearch, picker }
 
   @Dependency(ClipboardClient.self) var clipboard
   @Dependency(ForgeClient.self) var forge
@@ -1610,55 +1923,6 @@ public struct WorkspaceFeature {
   @Dependency(DocumentClient.self) var documents
 
   // MARK: Private
-
-  @concurrent
-  private static func searchFiles(
-    _ detail: ItemDetail,
-    revision: PullRequestRevision,
-    query: String,
-    forge: ForgeClient,
-  ) async throws -> [String: [Int]] {
-    let pattern = try SearchPattern(query)
-    return try await withThrowingTaskGroup(of: (String, [Int]).self) { group in
-      var files = detail.files.makeIterator()
-      var result = [String: [Int]]()
-      func enqueue(_ file: ChangedFile) {
-        group.addTask {
-          try Task.checkCancellation()
-          let deleted = file.status == "removed"
-          let data = try await forge.content(detail.item.id.repository, deleted ? revision.mergeBase : revision.head, file.path)
-          guard data.count <= 32 * 1024 * 1024 else { throw TataraError(
-            .invalidResponse,
-            detail: "File exceeds the 32 MiB search limit: \(file.path)",
-          ) }
-          // Binary files have no text lines to match.
-          guard !data.contains(0), let source = String(data: data, encoding: .utf8) else { return (file.path, []) }
-          var lines = [Int]()
-          for (index, line) in source.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
-            try Task.checkCancellation()
-            if try pattern.contains(in: String(line)) {
-              lines.append(index + 1)
-            }
-          }
-          return (file.path, lines)
-        }
-      }
-      for _ in 0 ..< 4 {
-        if let file = files.next() {
-          enqueue(file)
-        }
-      }
-      while let (path, lines) = try await group.next() {
-        if !lines.isEmpty {
-          result[path] = lines
-        }
-        if let file = files.next() {
-          enqueue(file)
-        }
-      }
-      return result
-    }
-  }
 
   @concurrent
   private static func filterPicker(_ items: [ForgeItem], query: String) async throws -> [ForgeItem] {
@@ -1695,29 +1959,20 @@ public struct WorkspaceFeature {
     if scope == .help {
       state.helpScroll = 0
     }
-    if scope == .items {
-      guard !state.activeFilter.isEmpty else { return .none }
-      state.activeFilter = ""
-      return loadList(&state)
-    }
-    if scope == .files {
-      state.fileSearchGeneration += 1
-      state.fileMatches = nil
-      state.isSearchingFiles = false
-    }
-    if scope == .files, let path = state.selectedFilePath {
-      for row in state.detail?.fileTree.rows ?? [] where row.isDirectory
-        && (row.path == FileTree.rootPath || path.hasPrefix(row.path + "/"))
-      {
-        state.collapsedDirectories.remove(row.path)
-      }
+    if scope == .items || scope == .files {
+      state.listSearchGeneration += 1
+      state.listSearchPending = nil
+      state.listSearchErrors[scope] = nil
+      state.listSearchResults[scope] = nil
+      state.listSearchSession = nil
+      return .cancel(id: CancelID.listSearch)
     }
     if scope == .content {
       state.searchGeneration += 1
       state.isFinding = false
       return .cancel(id: CancelID.search)
     }
-    return scope == .files ? .cancel(id: CancelID.filesSearch) : .none
+    return .none
   }
 
   private func searchColumn(_ state: State) -> Int {
@@ -1839,28 +2094,6 @@ public struct WorkspaceFeature {
     })
   }
 
-  private func findFiles(_ state: inout State) -> Effect<Action> {
-    let query = state.searches[.files]?.query ?? ""
-    guard !query.isEmpty else { return clearSearch(&state, .files) }
-    guard let detail = state.detail, let revision = detail.revision else { return .none }
-    state.fileSearchGeneration += 1
-    let generation = state.fileSearchGeneration
-    state.isSearchingFiles = true
-    state.fileMatches = [:]
-    state.error = nil
-    return replacing(.filesSearch, with: .run(priority: .utility) { [forge] send in
-      do {
-        let result = try await Self.searchFiles(detail, revision: revision, query: query, forge: forge)
-        try Task.checkCancellation()
-        await send(.fileSearchResponse(generation: generation, .success(result)))
-      } catch is CancellationError {} catch {
-        if !Task.isCancelled {
-          await send(.fileSearchResponse(generation: generation, .failure(.wrapping(error))))
-        }
-      }
-    })
-  }
-
   private func findMatches(_ state: inout State, restore: SearchRestore? = nil) -> Effect<Action> {
     state.searchGeneration += 1
     clearContentMatches(&state)
@@ -1917,9 +2150,8 @@ public struct WorkspaceFeature {
       state.isFinding = false
       state.selectedDirectoryPath = nil
       state.selectedFilePath = nil
-      state.fileSearchGeneration += 1
-      state.fileMatches = nil
-      state.isSearchingFiles = false
+      state.fileSearch = nil
+      state.revealedSource = nil
     }
     let generation = state.listGeneration
     let repository = state.repository
@@ -1956,7 +2188,7 @@ public struct WorkspaceFeature {
         .cancel(id: CancelID.detail),
         .cancel(id: CancelID.content),
         .cancel(id: CancelID.search),
-        .cancel(id: CancelID.filesSearch),
+        .cancel(id: CancelID.listSearch),
       ),
       replacement,
     )
@@ -2007,6 +2239,7 @@ public struct WorkspaceFeature {
     let filePath = state.selectedFilePath
     let directory = state.selectedDirectoryPath
     let theme = state.preferences.theme
+    let revealing = state.revealedSource
     let viewport = DiffViewport(width: width, wrap: state.preferences.wrap, offset: state.horizontalOffset)
     state.isLoadingDiff = state.tab == .diff && state.detail?.revision != nil && (filePath != nil || directory != nil)
     return .concatenate(
@@ -2020,6 +2253,7 @@ public struct WorkspaceFeature {
               width: width,
               viewport: viewport,
               theme: theme,
+              revealing: revealing,
               documents: documents,
               difftastic: difftastic,
             ) {
@@ -2240,6 +2474,15 @@ public struct WorkspaceFeature {
       state.error = nil
       return .none
     }
+    if state.pane == .files || state.pane == .items, command == .nextMatch || command == .previousMatch {
+      let scope = state.searchScope
+      guard
+        let results = state.listSearchResults[scope],
+        let next = results.next(from: listCursorRow(state, scope), direction: command == .nextMatch ? 1 : -1)
+      else { return .none }
+      state.searches[scope]?.selection = next
+      return selectListMatch(&state, scope, results: results, index: next)
+    }
     if state.pane == .content, command == .nextMatch || command == .previousMatch {
       guard let search = state.searches[.content], !search.matches.isEmpty else { return .none }
       let direction = command == .nextMatch ? search.direction : -search.direction
@@ -2342,21 +2585,33 @@ public struct WorkspaceFeature {
   }
 
   private func reviewAtCursor(_ state: inout State) -> Effect<Action> {
+    guard state.isDocumentCurrent, !state.isLoadingDetail else {
+      state.reviewEntryHint = "Wait for the current document to finish loading."
+      return .none
+    }
+    guard let detail = state.detail else {
+      state.reviewEntryHint = "Open a pull request before starting a review."
+      return .none
+    }
+    guard detail.item.state == .open else {
+      state.reviewEntryHint = "This pull request is closed."
+      return .none
+    }
+    guard let diff = state.document.diff, diff.revision == detail.revision else {
+      state.reviewEntryHint = "Wait for the current document to finish loading."
+      return .none
+    }
+    let rows = diff.rows
     guard
-      state.isDocumentCurrent,
-      !state.isLoadingDetail,
-      let detail = state.detail,
-      detail.item.state == .open,
-      !detail.item.isDraft,
-      let diff = state.document.diff,
-      diff.revision == detail.revision,
-      let rows = Optional(diff.rows),
       rows.indices.contains(state.diffCursor),
       rows.indices.contains(state.visualStart ?? state.diffCursor),
       let file = detail.file(at: rows[state.diffCursor].path ?? diff.path),
       let end = rows[state.diffCursor].line(on: state.diffSide)?.number,
       let start = rows[state.visualStart ?? state.diffCursor].line(on: state.diffSide)?.number
-    else { return .none }
+    else {
+      state.reviewEntryHint = "Choose a source line to comment on."
+      return .none
+    }
     guard (rows[state.visualStart ?? state.diffCursor].path ?? diff.path) == file.path else {
       state.error = .init(.invalidLine)
       return .none
@@ -2366,6 +2621,8 @@ public struct WorkspaceFeature {
       state.error = .init(.invalidLine)
       return .none
     }
+    state.reviewEntryHint = nil
+    state.error = nil
     state.review = state.drafts[detail.item.id] ?? .init(
       item: detail.item,
       expectedHead: detail.revision?.head,
@@ -2373,6 +2630,7 @@ public struct WorkspaceFeature {
     )
     state.review?.isConfirming = false
     state.review?.stashInlineDraft()
+    state.review?.editingCommentIndex = nil
     state.review?.selectedFile = file
     state.review?.latestHead = detail.revision?.head
     state.review?.latestMergeBase = detail.revision?.mergeBase

@@ -92,7 +92,14 @@ public struct ReviewDiff: Equatable, Codable, Sendable {
   public let cacheIdentity: String?
 
   /// Difftastic owns alignment and token changes. Coordinates are never recovered from ANSI columns.
-  public static func decode(_ data: Data, before: String, after: String, path: String, context: Int = 3) throws -> Self {
+  public static func decode(
+    _ data: Data,
+    before: String,
+    after: String,
+    path: String,
+    context: Int = 3,
+    revealing: SourceLocation? = nil,
+  ) throws -> Self {
     try Task.checkCancellation()
     struct Change: Decodable { let start: Int
       let end: Int
@@ -121,8 +128,30 @@ public struct ReviewDiff: Equatable, Codable, Sendable {
     }
     let left = sourceLines(before)
     let right = sourceLines(after)
-    if file.status == "unchanged" || file.language.lowercased().contains("binary") {
-      return .init(path: path, language: file.language, status: file.status, rows: [])
+    if let revealing {
+      let count = revealing.side == .left ? left.count : right.count
+      guard revealing.path == path, revealing.line > 0, revealing.line <= count else {
+        throw TataraError(.invalidLine, detail: "Search location is absent from the immutable source.")
+      }
+    }
+    if file.language.lowercased().contains("binary") {
+      return .init(
+        path: path,
+        language: file.language,
+        status: file.status,
+        rows: [],
+      )
+    }
+    if file.status == "unchanged" {
+      guard let revealing else { return .init(path: path, language: file.language, status: file.status, rows: []) }
+      guard before == after
+      else { throw TataraError(.invalidResponse, detail: "Unchanged diff disagrees with immutable source.") }
+      let range = max(0, revealing.line - 1 - context) ..< min(right.count, revealing.line + context)
+      let rows = range.map { index in
+        let line = ReviewDiffLine(number: index + 1, spans: [.init(text: right[index])])
+        return ReviewDiffRow(left: line, right: line)
+      }
+      return .init(path: path, language: file.language, status: file.status, rows: rows)
     }
     if file.status == "created" || file.status == "deleted" {
       let created = file.status == "created"
@@ -225,6 +254,15 @@ public struct ReviewDiff: Equatable, Codable, Sendable {
       for row in max(0, index - context) ..< min(aligned.count, index + context + 1) {
         visible.insert(row)
       }
+    }
+    if let revealing {
+      guard
+        revealing.path == path,
+        let index = aligned.firstIndex(where: { $0.line(on: revealing.side)?.number == revealing.line })
+      else {
+        throw TataraError(.invalidLine, detail: "Search location is absent from the immutable diff alignment.")
+      }
+      visible.formUnion(max(0, index - context) ..< min(aligned.count, index + context + 1))
     }
     var result = [ReviewDiffRow]()
     var last = -2

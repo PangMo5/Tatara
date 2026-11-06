@@ -7,6 +7,10 @@ import TermLoom
 
 extension WorkspacePresentation {
   func commentEditor(_ comment: CommentFeature.State, into result: inout TerminalScreen) {
+    if comment.isViewing {
+      commentThread(comment, into: &result)
+      return
+    }
     let rect = geometry.popup
     let x = rect.x + 2
     let width = rect.width - 4
@@ -30,7 +34,7 @@ extension WorkspacePresentation {
       color: palette.text,
       bold: true,
     )
-    let viewer = comment.context.map { "@" + $0.viewer } ?? l10n("Loading…")
+    let viewer = comment.context.map { "@" + $0.viewer } ?? loadingLabel()
     result.text(
       viewer + " · " + (comment.expectedHead.map { String($0.prefix(8)) } ?? ""),
       in: Rect(x: x, y: rect.y + 4, width: width, height: 1),
@@ -55,7 +59,7 @@ extension WorkspacePresentation {
         }
       }
     } else {
-      if let context = comment.context {
+      if let context = comment.context, comment.operation != .reply && comment.operation != .edit {
         let operations: [CommentOperation] = [
           .reply,
           .edit,
@@ -106,7 +110,7 @@ extension WorkspacePresentation {
       }
     }
     let status = comment.error.map { l10n.error($0) }
-      ?? (comment.isSubmitting ? l10n("Submitting…") : comment.isLoading || comment.isPreparing ? l10n("Loading…") : "")
+      ?? (comment.isSubmitting ? l10n("Submitting…") : comment.isLoading || comment.isPreparing ? loadingLabel() : "")
     result.text(
       status,
       in: Rect(x: x, y: rect.bottom - 4, width: width, height: 1),
