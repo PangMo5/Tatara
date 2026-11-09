@@ -391,6 +391,7 @@ struct Smoke {
     try terminal.wait("Write your review")
     terminal.key("\u{1B}")
     try terminal.wait("Normal · Pull requests")
+    try terminal.wait("Ready")
     terminal.key("c")
     try terminal.wait("Choose a source line")
     terminal.key("\u{1B}")
@@ -434,8 +435,8 @@ struct Smoke {
       let start = ProcessInfo.processInfo.systemUptime
       t.key("\u{10}/\(number)\r")
       try t.waitUntil("quick picker burst accepted") {
-        t.line(3).contains("#\(number) ") && t.line(-2).contains("Ready")
-          && !t.line(2 + ((t.rows - 3) - 26) / 2).contains("Switch pull request")
+        t.line(2).contains("#\(number) ") && t.line(-2).contains("Ready")
+          && !t.line(1 + ((t.rows - 3) - 26) / 2).contains("Switch pull request")
       }
       if index >= 4 {
         samples.append((ProcessInfo.processInfo.systemUptime - start) * 1000)
@@ -482,7 +483,7 @@ struct Smoke {
     else { throw SmokeError("Missing Files heading") }
     try expect(filesHeading < t.rows / 3, "Files did not receive the tall review sidebar.")
     t.key("\u{10}")
-    try t.waitUntil("quick picker visible") { t.line(2 + ((t.rows - 3) - 26) / 2).contains("Switch pull request") }
+    try t.waitUntil("quick picker visible") { t.line(1 + ((t.rows - 3) - 26) / 2).contains("Switch pull request") }
     try t.wait("[Normal]")
     for (keys, number) in [("j", 43), ("k", 42), ("G", 44), ("gg", 42), ("\u{6}", 44), ("\u{2}", 42)] {
       t.key(keys)
@@ -496,15 +497,15 @@ struct Smoke {
     t.key("\r")
     try t
       .waitUntil("quick picker accepted") {
-        !t.line(2 + ((t.rows - 3) - 26) / 2).contains("Switch pull request") && t.line(3).contains("#43") && t.line(-2)
+        !t.line(1 + ((t.rows - 3) - 26) / 2).contains("Switch pull request") && t.line(2).contains("#43") && t.line(-2)
           .contains("Ready")
       }
     t.key("\u{10}")
-    try t.waitUntil("quick picker visible") { t.line(2 + ((t.rows - 3) - 26) / 2).contains("Switch pull request") }
+    try t.waitUntil("quick picker visible") { t.line(1 + ((t.rows - 3) - 26) / 2).contains("Switch pull request") }
     t.key("/42\r")
     try t
       .waitUntil("return to first PR") {
-        t.line(3).contains("#42") && !t.line(2 + ((t.rows - 3) - 26) / 2).contains("Switch pull request") && t.line(-2)
+        t.line(2).contains("#42") && !t.line(1 + ((t.rows - 3) - 26) / 2).contains("Switch pull request") && t.line(-2)
           .contains("Ready")
       }
     t.key("gg")
@@ -551,7 +552,7 @@ struct Smoke {
     try t.wait("Confirm")
     try expect(!t.text.contains("**A focused reply**"), "Comment preview did not render Markdown.")
     try t.screenshot("reply-preview")
-    t.key("\u{1B}")
+    try t.click("Close")
     try t.waitUntil("reply dialog closed") { !t.text.contains("@demo") }
     try t.wait("Normal · Diff")
     for key in ["e", "D", "a", "s"] {
@@ -563,7 +564,7 @@ struct Smoke {
       try t.click("Preview")
       try t.wait("Confirm")
       try t.screenshot("comment-action-" + key)
-      t.key("\u{1B}")
+      try t.click("Close")
       try t.waitUntil("comment dialog closed") { !t.text.contains("@demo") }
       try t.wait("Normal · Diff")
     }
@@ -581,7 +582,7 @@ struct Smoke {
     try t.wait("[Normal]")
     t.key("\u{1B}")
     try t.waitUntil("picker closed over visual selection") {
-      !t.line(2 + ((t.rows - 3) - 26) / 2).contains("Switch pull request") && t.line(-2).contains("Visual")
+      !t.line(1 + ((t.rows - 3) - 26) / 2).contains("Switch pull request") && t.line(-2).contains("Visual")
     }
     t.key("\u{1B}")
     try t.wait("Normal · Diff")
