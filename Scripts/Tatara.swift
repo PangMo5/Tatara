@@ -772,6 +772,7 @@ func createRendererPreview(_ labels: [String]) throws {
 }
 
 func lint() throws {
+  // Clean CI and local validation must inspect the same source, independent of cache history.
   try run(
     "swiftformat",
     [
@@ -786,6 +787,8 @@ func lint() throws {
       "Package.swift",
       "ThirdParty/TermLoom/Package.swift",
       "--lint",
+      "--cache",
+      "ignore",
     ],
   )
   try localizations(check: true)
@@ -1030,6 +1033,8 @@ do {
         "Scripts",
         "Package.swift",
         "ThirdParty/TermLoom/Package.swift",
+        "--cache",
+        "ignore",
       ],
     )
 

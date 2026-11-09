@@ -56,4 +56,5 @@ with Swift 6 language mode, SPDX headers and generated/vendor exclusions.
 Guard-like conditional assertions are preserved: SwiftFormat 0.64.5 otherwise
 changes valid parameterized test cases into failing preconditions.
 Run `mise run format` and `mise exec -- swift Scripts/Tatara.swift lint` before
-pushing. Update the upstream configuration and its source commit together.
+pushing. Both commands ignore the formatter cache so local checks match clean CI.
+Update the upstream configuration and its source commit together.
